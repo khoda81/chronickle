@@ -35,7 +35,7 @@ export interface NobitexTradesResponse {
 }
 
 export interface FetchPriceOptions {
-  /** Symbol, e.g. "usdt-rls" (USD/IRT). Defaults to "usdt-rls". */
+  /** Symbol, e.g. "usdt-rls" (USD/IRT). Defaults to "USDTIRT". */
   readonly symbol?: string;
   /** Per-request timeout in ms. */
   readonly timeoutMs?: number;
@@ -48,7 +48,7 @@ export interface FetchPriceOptions {
 export async function fetchTrades(
   opts: FetchPriceOptions = {},
 ): Promise<NobitexTradesResponse> {
-  const symbol = opts.symbol ?? "usdt-rls";
+  const symbol = opts.symbol ?? "USDTIRT";
   const url = `${NOBITEX_TRADES}/${encodeURIComponent(symbol)}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 15_000);

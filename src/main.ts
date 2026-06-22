@@ -92,7 +92,7 @@ function hideTooltip(tooltip: HTMLDivElement): void {
 async function load(timeline: Timeline, status: HTMLDivElement): Promise<void> {
   setStatus(status, "Fetching market data…");
   try {
-    const series = await fetchHeatSeries({ symbol: "usdt-rls", dtMs: 60_000 });
+    const series = await fetchHeatSeries({ symbol: "USDTIRT", dtMs: 60_000 });
     timeline.setSeries(series);
     setStatus(
       status,

@@ -49,7 +49,8 @@ let rampPixels: Uint8ClampedArray | null = null;
 const RAMP_RESOLUTION = 256;
 
 function buildRampLut(): Uint8ClampedArray {
-  if (rampPixels && rampPixels.length === RAMP_RESOLUTION * 4) return rampPixels;
+  if (rampPixels && rampPixels.length === RAMP_RESOLUTION * 4)
+    return rampPixels;
   const lut = new Uint8ClampedArray(RAMP_RESOLUTION * 4);
   const canvas = document.createElement("canvas");
   canvas.width = RAMP_RESOLUTION;
@@ -97,48 +98,63 @@ function drawHeatmap(
   if (series.samples.length === 0) return;
 
   const y = height - HEAT_HEIGHT;
-  const img = ctx.createImageData(width, HEAT_HEIGHT);
-  const data = img.data;
-
-  // For each pixel column, find the corresponding sample and write a vertical
-  // strip of color. We iterate columns (not samples) so zoom-in doesn't leave
-  // gaps and zoom-out doesn't alias away spikes.
   const maxDI = series.maxDI > 0 ? series.maxDI : 1;
   const samples = series.samples;
   const firstT = samples[0]!.t;
   const lastT = samples[samples.length - 1]!.t;
   const dt = series.dt;
 
-  for (let x = 0; x < width; x++) {
-    const t = xToTime(viewport, width, x);
-    if (t < firstT || t > lastT + dt) {
-      // Outside data range: leave transparent (already cleared to bg).
-      continue;
+  // Variables to group identical adjacent colors into a single draw call
+  let currentRampIdx = -1;
+  let runStartX = -1;
+
+  for (let x = 0; x <= width; x++) {
+    let rampIdx = -1;
+
+    // Calculate normal pixels, but skip the out-of-bounds check on the
+    // very last iteration (x === width) to force a final flush.
+    if (x < width) {
+      const t = xToTime(viewport, width, x);
+      if (t >= firstT && t <= lastT + dt) {
+        let idx = Math.round((t - firstT) / dt);
+        idx = Math.max(0, Math.min(idx, samples.length - 1));
+
+        const dI = samples[idx]!.dI;
+        const norm = Math.min(1, dI / maxDI);
+
+        // Don't multiply by 4 yet, keep the base index to compare it easily
+        rampIdx = Math.min(
+          RAMP_RESOLUTION - 1,
+          Math.floor(norm * (RAMP_RESOLUTION - 1)),
+        );
+      }
     }
-    // Nearest-sample index (clamp to valid range).
-    let idx = Math.round((t - firstT) / dt);
-    if (idx < 0) idx = 0;
-    else if (idx >= samples.length) idx = samples.length - 1;
-    const dI = samples[idx]!.dI;
-    const norm = Math.min(1, dI / maxDI);
-    const rampIdx = Math.min(RAMP_RESOLUTION - 1, Math.floor(norm * (RAMP_RESOLUTION - 1))) * 4;
 
-    const r = ramp[rampIdx]!;
-    const g = ramp[rampIdx + 1]!;
-    const b = ramp[rampIdx + 2]!;
+    // If the color index changes (or we hit the end of the canvas), flush the rectangle
+    if (rampIdx !== currentRampIdx) {
+      if (currentRampIdx >= 0 && runStartX !== -1) {
+        const r = ramp[currentRampIdx * 4]!;
+        const g = ramp[currentRampIdx * 4 + 1]!;
+        const b = ramp[currentRampIdx * 4 + 2]!;
 
-    for (let py = 0; py < HEAT_HEIGHT; py++) {
-      // Vertical fade: brightest at the top of the strip.
-      const fade = 1 - (py / HEAT_HEIGHT) * 0.55;
-      const off = (py * width + x) * 4;
-      data[off] = r * fade;
-      data[off + 1] = g * fade;
-      data[off + 2] = b * fade;
-      data[off + 3] = 255;
+        ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+        // Draw the solid vertical strip
+        ctx.fillRect(runStartX, y, x - runStartX, HEAT_HEIGHT);
+      }
+      currentRampIdx = rampIdx;
+      runStartX = x;
     }
   }
 
-  ctx.putImageData(img, 0, y);
+  // --- THE GPU FADE TRICK ---
+  // Apply the vertical fade to the entire bar in one single GPU pass.
+  // (You could even cache this fadeGrad outside the function to be hyper-optimized)
+  const fadeGrad = ctx.createLinearGradient(0, y, 0, y + HEAT_HEIGHT);
+  fadeGrad.addColorStop(0, "rgba(0, 0, 0, 0)"); // Top: 0% dark
+  fadeGrad.addColorStop(1, "rgba(0, 0, 0, 0.55)"); // Bottom: 55% dark
+
+  ctx.fillStyle = fadeGrad;
+  ctx.fillRect(0, y, width, HEAT_HEIGHT);
 }
 
 function drawEvents(
