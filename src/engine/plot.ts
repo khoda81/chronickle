@@ -94,11 +94,6 @@ export class Plot {
 
     const tx = new DataTransform(this.timeRange, R.create(0, cssWidth), R.create(0, cssHeight));
 
-    return new Frame({
-      ctx: this.ctx,
-      tx,
-      dpr: this.dpr,
-      scratch: this.scratch,
-    });
+    return new Frame(this.ctx, tx, this.scratch, this.dpr);
   }
 }

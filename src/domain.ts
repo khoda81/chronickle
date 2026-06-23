@@ -22,13 +22,9 @@ export interface PricePoint {
  * for the renderer.
  */
 export class PriceSeries {
-  static readonly EMPTY: PriceSeries = new PriceSeries([], 0);
+  static readonly EMPTY: PriceSeries = new PriceSeries([]);
 
-  private constructor(
-    readonly observations: readonly PricePoint[],
-    /** Max |log(p[k+1]/p[k])| / (t[k+1]-t[k]) over pairs where dt > 0. */
-    readonly maxRate: number,
-  ) {}
+  private constructor(readonly observations: readonly PricePoint[]) {}
 
   /**
    * Build a PriceSeries from unsorted points. Sorts ascending by `t`
@@ -40,26 +36,13 @@ export class PriceSeries {
 
     const sorted = [...points].sort((a, b) => a.t - b.t);
 
-    let maxRate = 0;
-    for (let i = 0; i + 1 < sorted.length; i++) {
-      const a = sorted[i]!;
-      const b = sorted[i + 1]!;
-      if (!Number.isFinite(a.price) || a.price <= 0) {
-        throw new Error(`Invalid price at t=${a.t}: ${a.price}`);
-      }
-      const dt = b.t - a.t;
-      if (dt > 0) {
-        const rate = Math.abs(Math.log(b.price / a.price)) / dt;
-        if (rate > maxRate) maxRate = rate;
-      }
-    }
     // Validate last point's price (loop above checks all but the last).
     const last = sorted[sorted.length - 1]!;
     if (!Number.isFinite(last.price) || last.price <= 0) {
       throw new Error(`Invalid price at t=${last.t}: ${last.price}`);
     }
 
-    return new PriceSeries(sorted, maxRate);
+    return new PriceSeries(sorted);
   }
 }
 

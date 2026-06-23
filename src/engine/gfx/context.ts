@@ -30,29 +30,19 @@ import { Heatmap } from "./heatmap.ts";
 import { Events } from "./events.ts";
 import { Axis } from "./axis.ts";
 
-export interface FrameOptions {
-  readonly ctx: CanvasRenderingContext2D;
-  readonly tx: DataTransform;
-  readonly dpr: number;
-  /** Scratch buffer for per-pixel price evaluation (owned by Plot). */
-  readonly scratch: Float64Array;
-}
-
 export class Frame implements Disposable {
-  readonly raw: CanvasRenderingContext2D;
-  readonly tx: DataTransform;
-  readonly scratch: Float64Array;
-
   private saveDepth = 0;
 
-  constructor(opts: FrameOptions) {
-    this.raw = opts.ctx;
-    this.tx = opts.tx;
-    this.scratch = opts.scratch;
+  constructor(
+    readonly ctx: CanvasRenderingContext2D,
+    readonly tx: DataTransform,
+    readonly scratch: Float64Array,
+    readonly dpr: number,
+  ) {
     // Establish a DPR-scaled identity for this frame. Any prior caller state
     // is preserved by the matching restore() in dispose().
-    this.raw.save();
-    this.raw.setTransform(opts.dpr, 0, 0, opts.dpr, 0, 0);
+    this.ctx.save();
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.saveDepth = 1;
   }
 
@@ -70,7 +60,7 @@ export class Frame implements Disposable {
 
   /** Push ctx state. Must be matched by `pop()`. */
   push(): void {
-    this.raw.save();
+    this.ctx.save();
     this.saveDepth++;
   }
 
@@ -79,23 +69,23 @@ export class Frame implements Disposable {
     if (this.saveDepth <= 1) {
       throw new Error("Frame.pop() without matching push()");
     }
-    this.raw.restore();
+    this.ctx.restore();
     this.saveDepth--;
   }
 
   // --- L1: pixel primitives ----------------------------------------------
 
   fillRectPx(x: number, y: number, w: number, h: number, fill: string): void {
-    this.raw.fillStyle = fill;
-    this.raw.fillRect(x, y, w, h);
+    this.ctx.fillStyle = fill;
+    this.ctx.fillRect(x, y, w, h);
   }
 
   clearRectPx(x: number, y: number, w: number, h: number): void {
-    this.raw.clearRect(x, y, w, h);
+    this.ctx.clearRect(x, y, w, h);
   }
 
   dot(x: number, y: number, r: number, fill: string, stroke?: string, strokeWidth = 1): void {
-    const c = this.raw;
+    const c = this.ctx;
     c.beginPath();
     c.arc(x, y, r, 0, Math.PI * 2);
     c.fillStyle = fill;
@@ -108,7 +98,7 @@ export class Frame implements Disposable {
   }
 
   vline(x: number, y0: number, y1: number, stroke: string, width = 1): void {
-    const c = this.raw;
+    const c = this.ctx;
     c.strokeStyle = stroke;
     c.lineWidth = width;
     c.beginPath();
@@ -126,7 +116,7 @@ export class Frame implements Disposable {
     align: CanvasTextAlign = "left",
     baseline: CanvasTextBaseline = "alphabetic",
   ): void {
-    const c = this.raw;
+    const c = this.ctx;
     c.font = font;
     c.fillStyle = fill;
     c.textAlign = align;
@@ -194,7 +184,7 @@ export class Frame implements Disposable {
     if (this.saveDepth !== 1) {
       throw new Error(`Frame disposed with unbalanced save stack: depth ${this.saveDepth}`);
     }
-    this.raw.restore();
+    this.ctx.restore();
     this.saveDepth = 0;
   }
 }

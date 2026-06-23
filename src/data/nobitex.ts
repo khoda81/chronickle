@@ -58,7 +58,7 @@ export interface FetchOhlcOptions {
   /** TradingView resolution: "1","5","15","60","240","D","W". */
   readonly resolution?: string;
   /** Inclusive start, epoch ms. */
-  readonly fromMs: number;
+  readonly fromMs?: number;
   /** Inclusive end, epoch ms. */
   readonly toMs: number;
   readonly timeoutMs?: number;
@@ -108,39 +108,41 @@ export async function fetchPriceSeries(opts: FetchPriceOptions = {}): Promise<Pr
   const res = await fetchTrades(opts);
   return tradesToPriceSeries(res.trades);
 }
-
-/**
- * Fetch OHLC candles from Nobitex's UDF history endpoint.
- *
- * Only the `open` of each candle is used: the close of candle k is the open
- * of candle k+1, so `h`/`l`/`c`/`v` are discarded. Times are converted from
- * epoch seconds to epoch milliseconds on ingestion.
- *
- * @throws on non-OK HTTP status, non-"ok" payload status, or malformed JSON.
- */
 export async function fetchOhlc(opts: FetchOhlcOptions): Promise<NobitexOhlcResponse> {
   const symbol = opts.symbol ?? "USDTIRT";
   const resolution = opts.resolution ?? "D";
-  const from = Math.floor(opts.fromMs / 1000);
   const to = Math.floor(opts.toMs / 1000);
-  if (!(from < to)) {
-    throw new Error(`Invalid OHLC window: from ${from} to ${to}`);
+
+  // 1. Build query parameters using URLSearchParams
+  const params = new URLSearchParams({
+    symbol,
+    resolution,
+    to: to.toString(),
+  });
+
+  // 2. Safely handle the optional fromMs
+  if (opts.fromMs !== undefined) {
+    const from = Math.floor(opts.fromMs / 1000);
+    params.set("from", from.toString());
   }
-  const url =
-    `${NOBITEX_OHLC}?symbol=${encodeURIComponent(symbol)}` +
-    `&resolution=${encodeURIComponent(resolution)}` +
-    `&from=${from}&to=${to}`;
+
+  // 3. Attach the neatly formatted params to your base endpoint
+  const url = `${NOBITEX_OHLC}?${params.toString()}`;
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 15_000);
+
   try {
     const res = await fetch(url, { signal: controller.signal });
     if (!res.ok) {
       throw new Error(`Nobitex OHLC request failed: ${res.status} ${res.statusText}`);
     }
+
     const json = (await res.json()) as NobitexOhlcResponse;
     if (json.s !== "ok") {
       throw new Error(`Nobitex OHLC returned status: ${json.s}`);
     }
+
     return json;
   } finally {
     clearTimeout(timer);

@@ -16,6 +16,9 @@ export interface RssFeed {
 export const DEFAULT_FEEDS: readonly RssFeed[] = [
   { source: "Reuters", url: "https://www.reutersagency.com/feed/?best-top-news&post_type=best" },
   { source: "Al Jazeera", url: "https://www.aljazeera.com/xml/rss/all.xml" },
+  { source: "BBC World", url: "http://feeds.bbci.co.uk/news/world/rss.xml" },
+  { source: "Yahoo World", url: "https://news.yahoo.com/rss/world" },
+  { source: "NYT World", url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml" },
 ];
 
 export interface FetchEventsOptions {
@@ -27,6 +30,7 @@ export interface FetchEventsOptions {
 }
 
 const DEFAULT_PROXY = "https://corsproxy.io/?url=";
+// const DEFAULT_PROXY = "https://api.allorigins.win/raw?url=";
 
 /**
  * Fetch and parse a single RSS feed into NewsEvents.
@@ -38,14 +42,27 @@ export async function fetchFeed(
   timeoutMs: number,
 ): Promise<readonly NewsEvent[]> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(
+    () =>
+      controller.abort(
+        new DOMException(`${feed.source} timed out after ${timeoutMs}ms`, "TimeoutError"),
+      ),
+    timeoutMs,
+  );
+
   try {
     const url = `${proxy}${encodeURIComponent(feed.url)}`;
     const res = await fetch(url, { signal: controller.signal });
     if (!res.ok) {
       throw new Error(`Feed ${feed.source} failed: ${res.status}`);
     }
+
     const xml = await res.text();
+
+    // DEBUG: Look at the first 100 characters to ensure it's actually XML (<?xml ...)
+    // You can remove this once everything is working.
+    console.debug(`Raw response from ${feed.source}:`, xml.substring(0, 100));
+
     return parseRssXml(xml, feed.source);
   } finally {
     clearTimeout(timer);
@@ -58,25 +75,49 @@ export async function fetchFeed(
  */
 export function parseRssXml(xml: string, source: string): readonly NewsEvent[] {
   const doc = new DOMParser().parseFromString(xml, "application/xml");
+
   const parseError = doc.querySelector("parsererror");
   if (parseError) {
     throw new Error(`Malformed XML from ${source}: ${parseError.textContent ?? ""}`);
   }
 
-  const items = doc.querySelectorAll("item");
+  // 1. Detect Cloudflare / Anti-bot HTML blocks
+  if (doc.documentElement.nodeName.toLowerCase() === "html") {
+    throw new Error(`Feed ${source} blocked the proxy (Returned an HTML page instead of XML).`);
+  }
+
+  // 2. Support both RSS (<item>) and Atom (<entry>) feed structures
+  const items = doc.querySelectorAll("item, entry");
+  if (items.length === 0) {
+    throw new Error(`No news items found in ${source}.`);
+  }
+
   const events: NewsEvent[] = [];
   items.forEach((item) => {
+    // RSS uses <title>, Atom uses <title>
     const title = item.querySelector("title")?.textContent?.trim();
-    const link = item.querySelector("link")?.textContent?.trim();
-    const pubDate = item.querySelector("pubDate")?.textContent?.trim();
+
+    // RSS uses <link>URL</link>, Atom often uses <link href="URL"/>
+    let link = item.querySelector("link")?.textContent?.trim();
+    if (!link) {
+      link = item.querySelector("link")?.getAttribute("href")?.trim();
+    }
+
+    // RSS uses <pubDate>, Atom uses <updated> or <published>
+    const pubDate =
+      item.querySelector("pubDate")?.textContent?.trim() ??
+      item.querySelector("updated")?.textContent?.trim() ??
+      item.querySelector("published")?.textContent?.trim();
+
+    // 3. Graceful degradation: skip a malformed item instead of killing the whole feed
     if (!title || !link || !pubDate) {
-      throw new Error(`Incomplete RSS item in ${source}: title/link/pubDate missing`);
+      return;
     }
+
     const t = Date.parse(pubDate);
-    if (!Number.isFinite(t)) {
-      throw new Error(`Unparseable pubDate in ${source}: ${pubDate}`);
+    if (Number.isFinite(t)) {
+      events.push({ t, title, link, source });
     }
-    events.push({ t, title, link, source });
   });
 
   events.sort((a, b) => a.t - b.t);
@@ -92,7 +133,22 @@ export async function fetchEventSet(opts: FetchEventsOptions = {}): Promise<Even
   const proxy = opts.proxy ?? DEFAULT_PROXY;
   const timeoutMs = opts.timeoutMs ?? 15_000;
 
-  const results = await Promise.all(feeds.map((f) => fetchFeed(f, proxy, timeoutMs)));
-  const merged = results.flat().sort((a, b) => a.t - b.t);
-  return { events: merged };
+  // Promise.allSettled waits for ALL feeds to finish (success or fail)
+  // instead of short-circuiting on the first error.
+  const results = await Promise.allSettled(feeds.map((f) => fetchFeed(f, proxy, timeoutMs)));
+
+  const events: NewsEvent[] = [];
+
+  for (const result of results) {
+    if (result.status === "fulfilled") {
+      // Feed loaded successfully, add its events
+      events.push(...result.value);
+    } else {
+      // Feed failed. Log it for debugging, but don't crash the app!
+      console.warn("A feed failed to load:", result.reason);
+    }
+  }
+
+  events.sort((a, b) => a.t - b.t);
+  return { events };
 }

@@ -56,7 +56,10 @@ interface TimelineState {
   series: PriceSeries;
   events: EventSet;
   timeRange: Range;
+  // TODO: Maybe this should be in the transform state instead?
+  priceScale: number;
   hovered: number | null;
+  // TODO: Instead of a dirty flag, just request a draw using requestAnimationFrame
   dirty: boolean;
 }
 
@@ -65,7 +68,9 @@ const EMPTY_EVENTS: EventSet = { events: [] };
 /** CSS line height used to normalize wheel `deltaMode: 1` (lines). */
 const WHEEL_LINE_HEIGHT = 16;
 /** Zoom sensitivity per normalized pixel of wheel delta. */
-const WHEEL_SENSITIVITY = 0.0015;
+const WHEEL_SENSITIVITY = 0.003;
+/** Time scroll sensitivity per normalized pixel of wheel delta. */
+const TIMESCROLL_SENSITIVITY = 3;
 
 export class Timeline {
   private readonly canvas: HTMLCanvasElement;
@@ -89,6 +94,7 @@ export class Timeline {
       series: PriceSeries.EMPTY,
       events: EMPTY_EVENTS,
       timeRange: opts.initialTimeRange,
+      priceScale: 19,
       hovered: null,
       dirty: true,
     };
@@ -165,15 +171,15 @@ export class Timeline {
     this.state = { ...this.state, dirty: false };
 
     using frame = this.plot.beginFrame();
-    const { series, events, hovered } = this.state;
+    const { series, events, hovered, priceScale } = this.state;
 
     // Background.
     frame.fillRectPx(0, 0, frame.width, frame.height, "#05070d");
 
     // Layers.
     const heat = frame.heatmap();
-    heat.drawBoxStack(series);
-    heat.drawFadeOverlay();
+    heat.drawBoxStack(series, priceScale);
+    // heat.drawFadeOverlay();
     frame.events().drawRow(events, hovered);
     frame.axis().drawTimeAxis();
   };
@@ -211,9 +217,23 @@ export class Timeline {
 
     // Normalize deltaY to pixels across deltaModes.
     let dy = e.deltaY;
-    if (e.deltaMode === 1) dy *= WHEEL_LINE_HEIGHT;
-    else if (e.deltaMode === 2) dy *= this.plot.cssHeight;
+    if (e.deltaMode === WheelEvent.DOM_DELTA_LINE) dy *= WHEEL_LINE_HEIGHT;
+    else if (e.deltaMode === WheelEvent.DOM_DELTA_PAGE) dy *= this.plot.cssHeight;
+    else if (e.deltaMode === WheelEvent.DOM_DELTA_PIXEL) dy *= 1;
 
+    // Apply horizontal scrolling
+    if (width > 0) {
+      const span = this.state.timeRange.max - this.state.timeRange.min;
+      const dt = (TIMESCROLL_SENSITIVITY * (span * e.deltaX)) / width;
+      this.setTimeRange(Range.pan(this.state.timeRange, dt));
+      this.state.dirty = true;
+    }
+
+    if (e.shiftKey) {
+      this.state.priceScale -= dy * WHEEL_SENSITIVITY;
+      this.state.dirty = true;
+      return;
+    }
     const tx = new DataTransform(
       this.state.timeRange,
       Range.create(0, width),

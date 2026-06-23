@@ -142,3 +142,20 @@ canvas.timeline:active {
 .status.error {
   color: var(--error);
 }
+
+select {
+  option {
+    background: var(--bg);
+    color: var(--accent)
+
+    :hover {
+      background: var(--accent);
+      color: var(--fg);
+    }
+
+    :active {
+      background: var(--accent);
+      color: var(--bg);
+    }
+  }
+}

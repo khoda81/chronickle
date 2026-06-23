@@ -8,11 +8,10 @@
  * mirrored about the center, and the midpoint has chroma 0 so the hue
  * discontinuity there is invisible. Neither pole is "bad" or "good".
  *
- * Interpolation happens in the **OKLCH** perceptual color space (linear in L,
- * C, and hue-along-shorter-arc), which gives visually uniform steps. The
- * browser performs OKLCH → sRGB conversion per LUT entry by drawing a 1px
- * rect with an `oklch()` fill and reading back the RGBA — no manual
- * color-space matrix, and it tracks the user's display gamut automatically.
+ * Palette stops are defined in OKLCH for intuitive color design. At build time
+ * each stop is converted to **linear sRGB** via the standard OKLab matrix;
+ * LUT entries are produced by piecewise-linear blending in linear-light RGB,
+ * then gamma-encoded to display sRGB. No canvas or browser color APIs are used.
  */
 
 /**
@@ -44,6 +43,7 @@ export interface RampPalette {
  *  - "red-green":   Red (~25°) vs green (~145°). Familiar but **not**
  *                   colorblind-safe; included for comparison only.
  */
+// TODO: This should be a record or a map
 export const PALETTES: readonly RampPalette[] = [
   {
     name: "blue-orange",
@@ -51,6 +51,13 @@ export const PALETTES: readonly RampPalette[] = [
       [0.0, 0.7, 0.16, 250],
       [0.5, 0.22, 0.0, 250],
       [1.0, 0.7, 0.16, 30],
+    ],
+  },
+  {
+    name: "grayscale",
+    stops: [
+      [0.0, 0.81, 0, 250],
+      [1.0, 0.0, 0, 230],
     ],
   },
   {
@@ -112,11 +119,11 @@ export function rampPaletteName(): string {
 }
 
 /**
- * Return the 256-entry RGBA ramp (RAMP_RESOLUTION * 4 bytes), interpolated
- * in OKLCH and converted to sRGB by the browser. Built once per palette and
- * cached.
+ * Return the 256-entry RGBA ramp (RAMP_RESOLUTION * 4 bytes). Stops are
+ * converted from OKLCH to linear sRGB, interpolated in linear-light RGB, then
+ * gamma-encoded to display sRGB. Built once per palette and cached.
  *
- * @throws if stops are malformed or a 2D context cannot be obtained.
+ * @throws if stops are malformed.
  */
 export function rampLut(): Uint8ClampedArray {
   if (lut !== null) return lut;
@@ -124,29 +131,58 @@ export function rampLut(): Uint8ClampedArray {
   return lut;
 }
 
+/**
+ * OKLCH → linear sRGB via the standard OKLab matrix.
+ * May return out-of-gamut components (< 0 or > 1); clamping is deferred to
+ * `linearToSrgb` so interpolation stays correct across the gamut boundary.
+ */
+function oklchToLinearRgb(L: number, C: number, H: number): readonly [number, number, number] {
+  const hr = (H * Math.PI) / 180;
+  const a = C * Math.cos(hr);
+  const b = C * Math.sin(hr);
+  // OKLab → LMS (cube-root compressed cone activations)
+  const l_ = L + 0.3963377774 * a + 0.2158037573 * b;
+  const m_ = L - 0.1055613458 * a - 0.0638541728 * b;
+  const s_ = L - 0.0894841775 * a - 1.291485548 * b;
+  const l = l_ * l_ * l_;
+  const m = m_ * m_ * m_;
+  const s = s_ * s_ * s_;
+  return [
+    +4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+    -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
+  ];
+}
+
+/**
+ * Linear-light sRGB → display-encoded sRGB (IEC 61966-2-1).
+ * Clamps out-of-gamut inputs to [0, 1] before encoding.
+ */
+function linearToSrgb(x: number): number {
+  const c = x < 0 ? 0 : x > 1 ? 1 : x;
+  return c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+}
+
 function buildLut(palette: RampPalette): Uint8ClampedArray {
   validateStops(palette);
 
-  const buf = new Uint8ClampedArray(RAMP_RESOLUTION * 4);
-  const canvas = document.createElement("canvas");
-  canvas.width = RAMP_RESOLUTION;
-  canvas.height = 1;
-  const ctx = canvas.getContext("2d");
-  if (ctx === null) {
-    throw new Error("Unable to acquire 2D context for ramp LUT");
-  }
+  // Pre-convert every OKLCH stop to linear sRGB so interpolation is a plain lerp.
+  const linStops: Array<readonly [number, number, number, number]> = palette.stops.map(
+    ([pos, L, C, H]) => {
+      const [r, g, b] = oklchToLinearRgb(L, C, H);
+      return [pos, r, g, b] as const;
+    },
+  );
 
-  const stops = palette.stops;
+  const buf = new Uint8ClampedArray(RAMP_RESOLUTION * 4);
   for (let i = 0; i < RAMP_RESOLUTION; i++) {
     const t = i / (RAMP_RESOLUTION - 1);
-    const [l, c, h] = sampleStops(stops, t);
-    // Let the browser convert OKLCH → sRGB in display gamut.
-    ctx.fillStyle = `oklch(${l} ${c} ${h})`;
-    ctx.fillRect(i, 0, 1, 1);
+    const [r, g, b] = sampleLinearRgb(linStops, t);
+    buf[i * 4 + 0] = Math.round(linearToSrgb(r) * 255);
+    buf[i * 4 + 1] = Math.round(linearToSrgb(g) * 255);
+    buf[i * 4 + 2] = Math.round(linearToSrgb(b) * 255);
+    buf[i * 4 + 3] = 255;
   }
-
-  const data = ctx.getImageData(0, 0, RAMP_RESOLUTION, 1).data;
-  buf.set(data);
   return buf;
 }
 
@@ -170,11 +206,11 @@ function validateStops(palette: RampPalette): void {
 }
 
 /**
- * Piecewise-linear interpolation in OKLCH. Hue is interpolated along the
- * shorter arc between adjacent stops; since the neutral midpoint has C=0,
- * any hue discontinuity there is imperceptible.
+ * Piecewise-linear interpolation in linear sRGB. Each entry in `stops` is
+ * `[position, r_linear, g_linear, b_linear]`; the three channel components
+ * are blended independently with no hue-arc correction.
  */
-function sampleStops(
+function sampleLinearRgb(
   stops: readonly (readonly [number, number, number, number])[],
   t: number,
 ): readonly [number, number, number] {
@@ -188,21 +224,7 @@ function sampleStops(
   const a = stops[i]!;
   const b = stops[i + 1]!;
   const f = (t - a[0]) / (b[0] - a[0]);
-  const l = a[1] + (b[1] - a[1]) * f;
-  const c = a[2] + (b[2] - a[2]) * f;
-  const h = lerpHue(a[3], b[3], f);
-  return [l, c, h];
-}
-
-/** Interpolate hue along the shorter arc, result in [0, 360). */
-function lerpHue(h0: number, h1: number, f: number): number {
-  let d = h1 - h0;
-  if (d > 180) d -= 360;
-  else if (d < -180) d += 360;
-  let h = h0 + d * f;
-  if (h < 0) h += 360;
-  else if (h >= 360) h -= 360;
-  return h;
+  return [a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f, a[3] + (b[3] - a[3]) * f];
 }
 
 /**

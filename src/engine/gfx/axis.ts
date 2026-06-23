@@ -39,15 +39,6 @@ function niceStep(rough: number): number {
   return NICE_STEPS[NICE_STEPS.length - 1]!;
 }
 
-function formatTime(t: number): string {
-  const d = new Date(t);
-  const hh = String(d.getUTCHours()).padStart(2, "0");
-  const mm = String(d.getUTCMinutes()).padStart(2, "0");
-  const dd = String(d.getUTCDate()).padStart(2, "0");
-  const mo = String(d.getUTCMonth() + 1).padStart(2, "0");
-  return `${mo}-${dd} ${hh}:${mm}`;
-}
-
 export interface AxisLayer {
   drawTimeAxis(): void;
 }
@@ -67,14 +58,29 @@ class AxisImpl implements AxisLayer {
     const height = tx.yDomain.max - tx.yDomain.min;
     const y = axisY(height);
     const { min: tLo, max: tHi } = tx.timeDomain;
-
     const span = tHi - tLo;
     const step = niceStep(span / TARGET_TICKS);
-    const firstTick = Math.ceil(tLo / step) * step;
+
+    // Offset at the start of the visible window (minutes, negated → ms).
+    // Using tLo as the reference point is fine for spans shorter than a DST
+    // transition (see note below).
+    const offsetMs = -new Date(tLo).getTimezoneOffset() * 60_000;
+
+    // Align to local-time epoch instead of UTC epoch.
+    const firstTick = Math.ceil((tLo + offsetMs) / step) * step - offsetMs;
 
     for (let t = firstTick; t <= tHi; t += step) {
       frame.vlineAt(t, y, y + 4, TICK_COLOR);
-      frame.textAt(formatTime(t), t, y - 6, LABEL_FONT, LABEL_COLOR);
+      const formattedTime = Intl.DateTimeFormat("en-US", {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      })
+        .format(t)
+        .replace(",", "");
+      frame.textAt(formattedTime, t, y - 6, LABEL_FONT, LABEL_COLOR);
     }
   }
 }

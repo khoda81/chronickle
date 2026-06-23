@@ -78,7 +78,7 @@ function showTooltip(
     t: number;
   },
 ): void {
-  const date = new Date(data.t).toISOString().replace("T", " ").slice(0, 19);
+  const date = new Date(data.t).toLocaleString().replace("T", " ").slice(0, 19);
   tooltip.innerHTML = "";
   const src = el<HTMLSpanElement>("span", "tooltip-source");
   src.textContent = `${data.source} · ${date}`;
@@ -98,34 +98,31 @@ function hideTooltip(tooltip: HTMLDivElement): void {
 }
 
 async function load(timeline: Timeline, status: HTMLDivElement): Promise<void> {
+  newFunction(status, timeline);
+  timeline.setEvents(await fetchEventSet());
+}
+
+async function newFunction(status: HTMLDivElement, timeline: Timeline) {
   setStatus(status, "Fetching market data…");
-  try {
-    // OHLC gives real history (trades endpoint only returns recent trades).
-    // We use only the `open` of each candle: close[k] == open[k+1].
-    const now = Date.now();
-    const series = await fetchOhlcPriceSeries({
-      symbol: "USDTIRT",
-      resolution: "1",
-      fromMs: now - 180 * DAY_MS,
-      toMs: now,
-    });
-    timeline.setSeries(series);
-    const obs = series.observations;
-    setStatus(status, `Loaded ${obs.length} candles. Fetching events…`);
-    try {
-      const events = await fetchEventSet();
-      timeline.setEvents(events);
-      setStatus(status, `Loaded ${obs.length} trades · ${events.events.length} events.`);
-    } catch (e) {
-      setStatus(status, `Events failed: ${e instanceof Error ? e.message : String(e)}`, "error");
-    }
-    // Fit time range to the union of data ranges.
-    const tMin = obs[0]?.t ?? now - DAY_MS;
-    const tMax = obs[obs.length - 1]?.t ?? now;
-    timeline.setTimeRange(Range.fit(tMin, tMax));
-  } catch (e) {
-    setStatus(status, `Market data failed: ${e instanceof Error ? e.message : String(e)}`, "error");
-  }
+  // OHLC gives real history (trades endpoint only returns recent trades).
+  // We use only the `open` of each candle: close[k] == open[k+1].
+  const now = Date.now();
+  const series = await fetchOhlcPriceSeries({
+    symbol: "USDTIRT",
+    resolution: "5",
+    // fromMs: now - 3 * 60 * 1000,
+    toMs: now,
+  });
+  timeline.setSeries(series);
+  const obs = series.observations;
+  setStatus(status, `Loaded ${obs.length} candles. Fetching events…`);
+
+  // Fit time range to the union of data ranges.
+  const tMin = obs[0]?.t ?? now - DAY_MS;
+  const tMax = obs[obs.length - 1]?.t ?? now;
+
+  timeline.setTimeRange(Range.fit(tMin, tMax));
+  setStatus(status, `Loaded ${obs.length} trades`);
 }
 
 function main(): void {
