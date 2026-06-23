@@ -8,7 +8,7 @@
 
 import { fetchEventSet, fetchPriceSeries } from "./data/index.ts";
 import { Timeline } from "./engine/timeline.ts";
-import { Viewport } from "./engine/viewport.ts";
+import { Range } from "./engine/range.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -110,10 +110,10 @@ async function load(timeline: Timeline, status: HTMLDivElement): Promise<void> {
         "error",
       );
     }
-    // Fit viewport to the union of data ranges.
+    // Fit time range to the union of data ranges.
     const tMin = obs[0]?.t ?? Date.now() - DAY_MS;
     const tMax = obs[obs.length - 1]?.t ?? Date.now();
-    timeline.setViewport(Viewport.fit(tMin, tMax));
+    timeline.setTimeRange(Range.fit(tMin, tMax));
   } catch (e) {
     setStatus(
       status,
@@ -126,13 +126,13 @@ async function load(timeline: Timeline, status: HTMLDivElement): Promise<void> {
 function main(): void {
   const { canvas, tooltip, status, reload } = buildApp();
 
-  // Initial viewport: last 24h. Replaced after data loads.
+  // Initial time range: last 24h. Replaced after data loads.
   const now = Date.now();
-  const initial = Viewport.fit(now - DAY_MS, now);
+  const initial = Range.fit(now - DAY_MS, now);
 
   const timeline = new Timeline({
     canvas,
-    initialViewport: initial,
+    initialTimeRange: initial,
     callbacks: {
       onHover: (event) => {
         if (event === null) {

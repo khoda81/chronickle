@@ -94,7 +94,7 @@ export class Plot {
       this.scratch = new Float64Array(needed);
     }
 
-    const tx = DataTransform.create(
+    const tx = new DataTransform(
       this.timeRange,
       R.create(0, cssWidth),
       R.create(0, cssHeight),

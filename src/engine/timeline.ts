@@ -5,18 +5,28 @@
  * handlers (pan via drag, zoom via wheel, hover/click on event nodes).
  *
  * State model (minimal mutation):
- *  - `viewport`: the only mutable field, replaced wholesale on pan/zoom.
+ *  - `timeRange`: the only mutable view state, replaced wholesale on pan/zoom.
  *  - `hovered`: event index under cursor, or null.
  *  - `series` / `events`: immutable data references, swapped by the app.
  *
  * The render loop runs continuously but only redraws when `dirty` is set,
- * avoiding wasted work when idle. Panning sets dirty every frame.
+ * avoiding wasted work when idle. Panning sets dirty every frame. Drawing is
+ * driven through the `Plot`'s disposable `Frame` (immediate mode).
+ *
+ * DPR: the canvas backing store is resized to `cssSize * dpr` on resize, but
+ * the DPR-scaled ctx transform is applied per-frame by `Frame` (not here), so
+ * it can never be lost across nested save/restore.
+ *
+ * Wheel: `deltaY` is normalized to pixels across `deltaMode`s (pixels, lines,
+ * pages) before being mapped to a zoom factor. Lines use the CSS line height.
  */
 
 import { PriceSeries } from "../domain.ts";
-import type { EventSet } from "../domain.ts";
-import { render, hitTestEvent, eventAt } from "./renderer.ts";
-import { Viewport, xToTime } from "./viewport.ts";
+import type { EventSet, NewsEvent } from "../domain.ts";
+import { Range } from "./range.ts";
+import { DataTransform } from "./transform.ts";
+import { Plot } from "./plot.ts";
+import { hitTestEvent } from "./hittest.ts";
 
 export interface HoverInfo {
   readonly index: number;
@@ -37,23 +47,28 @@ export interface TimelineCallbacks {
 
 export interface TimelineOptions {
   readonly canvas: HTMLCanvasElement;
-  readonly initialViewport: Viewport;
+  readonly initialTimeRange: Range;
   readonly callbacks?: TimelineCallbacks;
 }
 
 interface TimelineState {
   series: PriceSeries;
   events: EventSet;
-  viewport: Viewport;
+  timeRange: Range;
   hovered: number | null;
   dirty: boolean;
 }
 
 const EMPTY_EVENTS: EventSet = { events: [] };
 
+/** CSS line height used to normalize wheel `deltaMode: 1` (lines). */
+const WHEEL_LINE_HEIGHT = 16;
+/** Zoom sensitivity per normalized pixel of wheel delta. */
+const WHEEL_SENSITIVITY = 0.0015;
+
 export class Timeline {
   private readonly canvas: HTMLCanvasElement;
-  private readonly ctx: CanvasRenderingContext2D;
+  private readonly plot: Plot;
   private readonly callbacks: TimelineCallbacks;
   private state: TimelineState;
   private rafId: number | null = null;
@@ -61,18 +76,18 @@ export class Timeline {
   // Pan scratch (no allocation in handlers).
   private dragging = false;
   private lastX = 0;
-  private dpr = 1;
 
   constructor(opts: TimelineOptions) {
     this.canvas = opts.canvas;
-    const ctx = this.canvas.getContext("2d", { alpha: false });
-    if (ctx === null) throw new Error("Canvas 2D context unavailable");
-    this.ctx = ctx;
+    this.plot = new Plot({
+      canvas: opts.canvas,
+      initialTimeRange: opts.initialTimeRange,
+    });
     this.callbacks = opts.callbacks ?? {};
     this.state = {
       series: PriceSeries.EMPTY,
       events: EMPTY_EVENTS,
-      viewport: opts.initialViewport,
+      timeRange: opts.initialTimeRange,
       hovered: null,
       dirty: true,
     };
@@ -92,9 +107,10 @@ export class Timeline {
     this.state = { ...this.state, events, hovered: null, dirty: true };
   }
 
-  /** Replace the viewport (e.g. fit-to-data). Triggers a redraw. */
-  setViewport(viewport: Viewport): void {
-    this.state = { ...this.state, viewport, dirty: true };
+  /** Replace the visible time range (e.g. fit-to-data). Triggers a redraw. */
+  setTimeRange(r: Range): void {
+    this.state = { ...this.state, timeRange: r, dirty: true };
+    this.plot.setTimeRange(r);
   }
 
   /** Stop the render loop and detach listeners. */
@@ -127,34 +143,32 @@ export class Timeline {
 
   private resize(): void {
     const dpr = window.devicePixelRatio || 1;
-    this.dpr = dpr;
+    this.plot.setDpr(dpr);
     const rect = this.canvas.getBoundingClientRect();
     this.canvas.width = Math.max(1, Math.floor(rect.width * dpr));
     this.canvas.height = Math.max(1, Math.floor(rect.height * dpr));
-    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // Note: no setTransform here — the Frame applies the DPR transform per
+    // draw, so it can never be lost across save/restore.
     this.state = { ...this.state, dirty: true };
-  }
-
-  private get cssWidth(): number {
-    return this.canvas.width / this.dpr;
-  }
-  private get cssHeight(): number {
-    return this.canvas.height / this.dpr;
   }
 
   private loop = (): void => {
     this.rafId = requestAnimationFrame(this.loop);
     if (!this.state.dirty) return;
     this.state = { ...this.state, dirty: false };
-    render({
-      ctx: this.ctx,
-      width: this.cssWidth,
-      height: this.cssHeight,
-      viewport: this.state.viewport,
-      series: this.state.series,
-      events: this.state.events,
-      hovered: this.state.hovered,
-    });
+
+    using frame = this.plot.beginFrame();
+    const { series, events, hovered } = this.state;
+
+    // Background.
+    frame.fillRectPx(0, 0, frame.width, frame.height, "#05070d");
+
+    // Layers.
+    const heat = frame.heatmap();
+    heat.drawBoxStack(series);
+    heat.drawFadeOverlay();
+    frame.events().drawRow(events, hovered);
+    frame.axis().drawTimeAxis();
   };
 
   private onResize = (): void => this.resize();
@@ -169,15 +183,11 @@ export class Timeline {
     if (!this.dragging) return;
     const dx = e.clientX - this.lastX;
     this.lastX = e.clientX;
-    const width = this.cssWidth;
+    const width = this.plot.cssWidth;
     if (width <= 0) return;
-    const dtMs =
-      (dx / width) * (this.state.viewport.tEnd - this.state.viewport.tStart);
-    this.state = {
-      ...this.state,
-      viewport: Viewport.pan(this.state.viewport, -dtMs),
-      dirty: true,
-    };
+    const span = this.state.timeRange.max - this.state.timeRange.min;
+    const dtMs = (dx / width) * span;
+    this.setTimeRange(Range.pan(this.state.timeRange, -dtMs));
   };
 
   private onPointerUp = (e: PointerEvent): void => {
@@ -189,16 +199,22 @@ export class Timeline {
     e.preventDefault();
     const rect = this.canvas.getBoundingClientRect();
     const px = e.clientX - rect.left;
-    const width = this.cssWidth;
+    const width = this.plot.cssWidth;
     if (width <= 0) return;
-    const tFocus = xToTime(this.state.viewport, width, px);
-    // Smooth zoom: deltaY -> factor. Negative deltaY (scroll up) zooms in.
-    const factor = Math.exp(-e.deltaY * 0.0015);
-    this.state = {
-      ...this.state,
-      viewport: Viewport.zoom(this.state.viewport, tFocus, factor),
-      dirty: true,
-    };
+
+    // Normalize deltaY to pixels across deltaModes.
+    let dy = e.deltaY;
+    if (e.deltaMode === 1) dy *= WHEEL_LINE_HEIGHT;
+    else if (e.deltaMode === 2) dy *= this.plot.cssHeight;
+
+    const tx = new DataTransform(
+      this.state.timeRange,
+      Range.create(0, width),
+      Range.create(0, this.plot.cssHeight),
+    );
+    const tFocus = tx.xToTime(px);
+    const factor = Math.exp(-dy * WHEEL_SENSITIVITY);
+    this.setTimeRange(Range.zoom(this.state.timeRange, tFocus, factor));
   };
 
   private onHoverMove = (e: PointerEvent): void => {
@@ -206,24 +222,35 @@ export class Timeline {
     const rect = this.canvas.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
-    const idx = hitTestEvent(
-      this.state.events,
-      this.state.viewport,
-      this.cssWidth,
-      px,
-      py,
+    const width = this.plot.cssWidth;
+    const height = this.plot.cssHeight;
+    if (width <= 0 || height <= 0) return;
+
+    const tx = new DataTransform(
+      this.state.timeRange,
+      Range.create(0, width),
+      Range.create(0, height),
     );
+    const idx = hitTestEvent(this.state.events, tx, px, py);
     if (idx !== this.state.hovered) {
       this.state = { ...this.state, hovered: idx, dirty: true };
       this.fireHover(idx, px, py);
     }
   };
 
-  private onClick = (e: PointerEvent): void => {
+  private onClick = (_e: PointerEvent): void => {
     if (this.state.hovered === null) return;
-    const ev = eventAt(this.state.events, this.state.hovered);
+    const ev = this.eventAt(this.state.hovered);
     window.open(ev.link, "_blank", "noopener,noreferrer");
   };
+
+  private eventAt(i: number): NewsEvent {
+    const e = this.state.events.events[i];
+    if (e === undefined) {
+      throw new Error(`Event index out of range: ${i}`);
+    }
+    return e;
+  }
 
   private fireHover(idx: number | null, px: number, py: number): void {
     if (!this.callbacks.onHover) return;
@@ -231,7 +258,7 @@ export class Timeline {
       this.callbacks.onHover(null);
       return;
     }
-    const ev = eventAt(this.state.events, idx);
+    const ev = this.eventAt(idx);
     this.callbacks.onHover({
       index: idx,
       title: ev.title,

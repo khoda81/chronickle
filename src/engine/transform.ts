@@ -9,47 +9,47 @@
  * instead of passing `height` around separately.
  *
  * The transform is a pure value: given the same three ranges, the same
- * `DataTransform` is produced. It performs no allocation in its mapping
- * functions. It is constructed fresh each frame from the plot state.
+ * `DataTransform` is produced. Its mapping methods perform no allocation.
+ * It is constructed fresh each frame from the plot state.
  */
 
 import type { Range } from "./range.ts";
 
-export interface DataTransform {
-  /** Visible time window (epoch ms). */
-  readonly timeDomain: Range;
-  /** Horizontal screen window (CSS px). Usually {0, width}. */
-  readonly screenDomain: Range;
-  /** Vertical screen window (CSS px). Usually {0, height}. */
-  readonly yDomain: Range;
-}
+export class DataTransform {
+  private readonly timeSpan: number;
+  private readonly screenSpan: number;
+  private readonly ySpan: number;
 
-export const DataTransform = {
-  create(
-    timeDomain: Range,
-    screenDomain: Range,
-    yDomain: Range,
-  ): DataTransform {
-    return { timeDomain, screenDomain, yDomain };
-  },
+  constructor(
+    /** Visible time window (epoch ms). */
+    readonly timeDomain: Range,
+    /** Horizontal screen window (CSS px). Usually {0, width}. */
+    readonly screenDomain: Range,
+    /** Vertical screen window (CSS px). Usually {0, height}. */
+    readonly yDomain: Range,
+  ) {
+    this.timeSpan = timeDomain.max - timeDomain.min;
+    this.screenSpan = screenDomain.max - screenDomain.min;
+    this.ySpan = yDomain.max - yDomain.min;
+  }
 
   /** Map a time value to a screen x pixel. */
-  timeToX(tx: DataTransform, t: number): number {
-    const td = tx.timeDomain;
-    const sd = tx.screenDomain;
-    return sd.min + ((t - td.min) / (td.max - td.min)) * (sd.max - sd.min);
-  },
+  timeToX(t: number): number {
+    const td = this.timeDomain;
+    const sd = this.screenDomain;
+    return sd.min + ((t - td.min) / this.timeSpan) * this.screenSpan;
+  }
 
   /** Inverse of `timeToX`: screen x pixel to time. */
-  xToTime(tx: DataTransform, x: number): number {
-    const td = tx.timeDomain;
-    const sd = tx.screenDomain;
-    return td.min + ((x - sd.min) / (sd.max - sd.min)) * (td.max - td.min);
-  },
+  xToTime(x: number): number {
+    const td = this.timeDomain;
+    const sd = this.screenDomain;
+    return td.min + ((x - sd.min) / this.screenSpan) * this.timeSpan;
+  }
 
   /** True if `t` is within the visible time window (inclusive). */
-  containsTime(tx: DataTransform, t: number): boolean {
-    const td = tx.timeDomain;
+  containsTime(t: number): boolean {
+    const td = this.timeDomain;
     return t >= td.min && t <= td.max;
-  },
-};
+  }
+}
