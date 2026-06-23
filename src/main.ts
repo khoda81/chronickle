@@ -6,7 +6,7 @@
  * status bar rather than swallowed.
  */
 
-import { fetchEventSet, fetchHeatSeries } from "./data/index.ts";
+import { fetchEventSet, fetchPriceSeries } from "./data/index.ts";
 import { Timeline } from "./engine/timeline.ts";
 import { Viewport } from "./engine/viewport.ts";
 
@@ -92,18 +92,16 @@ function hideTooltip(tooltip: HTMLDivElement): void {
 async function load(timeline: Timeline, status: HTMLDivElement): Promise<void> {
   setStatus(status, "Fetching market data…");
   try {
-    const series = await fetchHeatSeries({ symbol: "USDTIRT", dtMs: 60_000 });
+    const series = await fetchPriceSeries({ symbol: "USDTIRT" });
     timeline.setSeries(series);
-    setStatus(
-      status,
-      `Loaded ${series.samples.length} heat samples. Fetching events…`,
-    );
+    const obs = series.observations;
+    setStatus(status, `Loaded ${obs.length} trades. Fetching events…`);
     try {
       const events = await fetchEventSet();
       timeline.setEvents(events);
       setStatus(
         status,
-        `Loaded ${series.samples.length} samples · ${events.events.length} events.`,
+        `Loaded ${obs.length} trades · ${events.events.length} events.`,
       );
     } catch (e) {
       setStatus(
@@ -113,8 +111,8 @@ async function load(timeline: Timeline, status: HTMLDivElement): Promise<void> {
       );
     }
     // Fit viewport to the union of data ranges.
-    const tMin = series.samples[0]?.t ?? Date.now() - DAY_MS;
-    const tMax = series.samples[series.samples.length - 1]?.t ?? Date.now();
+    const tMin = obs[0]?.t ?? Date.now() - DAY_MS;
+    const tMax = obs[obs.length - 1]?.t ?? Date.now();
     timeline.setViewport(Viewport.fit(tMin, tMax));
   } catch (e) {
     setStatus(

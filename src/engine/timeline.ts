@@ -13,7 +13,8 @@
  * avoiding wasted work when idle. Panning sets dirty every frame.
  */
 
-import type { EventSet, HeatSeries } from "../domain.ts";
+import { PriceSeries } from "../domain.ts";
+import type { EventSet } from "../domain.ts";
 import { render, hitTestEvent, eventAt } from "./renderer.ts";
 import { Viewport, xToTime } from "./viewport.ts";
 
@@ -41,14 +42,13 @@ export interface TimelineOptions {
 }
 
 interface TimelineState {
-  series: HeatSeries;
+  series: PriceSeries;
   events: EventSet;
   viewport: Viewport;
   hovered: number | null;
   dirty: boolean;
 }
 
-const EMPTY_SERIES: HeatSeries = { samples: [], dt: 1, maxDI: 0 };
 const EMPTY_EVENTS: EventSet = { events: [] };
 
 export class Timeline {
@@ -70,7 +70,7 @@ export class Timeline {
     this.ctx = ctx;
     this.callbacks = opts.callbacks ?? {};
     this.state = {
-      series: EMPTY_SERIES,
+      series: PriceSeries.EMPTY,
       events: EMPTY_EVENTS,
       viewport: opts.initialViewport,
       hovered: null,
@@ -82,8 +82,8 @@ export class Timeline {
     this.loop();
   }
 
-  /** Replace the heatmap series. Triggers a redraw. */
-  setSeries(series: HeatSeries): void {
+  /** Replace the price series. Triggers a redraw. */
+  setSeries(series: PriceSeries): void {
     this.state = { ...this.state, series, dirty: true };
   }
 

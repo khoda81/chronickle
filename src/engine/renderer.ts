@@ -14,7 +14,7 @@
  * scratch state lives in module-level typed arrays / reusable objects.
  */
 
-import type { EventSet, HeatSeries, NewsEvent } from "../domain.ts";
+import type { EventSet, NewsEvent, PriceSeries } from "../domain.ts";
 import type { Viewport } from "./viewport.ts";
 import { timeToX, xToTime } from "./viewport.ts";
 
@@ -23,7 +23,7 @@ export interface RenderInput {
   readonly width: number;
   readonly height: number;
   readonly viewport: Viewport;
-  readonly series: HeatSeries;
+  readonly series: PriceSeries;
   readonly events: EventSet;
   /** Currently hovered event index, or null. */
   readonly hovered: number | null;
@@ -92,53 +92,64 @@ function drawHeatmap(
   width: number,
   height: number,
   viewport: Viewport,
-  series: HeatSeries,
+  series: PriceSeries,
   ramp: Uint8ClampedArray,
 ): void {
-  if (series.samples.length === 0) return;
+  const obs = series.observations;
+  if (obs.length === 0 || width <= 0) return;
 
   const y = height - HEAT_HEIGHT;
-  const maxDI = series.maxDI > 0 ? series.maxDI : 1;
-  const samples = series.samples;
-  const firstT = samples[0]!.t;
-  const lastT = samples[samples.length - 1]!.t;
-  const dt = series.dt;
+  const maxRate = series.maxRate > 0 ? series.maxRate : 1;
+  const first = obs[0]!;
+  const last = obs[obs.length - 1]!;
 
-  // Variables to group identical adjacent colors into a single draw call
+  // Evaluate the piecewise-linear price function at every pixel boundary in
+  // O(width + obs.length) via a merge of two sorted sequences: pixel
+  // boundaries (monotonic in t) and observations (monotonic in t). Clamp
+  // padding: extend first/last price outside the data range.
+  const prices = new Float64Array(width + 1);
+  let oi = 0; // index of the observation segment [obs[oi], obs[oi+1]]
+  for (let x = 0; x <= width; x++) {
+    const t = xToTime(viewport, width, x);
+    // Advance past segments entirely before t.
+    while (oi + 1 < obs.length && obs[oi + 1]!.t <= t) oi++;
+    const a = obs[oi]!;
+    const b = obs[oi + 1];
+    if (t <= a.t) {
+      prices[x] = first.price;
+    } else if (b === undefined || t >= b.t) {
+      prices[x] = last.price;
+    } else {
+      const f = (t - a.t) / (b.t - a.t);
+      prices[x] = a.price + (b.price - a.price) * f;
+    }
+  }
+
+  // Per-pixel rate = |log(p[x+1]) - log(p[x])| / (t[x+1] - t[x]). Group
+  // identical adjacent ramp indices into single fillRect runs.
   let currentRampIdx = -1;
   let runStartX = -1;
-
   for (let x = 0; x <= width; x++) {
     let rampIdx = -1;
-
-    // Calculate normal pixels, but skip the out-of-bounds check on the
-    // very last iteration (x === width) to force a final flush.
     if (x < width) {
-      const t = xToTime(viewport, width, x);
-      if (t >= firstT && t <= lastT + dt) {
-        let idx = Math.round((t - firstT) / dt);
-        idx = Math.max(0, Math.min(idx, samples.length - 1));
-
-        const dI = samples[idx]!.dI;
-        const norm = Math.min(1, dI / maxDI);
-
-        // Don't multiply by 4 yet, keep the base index to compare it easily
-        rampIdx = Math.min(
-          RAMP_RESOLUTION - 1,
-          Math.floor(norm * (RAMP_RESOLUTION - 1)),
-        );
-      }
+      const t0 = xToTime(viewport, width, x);
+      const t1 = xToTime(viewport, width, x + 1);
+      const dt = t1 - t0;
+      const rate =
+        dt > 0 ? Math.abs(Math.log(prices[x + 1]! / prices[x]!)) / dt : 0;
+      const norm = Math.min(1, rate / maxRate);
+      rampIdx = Math.min(
+        RAMP_RESOLUTION - 1,
+        Math.floor(norm * (RAMP_RESOLUTION - 1)),
+      );
     }
 
-    // If the color index changes (or we hit the end of the canvas), flush the rectangle
     if (rampIdx !== currentRampIdx) {
       if (currentRampIdx >= 0 && runStartX !== -1) {
         const r = ramp[currentRampIdx * 4]!;
         const g = ramp[currentRampIdx * 4 + 1]!;
         const b = ramp[currentRampIdx * 4 + 2]!;
-
         ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
-        // Draw the solid vertical strip
         ctx.fillRect(runStartX, y, x - runStartX, HEAT_HEIGHT);
       }
       currentRampIdx = rampIdx;
@@ -146,13 +157,10 @@ function drawHeatmap(
     }
   }
 
-  // --- THE GPU FADE TRICK ---
-  // Apply the vertical fade to the entire bar in one single GPU pass.
-  // (You could even cache this fadeGrad outside the function to be hyper-optimized)
+  // Vertical fade in a single GPU pass.
   const fadeGrad = ctx.createLinearGradient(0, y, 0, y + HEAT_HEIGHT);
-  fadeGrad.addColorStop(0, "rgba(0, 0, 0, 0)"); // Top: 0% dark
-  fadeGrad.addColorStop(1, "rgba(0, 0, 0, 0.55)"); // Bottom: 55% dark
-
+  fadeGrad.addColorStop(0, "rgba(0, 0, 0, 0)");
+  fadeGrad.addColorStop(1, "rgba(0, 0, 0, 0.55)");
   ctx.fillStyle = fadeGrad;
   ctx.fillRect(0, y, width, HEAT_HEIGHT);
 }
