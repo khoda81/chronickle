@@ -22,9 +22,7 @@ export const Range = {
   /** Create a range. Throws if `min >= max`. */
   create(min: number, max: number): Range {
     if (!(min < max)) {
-      throw new Error(
-        `Invalid range: min (${min}) must be < max (${max})`,
-      );
+      throw new Error(`Invalid range: min (${min}) must be < max (${max})`);
     }
     return { min, max };
   },
@@ -61,9 +59,7 @@ export const Range = {
     const newMin = f - leftRatio * newSpan;
     const newMax = newMin + newSpan;
     if (!(newMin < newMax)) {
-      throw new Error(
-        `Zoom produced invalid range: ${newMin}..${newMax}`,
-      );
+      throw new Error(`Zoom produced invalid range: ${newMin}..${newMax}`);
     }
     return { min: newMin, max: newMax };
   },

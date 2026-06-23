@@ -83,9 +83,7 @@ export class Plot {
     const cssWidth = this.cssWidth;
     const cssHeight = this.cssHeight;
     if (!(cssWidth > 0) || !(cssHeight > 0)) {
-      throw new Error(
-        `Invalid canvas size: ${cssWidth}x${cssHeight} (dpr=${this.dpr})`,
-      );
+      throw new Error(`Invalid canvas size: ${cssWidth}x${cssHeight} (dpr=${this.dpr})`);
     }
 
     // Ensure scratch can hold width+1 samples (heatmap per-pixel buffer).
@@ -94,11 +92,7 @@ export class Plot {
       this.scratch = new Float64Array(needed);
     }
 
-    const tx = new DataTransform(
-      this.timeRange,
-      R.create(0, cssWidth),
-      R.create(0, cssHeight),
-    );
+    const tx = new DataTransform(this.timeRange, R.create(0, cssWidth), R.create(0, cssHeight));
 
     return new Frame({
       ctx: this.ctx,

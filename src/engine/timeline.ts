@@ -27,6 +27,7 @@ import { Range } from "./range.ts";
 import { DataTransform } from "./transform.ts";
 import { Plot } from "./plot.ts";
 import { hitTestEvent } from "./hittest.ts";
+import { setRampPalette } from "./ramp.ts";
 
 export interface HoverInfo {
   readonly index: number;
@@ -111,6 +112,12 @@ export class Timeline {
   setTimeRange(r: Range): void {
     this.state = { ...this.state, timeRange: r, dirty: true };
     this.plot.setTimeRange(r);
+  }
+
+  /** Switch the heatmap color palette by name. Triggers a redraw. */
+  setPalette(name: string): void {
+    setRampPalette(name);
+    this.state = { ...this.state, dirty: true };
   }
 
   /** Stop the render loop and detach listeners. */

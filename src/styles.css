@@ -4,7 +4,12 @@
   --muted: #6b7280;
   --accent: #7cc4ff;
   --error: #ff6b6b;
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
 }
 
 * {
@@ -47,8 +52,23 @@ body {
   font-size: 13px;
 }
 
-.reload {
+.palette {
   margin-left: auto;
+  background: transparent;
+  border: 1px solid #2a2f3a;
+  color: var(--fg);
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.palette:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.reload {
+  margin-left: 8px;
   background: transparent;
   border: 1px solid #2a2f3a;
   color: var(--fg);

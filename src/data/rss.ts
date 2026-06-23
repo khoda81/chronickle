@@ -92,9 +92,7 @@ export async function fetchEventSet(opts: FetchEventsOptions = {}): Promise<Even
   const proxy = opts.proxy ?? DEFAULT_PROXY;
   const timeoutMs = opts.timeoutMs ?? 15_000;
 
-  const results = await Promise.all(
-    feeds.map((f) => fetchFeed(f, proxy, timeoutMs)),
-  );
+  const results = await Promise.all(feeds.map((f) => fetchFeed(f, proxy, timeoutMs)));
   const merged = results.flat().sort((a, b) => a.t - b.t);
   return { events: merged };
 }

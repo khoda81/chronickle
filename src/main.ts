@@ -6,9 +6,10 @@
  * status bar rather than swallowed.
  */
 
-import { fetchEventSet, fetchPriceSeries } from "./data/index.ts";
+import { fetchEventSet, fetchOhlcPriceSeries } from "./data/index.ts";
 import { Timeline } from "./engine/timeline.ts";
 import { Range } from "./engine/range.ts";
+import { PALETTES, rampPaletteName } from "./engine/ramp.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -23,6 +24,7 @@ function buildApp(): {
   tooltip: HTMLDivElement;
   status: HTMLDivElement;
   reload: HTMLButtonElement;
+  palette: HTMLSelectElement;
 } {
   const app = document.getElementById("app")!;
   app.innerHTML = "";
@@ -34,7 +36,17 @@ function buildApp(): {
   subtitle.textContent = "Market volatility × news events";
   const reload = el<HTMLButtonElement>("button", "reload");
   reload.textContent = "Reload";
-  header.append(title, subtitle, reload);
+
+  const palette = el<HTMLSelectElement>("select", "palette");
+  for (const p of PALETTES) {
+    const opt = el<HTMLOptionElement>("option");
+    opt.value = p.name;
+    opt.textContent = p.name;
+    if (p.name === rampPaletteName()) opt.selected = true;
+    palette.append(opt);
+  }
+
+  header.append(title, subtitle, palette, reload);
 
   const canvasWrap = el<HTMLDivElement>("div", "canvas-wrap");
   const canvas = el<HTMLCanvasElement>("canvas", "timeline");
@@ -47,14 +59,10 @@ function buildApp(): {
   status.textContent = "Initializing…";
 
   app.append(header, canvasWrap, status);
-  return { canvas, tooltip, status, reload };
+  return { canvas, tooltip, status, reload, palette };
 }
 
-function setStatus(
-  status: HTMLDivElement,
-  msg: string,
-  kind: "info" | "error" = "info",
-): void {
+function setStatus(status: HTMLDivElement, msg: string, kind: "info" | "error" = "info"): void {
   status.textContent = msg;
   status.className = `status ${kind}`;
 }
@@ -92,39 +100,36 @@ function hideTooltip(tooltip: HTMLDivElement): void {
 async function load(timeline: Timeline, status: HTMLDivElement): Promise<void> {
   setStatus(status, "Fetching market data…");
   try {
-    const series = await fetchPriceSeries({ symbol: "USDTIRT" });
+    // OHLC gives real history (trades endpoint only returns recent trades).
+    // We use only the `open` of each candle: close[k] == open[k+1].
+    const now = Date.now();
+    const series = await fetchOhlcPriceSeries({
+      symbol: "USDTIRT",
+      resolution: "1",
+      fromMs: now - 180 * DAY_MS,
+      toMs: now,
+    });
     timeline.setSeries(series);
     const obs = series.observations;
-    setStatus(status, `Loaded ${obs.length} trades. Fetching events…`);
+    setStatus(status, `Loaded ${obs.length} candles. Fetching events…`);
     try {
       const events = await fetchEventSet();
       timeline.setEvents(events);
-      setStatus(
-        status,
-        `Loaded ${obs.length} trades · ${events.events.length} events.`,
-      );
+      setStatus(status, `Loaded ${obs.length} trades · ${events.events.length} events.`);
     } catch (e) {
-      setStatus(
-        status,
-        `Events failed: ${e instanceof Error ? e.message : String(e)}`,
-        "error",
-      );
+      setStatus(status, `Events failed: ${e instanceof Error ? e.message : String(e)}`, "error");
     }
     // Fit time range to the union of data ranges.
-    const tMin = obs[0]?.t ?? Date.now() - DAY_MS;
-    const tMax = obs[obs.length - 1]?.t ?? Date.now();
+    const tMin = obs[0]?.t ?? now - DAY_MS;
+    const tMax = obs[obs.length - 1]?.t ?? now;
     timeline.setTimeRange(Range.fit(tMin, tMax));
   } catch (e) {
-    setStatus(
-      status,
-      `Market data failed: ${e instanceof Error ? e.message : String(e)}`,
-      "error",
-    );
+    setStatus(status, `Market data failed: ${e instanceof Error ? e.message : String(e)}`, "error");
   }
 }
 
 function main(): void {
-  const { canvas, tooltip, status, reload } = buildApp();
+  const { canvas, tooltip, status, reload, palette } = buildApp();
 
   // Initial time range: last 24h. Replaced after data loads.
   const now = Date.now();
@@ -147,6 +152,10 @@ function main(): void {
   void load(timeline, status);
 
   reload.addEventListener("click", () => void load(timeline, status));
+
+  palette.addEventListener("change", () => {
+    timeline.setPalette(palette.value);
+  });
 }
 
 main();

@@ -94,14 +94,7 @@ export class Frame implements Disposable {
     this.raw.clearRect(x, y, w, h);
   }
 
-  dot(
-    x: number,
-    y: number,
-    r: number,
-    fill: string,
-    stroke?: string,
-    strokeWidth = 1,
-  ): void {
+  dot(x: number, y: number, r: number, fill: string, stroke?: string, strokeWidth = 1): void {
     const c = this.raw;
     c.beginPath();
     c.arc(x, y, r, 0, Math.PI * 2);
@@ -144,13 +137,7 @@ export class Frame implements Disposable {
   // --- L1: time-aware primitives (use the transform) ---------------------
 
   /** Fill a vertical strip spanning time [t0, t1] at vertical [y, y+h]. */
-  fillTimeRect(
-    t0: number,
-    t1: number,
-    y: number,
-    h: number,
-    fill: string,
-  ): void {
+  fillTimeRect(t0: number, t1: number, y: number, h: number, fill: string): void {
     const x0 = this.tx.timeToX(t0);
     const x1 = this.tx.timeToX(t1);
     this.fillRectPx(x0, y, x1 - x0, h, fill);
@@ -205,9 +192,7 @@ export class Frame implements Disposable {
     // Restore to the pre-frame transform. We always opened one save() in the
     // constructor; any unmatched push() is a programmer error.
     if (this.saveDepth !== 1) {
-      throw new Error(
-        `Frame disposed with unbalanced save stack: depth ${this.saveDepth}`,
-      );
+      throw new Error(`Frame disposed with unbalanced save stack: depth ${this.saveDepth}`);
     }
     this.raw.restore();
     this.saveDepth = 0;

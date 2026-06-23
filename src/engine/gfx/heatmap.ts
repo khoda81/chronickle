@@ -3,7 +3,8 @@
  *
  * Draws the volatility heatmap as a stack of color boxes: the price series is
  * sampled at every pixel boundary, the per-pixel log-return rate is computed,
- * normalized against `series.maxRate`, and mapped through the color ramp.
+ * normalized against `series.maxRate` into [-1, +1] then remapped to [0, 1]
+ * (rate 0 -> 0.5), and mapped through the symmetric diverging color ramp.
  * Adjacent pixels sharing the same ramp index are coalesced into a single
  * `fillRect` run to minimize draw calls.
  *
@@ -75,9 +76,8 @@ class HeatmapImpl implements HeatmapLayer {
         const t0 = tx.xToTime(x);
         const t1 = tx.xToTime(x + 1);
         const dt = t1 - t0;
-        const rate =
-          dt > 0 ? Math.abs(Math.log(prices[x + 1]! / prices[x]!)) / dt : 0;
-        idx = rampIndex(rate / maxRate);
+        const rate = dt > 0 ? Math.log(prices[x + 1]! / prices[x]!) / dt : 0;
+        idx = rampIndex((rate + maxRate) / 2 / maxRate);
       }
       if (idx !== currentIdx) {
         if (currentIdx >= 0 && runStart !== -1) {

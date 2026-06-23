@@ -55,28 +55,34 @@ API docs: https://apidocs.nobitex.ir/
 These override default "minimal diff" guidance. Optimize for minimal elegant code, not small diffs.
 
 ### 1. Make Invalid States Unrepresentable
+
 - Design data over logic. Prefer algebraic data types over flag fields.
 - Enforce invariants structurally (e.g. `Viewport.create` throws on `tStart >= tEnd`; `HeatSeries` precomputes `maxDI`).
 - Derive data rather than storing redundant state.
 
 ### 2. Fail Fast & Explicitly
+
 - No blanket `try/catch` to suppress errors or return defaults.
 - Throw loud, explicit errors on invalid state. Surface failures to the user (see `status` bar in `main.ts`).
 
 ### 3. Structural Integrity > Minimal Diff
+
 - If a bug stems from a poorly designed data structure, refactor the data structure.
 - No surface-level patches or band-aids.
 
 ### 4. Minimal Mutation & Elegant State
+
 - Keep state model small. Replace state wholesale (immutable updates) rather than mutating fields.
 - Prefer pure functions. The renderer is a pure function of its inputs; `Timeline.state` is replaced, not mutated.
 
 ### 5. GC Discipline in the Render Loop
+
 - The hot path (`render`, pan/zoom handlers) must not allocate.
 - Reuse module-level scratch buffers (see `rampPixels` LUT in `renderer.ts`).
 - Avoid per-frame object creation in `requestAnimationFrame`.
 
 ### 6. VCS (jj)
+
 - Commit frequently. Set the change description after every change.
 - `node_modules/` and `dist/` are gitignored. If jj snapshotted them before `.gitignore` existed, untrack with `jj file untrack`.
 - Use `EDITOR=true jj squash --from <src> --into <dst>` to move changes between commits without opening an editor.
