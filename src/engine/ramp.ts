@@ -54,13 +54,6 @@ export const PALETTES: readonly RampPalette[] = [
     ],
   },
   {
-    name: "grayscale",
-    stops: [
-      [0.0, 0.81, 0, 250],
-      [1.0, 0.0, 0, 230],
-    ],
-  },
-  {
     name: "teal-red",
     stops: [
       [0.0, 0.68, 0.14, 195],
@@ -94,7 +87,7 @@ export const PALETTES: readonly RampPalette[] = [
   },
 ] as const;
 
-export const RAMP_RESOLUTION = 256;
+export const RAMP_RESOLUTION = 4096;
 
 let activePalette: RampPalette = PALETTES[0]!;
 let lut: Uint8ClampedArray | null = null;

@@ -6,10 +6,12 @@
  * status bar rather than swallowed.
  */
 
-import { fetchEventSet, fetchOhlcPriceSeries } from "./data/index.ts";
+import { fetchEventSet, fetchOhlcPriceSeries, fetchPriceSeries } from "./data/index.ts";
 import { Timeline } from "./engine/timeline.ts";
 import { Range } from "./engine/range.ts";
 import { PALETTES, rampPaletteName } from "./engine/ramp.ts";
+import { fetchBinanceGold } from "./data/binance.ts";
+import { fetchSpaceXStock } from "./data/yahoo.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -97,12 +99,20 @@ function hideTooltip(tooltip: HTMLDivElement): void {
   tooltip.classList.add("hidden");
 }
 
-async function load(timeline: Timeline, status: HTMLDivElement): Promise<void> {
-  newFunction(status, timeline);
+async function load(
+  timeline: Timeline,
+  status: HTMLDivElement,
+  updateRange: boolean = true,
+): Promise<void> {
+  loadMarkets(status, timeline, updateRange);
   timeline.setEvents(await fetchEventSet());
 }
 
-async function newFunction(status: HTMLDivElement, timeline: Timeline) {
+async function loadMarkets(
+  status: HTMLDivElement,
+  timeline: Timeline,
+  updateRange: boolean = true,
+) {
   setStatus(status, "Fetching market data…");
   // OHLC gives real history (trades endpoint only returns recent trades).
   // We use only the `open` of each candle: close[k] == open[k+1].
@@ -113,16 +123,29 @@ async function newFunction(status: HTMLDivElement, timeline: Timeline) {
     // fromMs: now - 3 * 60 * 1000,
     toMs: now,
   });
+  // const series = await fetchBinanceGold({
+  //   interval: "3m",
+
+  //   // fromMs: now - 3 * 60 * 1000,
+  //   // toMs: now,
+  // });
+  // const series = await fetchSpaceXStock({
+  //   interval: "15m",
+
+  //   // fromMs: now - 3 * 60 * 1000,
+  //   // toMs: now,
+  // });
+  console.debug(series);
   timeline.setSeries(series);
   const obs = series.observations;
-  setStatus(status, `Loaded ${obs.length} candles. Fetching events…`);
+  setStatus(status, `Loaded ${obs.length} candles.`);
 
-  // Fit time range to the union of data ranges.
-  const tMin = obs[0]?.t ?? now - DAY_MS;
-  const tMax = obs[obs.length - 1]?.t ?? now;
-
-  timeline.setTimeRange(Range.fit(tMin, tMax));
-  setStatus(status, `Loaded ${obs.length} trades`);
+  if (updateRange) {
+    // Fit time range to the union of data ranges.
+    const tMin = obs[0]?.t ?? now - DAY_MS;
+    const tMax = obs[obs.length - 1]?.t ?? now;
+    timeline.setTimeRange(Range.fit(tMin, tMax));
+  }
 }
 
 function main(): void {
@@ -148,7 +171,7 @@ function main(): void {
 
   void load(timeline, status);
 
-  reload.addEventListener("click", () => void load(timeline, status));
+  reload.addEventListener("click", () => void load(timeline, status, false));
 
   palette.addEventListener("change", () => {
     timeline.setPalette(palette.value);

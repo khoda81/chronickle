@@ -77,11 +77,8 @@ class HeatmapImpl implements HeatmapLayer {
     const numPx = Math.ceil(width * dpr);
     if (numPx <= 0) return;
 
-    // Build the sparse event arrays (cache-friendly SoA layout)
-    const numJumps = this.updateJumpsBuffer(obs);
-
     const y = heatTopY(height);
-    const rateScale = -Math.exp(priceScale);
+    const rateScale = Math.exp(priceScale);
     const ramp = rampLut();
 
     const minSigma = 14;
@@ -95,60 +92,75 @@ class HeatmapImpl implements HeatmapLayer {
     const imgData = this.offCtx.createImageData(numPx, NUM_BANDS);
     const data = imgData.data;
 
-    // Conversion factor to map spatial kernel radius back to time
     const timePerPx = tx.xToTime(1 / dpr) - tx.xToTime(0);
+    const response = new Float64Array(NUM_BANDS * numPx);
 
-    // --- SLIDING WINDOW CONVOLUTION ---
-    // Instead of looping over a fixed radius of pixels, we find the index range
-    // of active jumps for the current pixel's time.
-    let windowStartIdx = 0;
-
+    // Precompute pixel centre times for all x (avoids repeated xToTime calls)
+    const pixelTimes = new Float64Array(numPx);
     for (let x = 0; x < numPx; x++) {
-      const t_pixel = tx.xToTime(x / dpr);
+      pixelTimes[x] = tx.xToTime(x / dpr);
+    }
 
-      // We only care about jumps within the maximum possible kernel radius
-      const maxTimeRadius = 4 * maxSigma * timePerPx;
-      const windowMinTime = t_pixel - maxTimeRadius;
+    let { price } = series.observations[0]!;
+    // --- Outer loop: events ---
+    for (let i = 1; i < series.observations.length; i++) {
+      const observation = series.observations[i]!;
+      const t_jump = observation.t;
+      const jumpReturn = Math.log(observation.price / price);
 
-      // Advance the start of our window
-      while (windowStartIdx < numJumps && this.jumpTimes[windowStartIdx]! < windowMinTime) {
-        windowStartIdx++;
-      }
+      price = observation.price;
 
+      // --- Middle loop: bands ---
       for (let b = 0; b < NUM_BANDS; b++) {
-        // const kernel = kernels[b];
         const sigma = minSigma * Math.pow(maxSigma / minSigma, b / (NUM_BANDS - 1));
-        const bandTimeRadius = 3 * sigma * timePerPx;
-
-        // Precompute these outside the pixel loop for each band
         const sigmaTime = sigma * timePerPx;
-        const invTwoSigmaSq = 1 / (2 * sigmaTime * sigmaTime);
+        const bandTimeRadius = (5 + priceScale - Math.log(sigmaTime)) * sigmaTime;
 
-        let response = 0;
-        for (let i = windowStartIdx; i < numJumps; i++) {
-          const t_jump = this.jumpTimes[i]!;
-          const deltaT = t_jump - t_pixel;
-          if (deltaT > bandTimeRadius) break; // Out of radius, stop scanning
+        // Time range where this event has non‑negligible weight
+        const tMin = t_jump - bandTimeRadius;
+        const tMax = t_jump + bandTimeRadius;
 
-          if (deltaT >= -bandTimeRadius) {
-            // Evaluate the exact continuous Gaussian at the sub-pixel distance
-            const weight = Math.exp(-(deltaT * deltaT) * invTwoSigmaSq);
+        // Convert time bounds to pixel indices (assumes tx.timeToX exists)
+        const xMinRaw = tx.timeToX(tMin) * dpr;
+        const xMaxRaw = tx.timeToX(tMax) * dpr;
 
-            // Add the Dirac delta's contribution
-            response += this.jumpReturns[i]! * weight;
-          }
+        const minX = Math.max(0, Math.floor(xMinRaw));
+        const maxX = Math.min(numPx, Math.ceil(xMaxRaw));
+
+        // --- Inner loop: affected pixels ---
+        const bandOffset = b * numPx;
+        for (let x = minX; x < maxX; x++) {
+          const t_pixel = pixelTimes[x];
+          const deltaT = (t_jump - t_pixel) / sigmaTime;
+
+          const weight = (Math.exp(-(deltaT * deltaT) * 0.5) * rateScale) / sigmaTime;
+          const contribution = jumpReturn * weight;
+
+          // if (Math.abs(contribution) < 0.0000000001) {
+          //   console.debug("Low contribution detected", {
+          //     logSigmaTime: Math.log(sigmaTime),
+          //     contribution,
+          //     bandTimeRadius,
+          //     jumpReturn,
+          //     weight: weight,
+          //     ratio: (jumpReturn * bandTimeRadius) / Math.sqrt(rateScale),
+          //   });
+          // }
+
+          response[bandOffset + x] += contribution;
         }
+      }
+    }
 
-        const deltaTEquiv = sigma * timePerPx;
-        const power = rateScale / deltaTEquiv;
-
-        const z = response * power;
+    for (let b = 0; b < NUM_BANDS; b++) {
+      const bandOffset = b * numPx;
+      for (let x = 0; x < numPx; x++) {
+        const z = response[bandOffset + x];
         const normalized = 1 / (1 + Math.exp(z));
         const idx = rampIndex(normalized);
 
-        const pixelOffset = (b * numPx + x) * 4;
+        const pixelOffset = (bandOffset + x) * 4;
         const rampOffset = idx * 4;
-
         data[pixelOffset] = ramp[rampOffset];
         data[pixelOffset + 1] = ramp[rampOffset + 1];
         data[pixelOffset + 2] = ramp[rampOffset + 2];
