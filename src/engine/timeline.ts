@@ -21,13 +21,27 @@
  * pages) before being mapped to a zoom factor. Lines use the CSS line height.
  */
 
-import { PriceSeries } from "../domain.ts";
 import type { EventSet, NewsEvent } from "../domain.ts";
 import { Range } from "./range.ts";
 import { DataTransform } from "./transform.ts";
 import { Plot } from "./plot.ts";
 import { hitTestEvent } from "./hittest.ts";
 import { setRampPalette } from "./ramp.ts";
+import type { QueryResult } from "../data/brokerOrchestrator.ts";
+
+/**
+ * Synchronous data source the timeline queries every frame.
+ *
+ * The timeline computes W+1 pixel-boundary timestamps from its current
+ * transform and calls `dataSource(evalTime, maxDeltaTMs)`. The source (a
+ * `Broker` closure) returns staircase values at those timestamps from its
+ * cache, and may trigger an async fetch if coverage is incomplete — which
+ * fires the broker's subscribers, which call `timeline.reqDraw()`.
+ *
+ * The timeline never stores the series; it pulls fresh every frame. There
+ * is no draw without querying the source.
+ */
+export type DataSource = (evalTime: Float64Array, maxDeltaTMs: number) => QueryResult;
 
 export interface HoverInfo {
   readonly index: number;
@@ -50,10 +64,14 @@ export interface TimelineOptions {
   readonly canvas: HTMLCanvasElement;
   readonly initialTimeRange: Range;
   readonly callbacks?: TimelineCallbacks;
+  /**
+   * Synchronous data source queried every frame. Required — the timeline
+   * no longer stores a series; it pulls from this callback each draw.
+   */
+  readonly dataSource: DataSource;
 }
 
 interface TimelineState {
-  series: PriceSeries;
   events: EventSet;
   timeRange: Range;
   // TODO: Maybe this should be in the transform state instead?
@@ -76,6 +94,7 @@ export class Timeline {
   private readonly canvas: HTMLCanvasElement;
   private readonly plot: Plot;
   private readonly callbacks: TimelineCallbacks;
+  private readonly dataSource: DataSource;
   private state: TimelineState;
   private rafId: number | null = null;
 
@@ -83,15 +102,21 @@ export class Timeline {
   private dragging = false;
   private lastX = 0;
 
+  // Reusable eval-time buffer, grown as needed. Avoids per-frame allocation
+  // in the render loop (AGENTS.md §5). Covers the visible width plus padding
+  // on both sides so off-screen jumps near the edges still contribute to the
+  // wavelet response on screen.
+  private evalTime: Float64Array = new Float64Array(0);
+
   constructor(opts: TimelineOptions) {
     this.canvas = opts.canvas;
+    this.dataSource = opts.dataSource;
     this.plot = new Plot({
       canvas: opts.canvas,
       initialTimeRange: opts.initialTimeRange,
     });
     this.callbacks = opts.callbacks ?? {};
     this.state = {
-      series: PriceSeries.EMPTY,
       events: EMPTY_EVENTS,
       timeRange: opts.initialTimeRange,
       priceScale: 19,
@@ -104,9 +129,9 @@ export class Timeline {
     this.loop();
   }
 
-  /** Replace the price series. Triggers a redraw. */
-  setSeries(series: PriceSeries): void {
-    this.state = { ...this.state, series, dirty: true };
+  /** Request a redraw on the next frame (e.g. when the broker has new data). */
+  reqDraw(): void {
+    this.state = { ...this.state, dirty: true };
   }
 
   /** Replace the event set. Triggers a redraw. */
@@ -118,6 +143,11 @@ export class Timeline {
   setTimeRange(r: Range): void {
     this.state = { ...this.state, timeRange: r, dirty: true };
     this.plot.setTimeRange(r);
+  }
+
+  /** Current visible time range. */
+  getTimeRange(): Range {
+    return this.state.timeRange;
   }
 
   /** Switch the heatmap color palette by name. Triggers a redraw. */
@@ -171,14 +201,49 @@ export class Timeline {
     this.state = { ...this.state, dirty: false };
 
     using frame = this.plot.beginFrame();
-    const { series, events, hovered, priceScale } = this.state;
+    const { events, hovered, priceScale, timeRange } = this.state;
+    const width = frame.width;
 
     // Background.
     frame.fillRectPx(0, 0, frame.width, frame.height, "#05070d");
 
+    // Compute pixel-boundary timestamps over a padded range and query the
+    // broker. The wavelet kernel has a time radius, so jumps just past the
+    // left/right edges still contribute to on-screen pixels. We pad the
+    // query range by a fraction of the visible span on each side and feed
+    // the full padded arrays to the heatmap, which clips jump contributions
+    // to the visible pixel range internally.
+    //
+    // The padding also lets the broker fetch a wider interval at a coarser
+    // resolution (the off-screen edges don't need per-pixel detail), though
+    // for now we use the same maxDeltaTMs across the whole range.
+    const PAD_RATIO = 0.5; // 50% of visible span on each side
+    const span = timeRange.max - timeRange.min;
+    const pad = span * PAD_RATIO;
+    const paddedMin = timeRange.min - pad;
+    const paddedMax = timeRange.max + pad;
+    const paddedSpan = paddedMax - paddedMin;
+
+    // Sample the padded range at the same per-pixel density as the visible
+    // region so the heatmap's sigma math (which is in pixels) stays consistent.
+    const paddedN = Math.ceil((paddedSpan / span) * width) + 1;
+    if (this.evalTime.length < paddedN) {
+      this.evalTime = new Float64Array(paddedN);
+    }
+    const step = paddedSpan / (paddedN - 1);
+    for (let i = 0; i < paddedN; i++) {
+      this.evalTime[i] = paddedMin + i * step;
+    }
+    const evalView = this.evalTime.subarray(0, paddedN) as Float64Array;
+    // maxDeltaTMs for the fetch: one sample per visible pixel is the floor.
+    // Off-screen padding can be coarser, but the broker dedups by range, so
+    // using the visible step everywhere is fine for v1.
+    const visibleStep = span / width;
+    const result = this.dataSource(evalView, visibleStep);
+
     // Layers.
     const heat = frame.heatmap();
-    heat.drawBoxStack(series, priceScale);
+    heat.drawBoxStack(evalView, result.value, priceScale);
     // heat.drawFadeOverlay();
     frame.events().drawRow(events, hovered);
     frame.axis().drawTimeAxis();

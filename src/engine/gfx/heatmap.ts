@@ -1,4 +1,3 @@
-import type { PricePoint, PriceSeries } from "../../domain.ts";
 import type { Frame } from "./context.ts";
 import { HEAT_HEIGHT, heatTopY, NUM_BANDS } from "./layout.ts";
 import { rampLut, rampIndex } from "../ramp.ts";
@@ -25,7 +24,15 @@ function createGaus0Kernel(sigma: number): Float32Array {
 }
 
 export interface HeatmapLayer {
-  drawBoxStack(series: PriceSeries, priceScale: number): void;
+  /**
+   * Draw the wavelet heatmap from a staircase-evaluated series.
+   *
+   * @param evalTime  Ascending pixel-boundary timestamps (length W+1).
+   * @param value     Staircase values at each timestamp, aligned with evalTime.
+   *                 NaN where the broker had no coverage (gaps are skipped).
+   * @param priceScale Vertical scale for the response normalization.
+   */
+  drawBoxStack(evalTime: Float64Array, value: Float32Array, priceScale: number): void;
   drawFadeOverlay(): void;
 }
 
@@ -39,40 +46,22 @@ class HeatmapImpl implements HeatmapLayer {
   private offscreen = new OffscreenCanvas(1, 1);
   private offCtx = this.offscreen.getContext("2d", { willReadFrequently: true })!;
 
-  // Cache buffers to avoid GC pressure
+  // Cache buffers to avoid GC pressure (currently unused — the typed-array
+  // path receives eval arrays directly — but kept for future per-pixel work).
   private jumpTimes = new Float32Array(0);
   private jumpReturns = new Float32Array(0);
 
   constructor(private readonly frame: Frame) {}
 
-  private updateJumpsBuffer(obs: readonly PricePoint[]) {
-    const requiredLen = obs.length;
-    if (this.jumpTimes.length < requiredLen) {
-      // Allocate slightly more to prevent frequent reallocations
-      const newCap = Math.ceil(requiredLen * 1.2);
-      this.jumpTimes = new Float32Array(newCap);
-      this.jumpReturns = new Float32Array(newCap);
-    }
-
-    // First observation has no return
-    this.jumpTimes[0] = obs[0].t;
-    this.jumpReturns[0] = 0;
-
-    for (let i = 1; i < requiredLen; i++) {
-      this.jumpTimes[i] = obs[i].t;
-      // ZOH Dirac delta magnitude: log(P_i) - log(P_{i-1})
-      this.jumpReturns[i] = Math.log(obs[i].price) - Math.log(obs[i - 1].price);
-    }
-    return requiredLen;
-  }
-
-  drawBoxStack(series: PriceSeries, priceScale: number): void {
+  drawBoxStack(evalTime: Float64Array, value: Float32Array, priceScale: number): void {
     const { tx, ctx, dpr } = this.frame;
     const width = tx.screenDomain.max - tx.screenDomain.min;
     const height = tx.yDomain.max - tx.yDomain.min;
-    const obs = series.observations;
 
-    if (obs.length < 2 || width <= 0) return;
+    if (evalTime.length < 2 || width <= 0) return;
+    if (evalTime.length !== value.length) {
+      throw new Error(`drawBoxStack: length mismatch (${evalTime.length} vs ${value.length})`);
+    }
 
     const numPx = Math.ceil(width * dpr);
     if (numPx <= 0) return;
@@ -101,14 +90,30 @@ class HeatmapImpl implements HeatmapLayer {
       pixelTimes[x] = tx.xToTime(x / dpr);
     }
 
-    let { price } = series.observations[0]!;
-    // --- Outer loop: events ---
-    for (let i = 1; i < series.observations.length; i++) {
-      const observation = series.observations[i]!;
-      const t_jump = observation.t;
-      const jumpReturn = Math.log(observation.price / price);
-
-      price = observation.price;
+    // Walk consecutive samples, computing log-returns at each jump. NaN
+    // values (broker coverage gaps) break the run: we skip the jump across a
+    // gap and resume once we have two consecutive finite values again.
+    let prevT = NaN;
+    let prevV = NaN;
+    for (let i = 0; i < evalTime.length; i++) {
+      const t_jump = evalTime[i]!;
+      const v = value[i]!;
+      if (!Number.isFinite(v)) {
+        // Gap: reset so the next finite sample starts a fresh run (no jump
+        // computed across the gap).
+        prevT = NaN;
+        prevV = NaN;
+        continue;
+      }
+      if (!Number.isFinite(prevV)) {
+        // First finite sample of a run — no jump to emit yet.
+        prevT = t_jump;
+        prevV = v;
+        continue;
+      }
+      const jumpReturn = Math.log(v / prevV);
+      prevT = t_jump;
+      prevV = v;
 
       // --- Middle loop: bands ---
       for (let b = 0; b < NUM_BANDS; b++) {
@@ -130,24 +135,13 @@ class HeatmapImpl implements HeatmapLayer {
         // --- Inner loop: affected pixels ---
         const bandOffset = b * numPx;
         for (let x = minX; x < maxX; x++) {
-          const t_pixel = pixelTimes[x];
+          const t_pixel = pixelTimes[x]!;
           const deltaT = (t_jump - t_pixel) / sigmaTime;
 
           const weight = (Math.exp(-(deltaT * deltaT) * 0.5) * rateScale) / sigmaTime;
           const contribution = jumpReturn * weight;
 
-          // if (Math.abs(contribution) < 0.0000000001) {
-          //   console.debug("Low contribution detected", {
-          //     logSigmaTime: Math.log(sigmaTime),
-          //     contribution,
-          //     bandTimeRadius,
-          //     jumpReturn,
-          //     weight: weight,
-          //     ratio: (jumpReturn * bandTimeRadius) / Math.sqrt(rateScale),
-          //   });
-          // }
-
-          response[bandOffset + x] += contribution;
+          response[bandOffset + x] = (response[bandOffset + x] ?? 0) + contribution;
         }
       }
     }
@@ -155,15 +149,15 @@ class HeatmapImpl implements HeatmapLayer {
     for (let b = 0; b < NUM_BANDS; b++) {
       const bandOffset = b * numPx;
       for (let x = 0; x < numPx; x++) {
-        const z = response[bandOffset + x];
+        const z = response[bandOffset + x]!;
         const normalized = 1 / (1 + Math.exp(z));
         const idx = rampIndex(normalized);
 
         const pixelOffset = (bandOffset + x) * 4;
         const rampOffset = idx * 4;
-        data[pixelOffset] = ramp[rampOffset];
-        data[pixelOffset + 1] = ramp[rampOffset + 1];
-        data[pixelOffset + 2] = ramp[rampOffset + 2];
+        data[pixelOffset] = ramp[rampOffset]!;
+        data[pixelOffset + 1] = ramp[rampOffset + 1]!;
+        data[pixelOffset + 2] = ramp[rampOffset + 2]!;
         data[pixelOffset + 3] = 255;
       }
     }

@@ -6,12 +6,12 @@
  * status bar rather than swallowed.
  */
 
-import { fetchEventSet, fetchOhlcPriceSeries, fetchPriceSeries } from "./data/index.ts";
+import { fetchEventSet } from "./data/index.ts";
 import { Timeline } from "./engine/timeline.ts";
 import { Range } from "./engine/range.ts";
 import { PALETTES, rampPaletteName } from "./engine/ramp.ts";
-import { fetchBinanceGold } from "./data/binance.ts";
-import { fetchSpaceXStock } from "./data/yahoo.ts";
+import { Broker } from "./data/brokerOrchestrator.ts";
+import { createNobitexFetcher } from "./data/nobitexFetcher.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -102,62 +102,38 @@ function hideTooltip(tooltip: HTMLDivElement): void {
 async function load(
   timeline: Timeline,
   status: HTMLDivElement,
+  broker: Broker,
   updateRange: boolean = true,
 ): Promise<void> {
-  loadMarkets(status, timeline, updateRange);
-  timeline.setEvents(await fetchEventSet());
-}
-
-async function loadMarkets(
-  status: HTMLDivElement,
-  timeline: Timeline,
-  updateRange: boolean = true,
-) {
-  setStatus(status, "Fetching market data…");
-  // OHLC gives real history (trades endpoint only returns recent trades).
-  // We use only the `open` of each candle: close[k] == open[k+1].
-  const now = Date.now();
-  const series = await fetchOhlcPriceSeries({
-    symbol: "USDTIRT",
-    resolution: "5",
-    // fromMs: now - 3 * 60 * 1000,
-    toMs: now,
-  });
-  // const series = await fetchBinanceGold({
-  //   interval: "3m",
-
-  //   // fromMs: now - 3 * 60 * 1000,
-  //   // toMs: now,
-  // });
-  // const series = await fetchSpaceXStock({
-  //   interval: "15m",
-
-  //   // fromMs: now - 3 * 60 * 1000,
-  //   // toMs: now,
-  // });
-  console.debug(series);
-  timeline.setSeries(series);
-  const obs = series.observations;
-  setStatus(status, `Loaded ${obs.length} candles.`);
-
+  // Markets: the broker fetches on demand via the timeline's per-frame
+  // queries. We only kick the initial draw here; the broker's subscriber
+  // will call timeline.reqDraw() as data arrives.
+  timeline.reqDraw();
   if (updateRange) {
-    // Fit time range to the union of data ranges.
-    const tMin = obs[0]?.t ?? now - DAY_MS;
-    const tMax = obs[obs.length - 1]?.t ?? now;
-    timeline.setTimeRange(Range.fit(tMin, tMax));
+    // Fit to whatever the broker has cached so far (likely nothing on first
+    // load). The broker's subscriber will re-fit once data lands.
+    const cached = broker.cachedRange();
+    if (cached) {
+      timeline.setTimeRange(Range.fit(cached.min, cached.max));
+    }
   }
+  timeline.setEvents(await fetchEventSet());
 }
 
 function main(): void {
   const { canvas, tooltip, status, reload, palette } = buildApp();
 
-  // Initial time range: last 24h. Replaced after data loads.
+  // Initial time range: last 24h. The broker will fetch this on the first
+  // query and re-fit once data lands.
   const now = Date.now();
   const initial = Range.fit(now - DAY_MS, now);
+
+  const broker = new Broker(createNobitexFetcher({ symbol: "USDTIRT" }));
 
   const timeline = new Timeline({
     canvas,
     initialTimeRange: initial,
+    dataSource: (evalTime, maxDeltaTMs) => broker.query({ evalTime, maxDeltaTMs }),
     callbacks: {
       onHover: (event) => {
         if (event === null) {
@@ -169,9 +145,29 @@ function main(): void {
     },
   });
 
-  void load(timeline, status);
+  // When the broker inserts new data, request a redraw. Also re-fit the
+  // time range once on the first non-empty cache so the viewport shows the
+  // data instead of the default 24h guess.
+  let fitted = false;
+  broker.subscribe(() => {
+    timeline.reqDraw();
+    if (!fitted) {
+      const cached = broker.cachedRange();
+      if (cached) {
+        timeline.setTimeRange(Range.fit(cached.min, cached.max));
+        fitted = true;
+        setStatus(status, `Loaded data: ${cached.min}..${cached.max}`);
+      }
+    }
+  });
 
-  reload.addEventListener("click", () => void load(timeline, status, false));
+  void load(timeline, status, broker);
+
+  reload.addEventListener("click", () => {
+    // For now, reload just re-queries; the broker cache persists. A true
+    // reload would clear the broker's store (to be added).
+    timeline.reqDraw();
+  });
 
   palette.addEventListener("change", () => {
     timeline.setPalette(palette.value);

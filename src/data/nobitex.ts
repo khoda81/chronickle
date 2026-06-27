@@ -108,7 +108,7 @@ export async function fetchPriceSeries(opts: FetchPriceOptions = {}): Promise<Pr
   const res = await fetchTrades(opts);
   return tradesToPriceSeries(res.trades);
 }
-export async function fetchOhlc(opts: FetchOhlcOptions): Promise<NobitexOhlcResponse> {
+export async function fetchOhlc(opts: FetchOhlcOptions): Promise<NobitexOhlcResponse | null> {
   const symbol = opts.symbol ?? "USDTIRT";
   const resolution = opts.resolution ?? "D";
   const to = Math.floor(opts.toMs / 1000);
@@ -139,6 +139,10 @@ export async function fetchOhlc(opts: FetchOhlcOptions): Promise<NobitexOhlcResp
     }
 
     const json = (await res.json()) as NobitexOhlcResponse;
+    // "no_data" is not an error — it means no candles exist for this range
+    // (e.g. before the symbol listed, or future dates). Return null so the
+    // caller can treat it as an empty result rather than an exceptional case.
+    if (json.s === "no_data") return null;
     if (json.s !== "ok") {
       throw new Error(`Nobitex OHLC returned status: ${json.s}`);
     }
@@ -154,7 +158,8 @@ export async function fetchOhlc(opts: FetchOhlcOptions): Promise<NobitexOhlcResp
  * candle. The close of candle k is implied by the open of candle k+1, so we
  * drop `h`/`l`/`c`/`v`. Times are converted from epoch seconds to ms.
  */
-export function ohlcToPriceSeries(res: NobitexOhlcResponse): PriceSeries {
+export function ohlcToPriceSeries(res: NobitexOhlcResponse | null): PriceSeries {
+  if (res === null) return PriceSeries.EMPTY;
   const points: PricePoint[] = res.t.map((sec, i) => ({
     t: sec * 1000,
     price: res.o[i]!,

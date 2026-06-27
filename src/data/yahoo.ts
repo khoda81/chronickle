@@ -61,11 +61,13 @@ export async function fetchSpaceXStock(opts: FetchStockOptions = {}): Promise<Pr
     const points: PricePoint[] = [];
 
     for (let i = 0; i < timestamps.length; i++) {
-      const tMs = timestamps[i] * 1000; // Convert seconds to milliseconds
+      const tSec = timestamps[i];
+      if (tSec === undefined) continue;
+      const tMs = tSec * 1000; // Convert seconds to milliseconds
       const price = opens[i];
 
       // Yahoo Finance sometimes includes nulls for halted trading minutes/days
-      if (price !== null && Number.isFinite(price) && price > 0) {
+      if (price !== null && price !== undefined && Number.isFinite(price) && price > 0) {
         points.push({
           t: tMs,
           price: price,
