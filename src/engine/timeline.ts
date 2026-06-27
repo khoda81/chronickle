@@ -28,6 +28,7 @@ import { Plot } from "./plot.ts";
 import { hitTestEvent } from "./hittest.ts";
 import { setRampPalette } from "./ramp.ts";
 import { maxSigmaFor } from "./gfx/layout.ts";
+import { DEFAULT_MIN_TICK_PX } from "./gfx/axis.ts";
 import type { QueryResult } from "../data/brokerOrchestrator.ts";
 
 /**
@@ -66,10 +67,12 @@ export interface TimelineOptions {
   readonly initialTimeRange: Range;
   readonly callbacks?: TimelineCallbacks;
   /**
-   * Synchronous data source queried every frame. Required — the timeline
-   * no longer stores a series; it pulls from this callback each draw.
-   */
+   /** Synchronous data source queried every frame. Required — the timeline
+    * no longer stores a series; it pulls from this callback each draw.
+    */
   readonly dataSource: DataSource;
+  /** Minimum on-screen spacing between axis ticks (CSS px). */
+  readonly minTickPx?: number;
 }
 
 interface TimelineState {
@@ -96,6 +99,7 @@ export class Timeline {
   private readonly plot: Plot;
   private readonly callbacks: TimelineCallbacks;
   private readonly dataSource: DataSource;
+  private readonly minTickPx: number;
   private state: TimelineState;
   private rafId: number | null = null;
 
@@ -112,6 +116,7 @@ export class Timeline {
   constructor(opts: TimelineOptions) {
     this.canvas = opts.canvas;
     this.dataSource = opts.dataSource;
+    this.minTickPx = opts.minTickPx ?? DEFAULT_MIN_TICK_PX;
     this.plot = new Plot({
       canvas: opts.canvas,
       initialTimeRange: opts.initialTimeRange,
@@ -249,7 +254,7 @@ export class Timeline {
     );
     // heat.drawFadeOverlay();
     frame.events().drawRow(events, hovered);
-    frame.axis().drawTimeAxis();
+    frame.drawTimeAxis(this.minTickPx);
   };
 
   private onResize = (): void => this.resize();

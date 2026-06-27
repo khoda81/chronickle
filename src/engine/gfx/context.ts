@@ -176,6 +176,11 @@ export class Frame implements Disposable {
     return Axis.create(this);
   }
 
+  /** Draw the time axis with an explicit minimum tick spacing (CSS px). */
+  drawTimeAxis(minTickPx?: number): void {
+    this.axis().drawTimeAxis(minTickPx);
+  }
+
   // --- lifecycle ---------------------------------------------------------
 
   [Symbol.dispose](): void {
