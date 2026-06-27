@@ -13,10 +13,11 @@
  *   43200 ("720"), 86400 ("D"), 172800 ("2D"), 259200 ("3D")
  */
 
-import { Fetcher, FetchRangeOptions } from "./fetcher.ts";
+import { Fetcher, FetchRangeOptions, FetchRangeResult } from "./fetcher.ts";
 import { pickResolution } from "./resolution.ts";
 import { fetchOhlc, NobitexOhlcResponse, ohlcToPriceSeries } from "./nobitex.ts";
 import { PricePoint } from "../domain.ts";
+import { Range } from "../engine/range.ts";
 
 const MS = 1000;
 
@@ -52,7 +53,7 @@ export function createNobitexFetcher(opts: NobitexFetcherOptions = {}): Fetcher 
   return {
     nativePeriodsMs: NOBITEX_PERIODS_MS,
 
-    async fetchRange(req: FetchRangeOptions): Promise<PricePoint[]> {
+    async fetchRange(req: FetchRangeOptions): Promise<FetchRangeResult> {
       const periodMs = pickResolution(NOBITEX_PERIODS_MS, req.maxDeltaTMs);
       const entry = NOBITEX_LADDER.find((e) => e.periodMs === periodMs)!;
       if (!entry) {
@@ -68,11 +69,32 @@ export function createNobitexFetcher(opts: NobitexFetcherOptions = {}): Fetcher 
         timeoutMs,
       });
 
-      // null means "no_data" — return an empty array, not an error.
-      if (res === null) return [];
+      // "no_data" means no candles exist for this range at all — the request
+      // is exhausted and the broker should not retry it.
+      if (res === null) {
+        return { points: [], coveredRange: null };
+      }
 
-      // ohlcToPriceSeries already converts epoch seconds -> ms and validates.
-      return ohlcToPriceSeries(res).observations as PricePoint[];
+      const points = ohlcToPriceSeries(res).observations as PricePoint[];
+      if (points.length === 0) {
+        return { points: [], coveredRange: null };
+      }
+
+      const firstT = points[0]!.t;
+      const lastT = points[points.length - 1]!.t;
+
+      // Nobitex caps OHLC responses at 1000 candles anchored at `to`. If the
+      // first returned candle is strictly after `from`, the prefix
+      // [from, firstT) was truncated and still needs to be fetched. We report
+      // only the actually-covered sub-range so the broker keeps that prefix as
+      // a gap and re-requests it on the next query (progressive backfill).
+      //
+      // If the first candle is at or before `from`, the response was not
+      // truncated on the left, so the whole request is exhausted.
+      const covered: Range | null =
+        firstT <= req.range.min ? null : Range.create(firstT, Math.max(lastT, firstT + 1));
+
+      return { points, coveredRange: covered };
     },
   };
 }

@@ -77,13 +77,17 @@ export class Broker {
     const tMax = evalTime[evalTime.length - 1]!;
     const range = safeRange(tMin, tMax);
 
-    // Coverage check: have we fetched this range at all?
-    const covered = this.fetched.covers(range);
+    // Coverage check: which sub-ranges of the visible window have we already
+    // fetched? `RangeSet.gaps` returns the unfilled sub-ranges in ascending
+    // order. We request each gap independently so a single visible window can
+    // drive multiple backfill fetches in parallel (e.g. after scrolling left
+    // into uncharted territory while the right side is already cached).
+    const gaps = this.fetched.gaps(range);
     const hasAnyCached =
       this.store.pointCount > 0 && result.leadingNaN + result.trailingNaN < evalTime.length;
 
     let status: QueryStatus;
-    if (covered && hasAnyCached) {
+    if (gaps.length === 0 && hasAnyCached) {
       // Coverage exists. Resolution check: is the cached data fine enough?
       // We approximate by checking the store's coarsest gap relative to
       // maxDeltaTMs. A precise per-bucket resolution check is expensive; the
@@ -92,10 +96,10 @@ export class Broker {
       status = "complete";
     } else if (hasAnyCached) {
       status = "partial";
-      void this.requestFetch(range, maxDeltaTMs);
+      for (const g of gaps) void this.requestFetch(g, maxDeltaTMs);
     } else {
       status = "empty";
-      void this.requestFetch(range, maxDeltaTMs);
+      for (const g of gaps) void this.requestFetch(g, maxDeltaTMs);
     }
 
     return { ...result, status };
@@ -128,7 +132,7 @@ export class Broker {
     this.inFlight.add(key);
 
     try {
-      const points = await this.fetcher.fetchRange({ range, maxDeltaTMs });
+      const { points, coveredRange } = await this.fetcher.fetchRange({ range, maxDeltaTMs });
       if (points.length > 0) {
         const time = new Float64Array(points.length);
         const value = new Float32Array(points.length);
@@ -139,10 +143,14 @@ export class Broker {
         }
         this.store.insertBatch(time, value);
       }
-      // Mark the range as fetched whether or not we got points. An empty
-      // result (e.g. Nobitex "no_data" for a range with no candles) is a
-      // valid answer, not an error — we must not retry every frame.
-      this.fetched.add(range);
+      // Mark only the actually-covered sub-range as fetched. If the source
+      // truncated the response (e.g. Nobitex's 1000-candle cap anchored at
+      // `to`), `coveredRange` is that sub-range and the unfilled prefix stays
+      // a gap — the next query will re-request it (progressive backfill).
+      // `null` means the source asserts the whole request is exhausted (either
+      // "no_data", or the response was not truncated), so we mark the entire
+      // requested range.
+      this.fetched.add(coveredRange ?? range);
       this.notify();
     } catch (err) {
       // Surface failure loudly per AGENTS.md §2: re-throw to the console,
