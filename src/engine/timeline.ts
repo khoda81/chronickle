@@ -243,7 +243,7 @@ export class Timeline {
 
     // Layers.
     const heat = frame.heatmap();
-    heat.drawBoxStack(evalView, result.value, priceScale);
+    heat.drawWaveletField(evalView, result.value, priceScale);
     // heat.drawFadeOverlay();
     frame.events().drawRow(events, hovered);
     frame.axis().drawTimeAxis();

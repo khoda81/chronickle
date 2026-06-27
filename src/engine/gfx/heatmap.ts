@@ -32,7 +32,7 @@ export interface HeatmapLayer {
    *                 NaN where the broker had no coverage (gaps are skipped).
    * @param priceScale Vertical scale for the response normalization.
    */
-  drawBoxStack(evalTime: Float64Array, value: Float32Array, priceScale: number): void;
+  drawWaveletField(evalTime: Float64Array, value: Float32Array, priceScale: number): void;
   drawFadeOverlay(): void;
 }
 
@@ -53,14 +53,14 @@ class HeatmapImpl implements HeatmapLayer {
 
   constructor(private readonly frame: Frame) {}
 
-  drawBoxStack(evalTime: Float64Array, value: Float32Array, priceScale: number): void {
+  drawWaveletField(evalTime: Float64Array, value: Float32Array, priceScale: number): void {
     const { tx, ctx, dpr } = this.frame;
     const width = tx.screenDomain.max - tx.screenDomain.min;
     const height = tx.yDomain.max - tx.yDomain.min;
 
     if (evalTime.length < 2 || width <= 0) return;
     if (evalTime.length !== value.length) {
-      throw new Error(`drawBoxStack: length mismatch (${evalTime.length} vs ${value.length})`);
+      throw new Error(`drawWaveletField: length mismatch (${evalTime.length} vs ${value.length})`);
     }
 
     const numPx = Math.ceil(width * dpr);
