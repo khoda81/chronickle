@@ -27,6 +27,7 @@ import { DataTransform } from "./transform.ts";
 import { Plot } from "./plot.ts";
 import { hitTestEvent } from "./hittest.ts";
 import { setRampPalette } from "./ramp.ts";
+import { maxSigmaFor } from "./gfx/layout.ts";
 import type { QueryResult } from "../data/brokerOrchestrator.ts";
 
 /**
@@ -207,26 +208,23 @@ export class Timeline {
     // Background.
     frame.fillRectPx(0, 0, frame.width, frame.height, "#05070d");
 
-    // Compute pixel-boundary timestamps over a padded range and query the
-    // broker. The wavelet kernel has a time radius, so jumps just past the
-    // left/right edges still contribute to on-screen pixels. We pad the
-    // query range by a fraction of the visible span on each side and feed
-    // the full padded arrays to the heatmap, which clips jump contributions
-    // to the visible pixel range internally.
-    //
-    // The padding also lets the broker fetch a wider interval at a coarser
-    // resolution (the off-screen edges don't need per-pixel detail), though
-    // for now we use the same maxDeltaTMs across the whole range.
-    const PAD_RATIO = 0.5; // 50% of visible span on each side
-    const span = timeRange.max - timeRange.min;
-    const pad = span * PAD_RATIO;
-    const paddedMin = timeRange.min - pad;
-    const paddedMax = timeRange.max + pad;
+    const dpr = window.devicePixelRatio || 1;
+    const numPx = Math.ceil(width * dpr);
+    const maxSigma = maxSigmaFor(numPx);
+    // timePerPx in *device* pixels (maxSigma is in device pixels).
+    const timePerPx = (timeRange.max - timeRange.min) / numPx;
+    const kernelReach = maxSigma * timePerPx; // in epoch ms
+
+    // Pad by exactly kernelReach on each side: one maxSigma-width of samples
+    // at the per-device-pixel spacing. The padded grid is uniform so the box
+    // filter (whose sigma is in device pixels) operates correctly.
+    const padLeft = maxSigma;
+    const padRight = maxSigma;
+    const paddedN = padLeft + numPx + padRight;
+    const paddedMin = timeRange.min - padLeft * timePerPx;
+    const paddedMax = timeRange.max + padRight * timePerPx;
     const paddedSpan = paddedMax - paddedMin;
 
-    // Sample the padded range at the same per-pixel density as the visible
-    // region so the heatmap's sigma math (which is in pixels) stays consistent.
-    const paddedN = Math.ceil((paddedSpan / span) * width) + 1;
     if (this.evalTime.length < paddedN) {
       this.evalTime = new Float64Array(paddedN);
     }
@@ -235,15 +233,20 @@ export class Timeline {
       this.evalTime[i] = paddedMin + i * step;
     }
     const evalView = this.evalTime.subarray(0, paddedN) as Float64Array;
-    // maxDeltaTMs for the fetch: one sample per visible pixel is the floor.
-    // Off-screen padding can be coarser, but the broker dedups by range, so
-    // using the visible step everywhere is fine for v1.
-    const visibleStep = span / width;
-    const result = this.dataSource(evalView, visibleStep);
+    // maxDeltaTMs for the fetch: one sample per visible device pixel is the
+    // floor. The off-screen padding could be coarser (the kernel there is
+    // wide and smooth), but the broker dedups by range and the staircase
+    // evaluator handles any spacing, so using the visible step everywhere is
+    // correct and simple. A future optimization could query the off-screen
+    // region at a coarser maxDeltaTMs to reduce fetch/eval cost.
+    const result = this.dataSource(evalView, timePerPx);
 
     // Layers.
     const heat = frame.heatmap();
-    heat.drawWaveletField(evalView, result.value, priceScale);
+    heat.drawWaveletField(
+      { evalTime: evalView, value: result.value, padLeft, padRight },
+      priceScale,
+    );
     // heat.drawFadeOverlay();
     frame.events().drawRow(events, hovered);
     frame.axis().drawTimeAxis();

@@ -1,5 +1,5 @@
 import type { Frame } from "./context.ts";
-import { HEAT_HEIGHT, heatTopY, NUM_BANDS } from "./layout.ts";
+import { HEAT_HEIGHT, heatTopY, MIN_SIGMA, NUM_BANDS, maxSigmaFor } from "./layout.ts";
 import { rampLut, rampIndex } from "../ramp.ts";
 
 /**
@@ -70,16 +70,40 @@ function boxFilter(input: Float64Array, output: Float64Array, r: number): void {
   }
 }
 
+/**
+ * The padded evaluation grid passed to `drawWaveletField`.
+ *
+ * The wavelet kernel has a finite radius (up to `maxSigma` pixels), so jumps
+ * just outside the visible window still contribute to on-screen pixels near
+ * the edges. The caller fetches a padded range and passes it here so the
+ * impulse train can include those off-screen jumps.
+ *
+ * The grid is uniform at the visible per-pixel spacing. `padLeft` and
+ * `padRight` are the number of off-screen samples on each side; the visible
+ * samples are `evalTime[padLeft .. evalTime.length - padRight - 1]`. The
+ * heatmap builds the impulse train over the full padded range, runs the box
+ * filter, then crops to the visible portion for rendering.
+ */
+export interface PaddedEval {
+  /** Ascending timestamps spanning visible + padding, at per-pixel spacing. */
+  readonly evalTime: Float64Array;
+  /** Staircase values aligned with `evalTime`. NaN = no coverage (gap). */
+  readonly value: Float32Array;
+  /** Number of off-screen samples before the visible region. */
+  readonly padLeft: number;
+  /** Number of off-screen samples after the visible region. */
+  readonly padRight: number;
+}
+
 export interface HeatmapLayer {
   /**
    * Draw the wavelet heatmap from a staircase-evaluated series.
    *
-   * @param evalTime  Ascending pixel-boundary timestamps (length W+1).
-   * @param value     Staircase values at each timestamp, aligned with evalTime.
-   *                 NaN where the broker had no coverage (gaps are skipped).
+   * @param padded   Padded eval grid: visible samples plus `maxSigma` samples
+   *                 of padding on each side so edge pixels see the full kernel.
    * @param priceScale Vertical scale for the response normalization.
    */
-  drawWaveletField(evalTime: Float64Array, value: Float32Array, priceScale: number): void;
+  drawWaveletField(padded: PaddedEval, priceScale: number): void;
   drawFadeOverlay(): void;
 }
 
@@ -104,32 +128,50 @@ class HeatmapImpl implements HeatmapLayer {
 
   constructor(private readonly frame: Frame) {}
 
-  drawWaveletField(evalTime: Float64Array, value: Float32Array, priceScale: number): void {
+  drawWaveletField(padded: PaddedEval, priceScale: number): void {
     const { tx, ctx, dpr } = this.frame;
     const width = tx.screenDomain.max - tx.screenDomain.min;
     const height = tx.yDomain.max - tx.yDomain.min;
 
+    const { evalTime, value, padLeft, padRight } = padded;
     if (evalTime.length < 2 || width <= 0) return;
     if (evalTime.length !== value.length) {
       throw new Error(`drawWaveletField: length mismatch (${evalTime.length} vs ${value.length})`);
+    }
+    if (padLeft < 0 || padRight < 0 || padLeft + padRight >= evalTime.length) {
+      throw new Error(
+        `drawWaveletField: bad padding (padLeft=${padLeft}, padRight=${padRight}, len=${evalTime.length})`,
+      );
     }
 
     const numPx = Math.ceil(width * dpr);
     if (numPx <= 0) return;
 
+    // The padded grid spans [padLeft + numPx + padRight] samples at the
+    // visible per-pixel spacing. The visible region is samples
+    // [padLeft, padLeft + numPx).
+    const paddedLen = evalTime.length;
+    const visibleStart = padLeft;
+    const visibleEnd = padLeft + numPx;
+    if (visibleEnd + padRight > paddedLen) {
+      throw new Error(
+        `drawWaveletField: padded grid too short (need ${visibleEnd + padRight}, got ${paddedLen})`,
+      );
+    }
+
     const y = heatTopY(height);
     const rateScale = Math.exp(priceScale);
     const ramp = rampLut();
 
-    const minSigma = 14;
-    const maxSigma = Math.max(minSigma, Math.min(128, numPx / 4));
+    const maxSigma = maxSigmaFor(numPx);
 
-    // Grow scratch buffers to fit the current frame. Only the response buffer
-    // scales with NUM_BANDS; the per-row buffers scale with numPx.
-    if (this.impulse.length < numPx) {
-      this.impulse = new Float64Array(numPx);
-      this.scratchA = new Float64Array(numPx);
-      this.scratchB = new Float64Array(numPx);
+    // Grow scratch buffers to fit the padded grid. The impulse train and box
+    // passes operate over the full padded length; only the response buffer is
+    // sized to the visible region (numPx per band).
+    if (this.impulse.length < paddedLen) {
+      this.impulse = new Float64Array(paddedLen);
+      this.scratchA = new Float64Array(paddedLen);
+      this.scratchB = new Float64Array(paddedLen);
     }
     if (this.response.length < NUM_BANDS * numPx) {
       this.response = new Float64Array(NUM_BANDS * numPx);
@@ -143,14 +185,34 @@ class HeatmapImpl implements HeatmapLayer {
     const imgData = this.offCtx.createImageData(numPx, NUM_BANDS);
     const data = imgData.data;
 
-    const timePerPx = tx.xToTime(1 / dpr) - tx.xToTime(0);
+    // Grid spacing in time, derived from the eval timestamps. The visible
+    // region spans [padLeft, padLeft + numPx) samples, so its time span is
+    // evalTime[padLeft + numPx - 1] - evalTime[padLeft], and the per-device-
+    // pixel time spacing is that span / (numPx - 1).
+    const timePerPx =
+      numPx > 1 ? (evalTime[visibleStart + numPx - 1]! - evalTime[visibleStart]!) / (numPx - 1) : 0;
 
-    // --- Build the impulse train -------------------------------------------
-    // One Dirac per jump, placed at the pixel index of the jump timestamp.
-    // Gaps (NaN values) break runs: no impulse is emitted across a gap, so
-    // the convolution does not smear returns across broker coverage holes.
+    // --- Build the impulse train over the padded range ---------------------
+    // One Dirac per jump, placed at the sample index of the jump timestamp
+    // within the padded grid. Gaps (NaN values) break runs: no impulse is
+    // emitted across a gap, so the convolution does not smear returns across
+    // broker coverage holes.
+    //
+    // The padded grid is uniform at the visible per-pixel spacing, so the
+    // sample index is: (tJump - paddedMin) / step, where paddedMin is the
+    // first eval timestamp and step is the uniform grid spacing. This maps
+    // off-screen jumps to indices within the padded buffer (they live in
+    // [0, padLeft) and [visibleEnd, paddedLen)).
     const impulse = this.impulse;
-    impulse.fill(0, 0, numPx);
+    impulse.fill(0, 0, paddedLen);
+    // Derive the grid spacing from the eval timestamps themselves rather than
+    // from the transform, so the impulse train is aligned with the grid the
+    // caller actually built (the two agree by construction, but this avoids
+    // any floating-point drift and makes the heatmap independent of the
+    // transform's exact convention).
+    const paddedMin = evalTime[0]!;
+    const paddedMax = evalTime[paddedLen - 1]!;
+    const invStep = (paddedLen - 1) / (paddedMax - paddedMin);
 
     let prevV = NaN;
     for (let i = 0; i < evalTime.length; i++) {
@@ -165,26 +227,26 @@ class HeatmapImpl implements HeatmapLayer {
       }
       const tJump = evalTime[i]!;
       const jumpReturn = Math.log(v / prevV);
-      // Pixel index of the jump relative to the screen origin. Jumps outside
-      // the padded view are dropped (they would land beyond the buffer).
-      const xFloat = (tx.timeToX(tJump) - tx.screenDomain.min) * dpr;
+      // Sample index within the padded grid.
+      const xFloat = (tJump - paddedMin) * invStep;
       const xi = Math.round(xFloat);
-      if (xi >= 0 && xi < numPx) {
+      if (xi >= 0 && xi < paddedLen) {
         impulse[xi] = impulse[xi]! + jumpReturn;
       }
       prevV = v;
     }
 
     // --- Per-band triple-box Gaussian --------------------------------------
-    // For each band we run three box-filter passes over the impulse train and
-    // write the result into the band's row of `response`. Cost is O(numPx)
-    // per band, independent of sigma and of the number of jumps.
+    // For each band we run three box-filter passes over the *padded* impulse
+    // train and crop the visible portion into `response`. Running over the
+    // padded range means edge pixels see the real off-screen jumps instead
+    // of the replicate boundary's clamped zeros.
     const response = this.response;
     const scratchA = this.scratchA;
     const scratchB = this.scratchB;
 
     for (let b = 0; b < NUM_BANDS; b++) {
-      const sigma = minSigma * Math.pow(maxSigma / minSigma, b / (NUM_BANDS - 1));
+      const sigma = MIN_SIGMA * Math.pow(maxSigma / MIN_SIGMA, b / (NUM_BANDS - 1));
       const sigmaTime = sigma * timePerPx;
       // Per-band normalization: the previous splat divided by sigmaTime and
       // multiplied by rateScale. We fold both into the band's final pass so
@@ -192,16 +254,15 @@ class HeatmapImpl implements HeatmapLayer {
       const norm = rateScale / sigmaTime;
       const [r1, r2, r3] = boxRadiiForSigma(sigma);
 
-      // Three box passes, ping-ponging between scratchA and scratchB.
+      // Three box passes over the full padded grid, ping-ponging.
       boxFilter(impulse, scratchA, r1);
       boxFilter(scratchA, scratchB, r2);
       boxFilter(scratchB, scratchA, r3);
 
-      // scratchA now holds the triple-box result. Write it into the band's
-      // row of `response`, applying the per-band normalization.
+      // Crop the visible portion into the band's row of `response`.
       const bandOffset = b * numPx;
       for (let x = 0; x < numPx; x++) {
-        response[bandOffset + x] = scratchA[x]! * norm;
+        response[bandOffset + x] = scratchA[visibleStart + x]! * norm;
       }
     }
 
