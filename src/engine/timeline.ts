@@ -29,6 +29,7 @@ import { hitTestEvent } from "./hittest.ts";
 import { setRampPalette } from "./ramp.ts";
 import { maxSigmaFor } from "./gfx/layout.ts";
 import { DEFAULT_MIN_TICK_PX } from "./gfx/axis.ts";
+import type { Frame } from "./gfx/context.ts";
 import type { QueryResult } from "../data/brokerOrchestrator.ts";
 
 /**
@@ -94,6 +95,11 @@ const WHEEL_SENSITIVITY = 0.003;
 /** Time scroll sensitivity per normalized pixel of wheel delta. */
 const TIMESCROLL_SENSITIVITY = 3;
 
+/** "Now" marker stroke color. */
+const NOW_STROKE = "rgba(255, 255, 255, 0.55)";
+/** "Now" marker line width (CSS px). */
+const NOW_WIDTH = 1;
+
 export class Timeline {
   private readonly canvas: HTMLCanvasElement;
   private readonly plot: Plot;
@@ -112,6 +118,11 @@ export class Timeline {
   // on both sides so off-screen jumps near the edges still contribute to the
   // wavelet response on screen.
   private evalTime: Float64Array = new Float64Array(0);
+
+  // "Now" marker timer. Armed by `drawNow` to fire when wall-clock time
+  // crosses the next device-pixel boundary, so the line moves one pixel at a
+  // time without a 60fps timer. Cleared on dispose and re-armed every frame.
+  private nowTimer: number | null = null;
 
   constructor(opts: TimelineOptions) {
     this.canvas = opts.canvas;
@@ -165,6 +176,7 @@ export class Timeline {
   /** Stop the render loop and detach listeners. */
   dispose(): void {
     if (this.rafId !== null) cancelAnimationFrame(this.rafId);
+    if (this.nowTimer !== null) clearTimeout(this.nowTimer);
     this.unbindEvents();
   }
 
@@ -200,6 +212,8 @@ export class Timeline {
     // draw, so it can never be lost across save/restore.
     this.state = { ...this.state, dirty: true };
   }
+
+  private onResize = (): void => this.resize();
 
   private loop = (): void => {
     this.rafId = requestAnimationFrame(this.loop);
@@ -255,9 +269,52 @@ export class Timeline {
     // heat.drawFadeOverlay();
     frame.events().drawRow(events, hovered);
     frame.drawTimeAxis(this.minTickPx);
+
+    // "Now" marker: a vertical line at the current wall-clock time. It only
+    // moves when `now` crosses a pixel boundary, so we schedule the next
+    // redraw for exactly that moment instead of running a 60fps timer. The
+    // delay is `timePerPx` ms (one device pixel of time); when zoomed out
+    // far enough that a pixel spans minutes or hours, the timer fires only
+    // every few minutes/hours. When `now` is off-screen, no timer is needed
+    // — panning/zooming back into view re-arms it via the redraw path.
+    this.drawNow(frame, timeRange, timePerPx);
   };
 
-  private onResize = (): void => this.resize();
+  /**
+   * Draw the "now" vertical line and arm a timer for the next pixel crossing.
+   *
+   * The line is drawn at `Date.now()` if it falls within the visible time
+   * range. We then schedule a `reqDraw` for the moment `now` advances by one
+   * device pixel (`timePerPx` ms), so the line appears to move continuously
+   * without burning a per-frame timer. The timer is cleared and re-armed on
+   * every draw, so panning/zooming (which changes `timePerPx` or moves `now`
+   * on/off screen) is handled naturally by the next frame.
+   */
+  private drawNow(frame: Frame, timeRange: Range, timePerPx: number): void {
+    if (this.nowTimer !== null) {
+      clearTimeout(this.nowTimer);
+      this.nowTimer = null;
+    }
+
+    const now = Date.now();
+    if (now < timeRange.min || now > timeRange.max) return;
+
+    const x = frame.tx.timeToX(now);
+    frame.vline(x, 0, frame.height, NOW_STROKE, NOW_WIDTH);
+
+    // Delay until `now` crosses the next device-pixel boundary. We compute
+    // the fractional pixel position and arm a timer for the remainder of the
+    // current pixel plus (n-1) full pixels — but since we only need to move by
+    // one pixel to be visually correct, the delay is simply `timePerPx` minus
+    // the sub-pixel remainder of the current position. Using the remainder
+    // keeps the line phase-locked to wall-clock time across re-arms.
+    const fracPx = x - Math.floor(x);
+    const delayMs = (timePerPx * (1 - fracPx)) / 30;
+    this.nowTimer = setTimeout(() => {
+      this.nowTimer = null;
+      this.reqDraw();
+    }, delayMs) as unknown as number;
+  }
 
   private onPointerDown = (e: PointerEvent): void => {
     this.dragging = true;
