@@ -6,7 +6,6 @@
  * status bar rather than swallowed.
  */
 
-import { fetchEventSet } from "./data/index.ts";
 import { Timeline } from "./engine/timeline.ts";
 import { Range } from "./engine/range.ts";
 import { PALETTES, rampPaletteName, type PaletteName } from "./engine/ramp.ts";
@@ -118,8 +117,9 @@ async function load(
       timeline.setTimeRange(Range.fit(cached.min, cached.max));
     }
   }
-  // TODO: We need some form of dynamic loading for paginated rss feeds
-  timeline.setEvents(await fetchEventSet());
+  // Events are now loaded on demand via the EventBroker (wired in a later
+  // commit). For now the timeline renders with an empty event set.
+  timeline.setEvents({ events: [] });
 }
 
 function main(): void {
@@ -142,7 +142,14 @@ function main(): void {
           hideTooltip(tooltip);
           return;
         }
-        showTooltip(tooltip, event.px, event.py, event);
+        // Source display name will be resolved via FeedRegistry in a later
+        // commit; for now use the feedId as a placeholder label.
+        showTooltip(tooltip, event.px, event.py, {
+          title: event.title,
+          link: event.link,
+          source: event.feedId,
+          t: event.t,
+        });
       },
     },
   });
