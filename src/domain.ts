@@ -57,6 +57,8 @@ export interface RssFeed {
   readonly url: string;
   /** Derived at registration via golden-angle oklch. Immutable. */
   readonly color: string;
+  /** Whether the feed contributes events to the timeline. Toggled via UI. */
+  readonly enabled: boolean;
 }
 
 export interface NewsEvent {

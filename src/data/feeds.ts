@@ -1,6 +1,7 @@
 /**
  * FeedRegistry: the single source of truth for which RSS/Atom feeds are
- * active, their stable ids, display names, and derived colors.
+ * registered, their stable ids, display names, derived colors, and
+ * enabled/disabled state.
  *
  * Invariants (enforced structurally):
  *  - `id` is `hashUrl(url)` — deterministic; the same URL always maps to the
@@ -11,54 +12,20 @@
  *    range. This keeps colors stable across add/remove cycles.
  *  - `color` is derived from `colorIndex` via `idToColor` and stored on the
  *    feed so the renderer never recomputes it.
+ *  - `enabled` defaults to true on add; toggling does not affect color or
+ *    identity. Disabled feeds stay in the registry (persisted) and are
+ *    excluded from fetching/rendering via `active()`.
  *
  * Persistence: the registry serializes to `localStorage` under
- * `STORAGE_KEY`. Defaults are seeded on first load; user-added feeds are
- * merged on top. All feeds (including defaults) are removable and the full
- * list is persisted.
+ * `STORAGE_KEY`. The seed list (application defaults, owned by `main.ts`)
+ * is used only when storage is empty or absent. All feeds (including
+ * defaults) are removable and the full list is persisted.
  */
 
 import type { RssFeed } from "../domain.ts";
 import { idToColor } from "./color.ts";
 
 const STORAGE_KEY = "chronicle.feeds";
-
-/**
- * Default feeds seeded on first load. Listed in a deliberate order so the
- * initial color assignment is stable and visually spread.
- */
-export const DEFAULT_FEEDS: readonly RssFeed[] = [
-  {
-    id: "reuters",
-    source: "Reuters",
-    url: "https://www.reutersagency.com/feed/?best-top-news&post_type=best",
-    color: idToColor(0),
-  },
-  {
-    id: "aljazeera",
-    source: "Al Jazeera",
-    url: "https://www.aljazeera.com/xml/rss/all.xml",
-    color: idToColor(1),
-  },
-  {
-    id: "bbc",
-    source: "BBC World",
-    url: "http://feeds.bbci.co.uk/news/world/rss.xml",
-    color: idToColor(2),
-  },
-  {
-    id: "yahoo",
-    source: "Yahoo World",
-    url: "https://news.yahoo.com/rss/world",
-    color: idToColor(3),
-  },
-  {
-    id: "nyt",
-    source: "NYT World",
-    url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
-    color: idToColor(4),
-  },
-];
 
 /**
  * A minimal, deterministic string hash (FNV-1a 32-bit). Good enough for feed
@@ -81,6 +48,7 @@ interface StoredFeed {
   readonly source: string;
   readonly url: string;
   readonly colorIndex: number;
+  readonly enabled: boolean;
 }
 
 export class FeedRegistry {
@@ -92,23 +60,26 @@ export class FeedRegistry {
 
   private constructor() {}
 
-  /** Seed a registry with the default feeds. */
-  static withDefaults(): FeedRegistry {
+  /**
+   * Seed a registry from an explicit default feed list (owned by `main.ts`).
+   * The registry itself holds no default policy.
+   */
+  static withDefaults(seed: readonly RssFeed[]): FeedRegistry {
     const r = new FeedRegistry();
-    for (let i = 0; i < DEFAULT_FEEDS.length; i++) {
-      r.addKnown(DEFAULT_FEEDS[i]!, i);
+    for (let i = 0; i < seed.length; i++) {
+      r.addKnown(seed[i]!, i);
     }
     return r;
   }
 
   /**
-   * Load from localStorage, falling back to defaults if storage is empty or
-   * corrupt. Corrupt entries are surfaced loudly (per AGENTS.md §2): a
-   * malformed JSON payload resets to defaults rather than silently swallowing.
+   * Load from localStorage, falling back to `seed` if storage is empty or
+   * absent. Corrupt entries are surfaced loudly (per AGENTS.md §2): a
+   * malformed JSON payload throws rather than silently swallowing.
    */
-  static load(): FeedRegistry {
+  static load(seed: readonly RssFeed[]): FeedRegistry {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw === null) return FeedRegistry.withDefaults();
+    if (raw === null) return FeedRegistry.withDefaults(seed);
 
     let parsed: unknown;
     try {
@@ -132,13 +103,14 @@ export class FeedRegistry {
           source: entry.source,
           url: entry.url,
           color: idToColor(entry.colorIndex),
+          enabled: entry.enabled,
         },
         entry.colorIndex,
       );
     }
     // If storage was empty (e.g. user removed all feeds), seed defaults so
     // the app is never feedless on reload.
-    if (r.feeds.size === 0) return FeedRegistry.withDefaults();
+    if (r.feeds.size === 0) return FeedRegistry.withDefaults(seed);
     return r;
   }
 
@@ -151,6 +123,7 @@ export class FeedRegistry {
         source: f.source,
         url: f.url,
         colorIndex: this.colorIndex.get(f.id)!,
+        enabled: f.enabled,
       });
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
@@ -163,6 +136,7 @@ export class FeedRegistry {
    *
    * `source` is the display name; if omitted, the host is used as a
    * placeholder until the feed is fetched and its real <title> extracted.
+   * New feeds are enabled by default.
    */
   add(url: string, source?: string): RssFeed {
     const id = hashUrl(url);
@@ -175,6 +149,7 @@ export class FeedRegistry {
       source: source ?? hostOf(url),
       url,
       color: idToColor(idx),
+      enabled: true,
     };
     this.feeds.set(id, feed);
     this.colorIndex.set(id, idx);
@@ -190,6 +165,17 @@ export class FeedRegistry {
     this.feeds.set(id, { ...existing, source });
   }
 
+  /** Toggle the enabled flag of a feed. Returns the updated feed. */
+  setEnabled(id: string, enabled: boolean): RssFeed {
+    const existing = this.feeds.get(id);
+    if (!existing) {
+      throw new Error(`FeedRegistry.setEnabled: unknown feed id ${id}`);
+    }
+    const updated = { ...existing, enabled };
+    this.feeds.set(id, updated);
+    return updated;
+  }
+
   /** Remove a feed. Its color index is freed for reuse. */
   remove(id: string): void {
     const idx = this.colorIndex.get(id);
@@ -202,6 +188,11 @@ export class FeedRegistry {
   /** All registered feeds, in insertion order (Map preserves it). */
   all(): readonly RssFeed[] {
     return [...this.feeds.values()];
+  }
+
+  /** Only enabled feeds, in insertion order. Used by the EventBroker. */
+  active(): readonly RssFeed[] {
+    return [...this.feeds.values()].filter((f) => f.enabled);
   }
 
   /** Look up a feed by id, or throw if unknown. */
@@ -257,6 +248,7 @@ function isStoredFeed(v: unknown): v is StoredFeed {
     typeof o.id === "string" &&
     typeof o.source === "string" &&
     typeof o.url === "string" &&
-    typeof o.colorIndex === "number"
+    typeof o.colorIndex === "number" &&
+    typeof o.enabled === "boolean"
   );
 }

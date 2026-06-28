@@ -13,9 +13,54 @@ import { Broker } from "./data/brokerOrchestrator.ts";
 import { createNobitexFetcher } from "./data/nobitexFetcher.ts";
 import { EventBroker, createRssEventFetcher, fetchFeed, defaultProxy } from "./data/index.ts";
 import { FeedRegistry } from "./data/feeds.ts";
+import { idToColor } from "./data/color.ts";
 import type { RssFeed } from "./domain.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Default feeds seeded on first load (or when the user has removed all
+ * feeds). Owned by main.ts — the registry itself holds no default policy.
+ * Listed in a deliberate order so the initial color assignment is stable
+ * and visually spread.
+ */
+const DEFAULT_FEEDS: readonly RssFeed[] = [
+  {
+    id: "reuters",
+    source: "Reuters",
+    url: "https://www.reutersagency.com/feed/?best-top-news&post_type=best",
+    color: idToColor(0),
+    enabled: true,
+  },
+  {
+    id: "aljazeera",
+    source: "Al Jazeera",
+    url: "https://www.aljazeera.com/xml/rss/all.xml",
+    color: idToColor(1),
+    enabled: true,
+  },
+  {
+    id: "bbc",
+    source: "BBC World",
+    url: "http://feeds.bbci.co.uk/news/world/rss.xml",
+    color: idToColor(2),
+    enabled: true,
+  },
+  {
+    id: "yahoo",
+    source: "Yahoo World",
+    url: "https://news.yahoo.com/rss/world",
+    color: idToColor(3),
+    enabled: true,
+  },
+  {
+    id: "nyt",
+    source: "NYT World",
+    url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
+    color: idToColor(4),
+    enabled: true,
+  },
+];
 
 function el<T extends HTMLElement>(tag: string, cls?: string): T {
   const e = document.createElement(tag);
@@ -153,7 +198,7 @@ function main(): void {
 
   // Feeds + events: the registry persists user-added feeds to localStorage;
   // the EventBroker fetches on demand via the timeline's eventSource.
-  const registry = FeedRegistry.load();
+  const registry = FeedRegistry.load(DEFAULT_FEEDS);
   const eventBroker = new EventBroker(createRssEventFetcher({ registry }));
 
   const timeline = new Timeline({
