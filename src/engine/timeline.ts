@@ -76,6 +76,12 @@ export interface HoverInfo {
 export interface TimelineCallbacks {
   /** Called when the user hovers an event (or leaves it). */
   onHover?: (event: HoverInfo | null) => void;
+  /**
+   * Called when the viewport (time range) or priceScale changes via user
+   * interaction (pan/zoom/shift+wheel) or programmatic setTimeRange. The
+   * caller uses this to persist UI state. Fired synchronously on change.
+   */
+  onViewportChange?: (viewport: { min: number; max: number }, priceScale: number) => void;
 }
 
 export interface TimelineOptions {
@@ -236,12 +242,25 @@ export class Timeline {
   setTimeRange(r: Range): void {
     this.state.timeRange = r;
     this.plot.setTimeRange(r);
+    this.notifyViewportChange();
     this.reqDraw();
   }
 
   /** Current visible time range. */
   getTimeRange(): Range {
     return this.state.timeRange;
+  }
+
+  /** Set the heatmap vertical scale (shift+wheel). Triggers a redraw. */
+  setPriceScale(scale: number): void {
+    this.state.priceScale = scale;
+    this.notifyViewportChange();
+    this.reqDraw();
+  }
+
+  /** Current priceScale (heatmap vertical zoom). */
+  getPriceScale(): number {
+    return this.state.priceScale;
   }
 
   /** Switch the heatmap color palette by name. Triggers a redraw. */
@@ -255,6 +274,14 @@ export class Timeline {
     if (this.rafId !== null) cancelAnimationFrame(this.rafId);
     if (this.nowTimer !== null) clearTimeout(this.nowTimer);
     this.unbindEvents();
+  }
+
+  /** Fire onViewportChange if subscribed. Called after any viewport/priceScale mutation. */
+  private notifyViewportChange(): void {
+    this.callbacks.onViewportChange?.(
+      { min: this.state.timeRange.min, max: this.state.timeRange.max },
+      this.state.priceScale,
+    );
   }
 
   // --- internals ---
@@ -457,8 +484,7 @@ export class Timeline {
     }
 
     if (e.shiftKey) {
-      this.state.priceScale -= dy * cfg.wheelSensitivity;
-      this.reqDraw();
+      this.setPriceScale(this.state.priceScale - dy * cfg.wheelSensitivity);
       return;
     }
     const tx = new DataTransform(

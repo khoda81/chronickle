@@ -8,13 +8,14 @@
 
 import { Timeline } from "./engine/timeline.ts";
 import { Range } from "./engine/range.ts";
-import { PALETTES, rampPaletteName, type PaletteName } from "./engine/ramp.ts";
+import { PALETTES, rampPaletteName, setRampPalette, type PaletteName } from "./engine/ramp.ts";
 import { Broker } from "./data/brokerOrchestrator.ts";
 import { createNobitexFetcher } from "./data/nobitexFetcher.ts";
 import { EventBroker, createRssEventFetcher, fetchFeed, defaultProxy } from "./data/index.ts";
 import { FeedRegistry } from "./data/feeds.ts";
 import { idToColor } from "./data/color.ts";
 import type { RssFeed } from "./domain.ts";
+import { loadUiState, saveUiState, flushUiState } from "./uiState.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -197,12 +198,23 @@ async function load(
 }
 
 function main(): void {
+  // Load saved UI state (viewport + palette) before building the app so the
+  // palette select reflects the saved choice. Falls back to defaults if absent.
+  const ui = loadUiState();
+  if (ui.palette && ui.palette in PALETTES) {
+    setRampPalette(ui.palette as PaletteName);
+  }
+
   const { canvas, tooltip, status, reload, palette, feedInput, feedAdd, feedList } = buildApp();
 
-  // Initial time range: last 24h. The broker will fetch this on the first
-  // query and re-fit once data lands.
+  // Initial time range: saved viewport if present, else last 24h. The broker
+  // will fetch this on the first query. If there's a saved viewport we skip
+  // the auto-fit-on-first-data below (we respect the user's last position).
   const now = Date.now();
-  const initial = Range.fit(now - DAY_MS, now);
+  const hasSavedViewport = ui.viewport !== undefined && ui.viewport.min < ui.viewport.max;
+  const initial = hasSavedViewport
+    ? Range.create(ui.viewport!.min, ui.viewport!.max)
+    : Range.fit(now - DAY_MS, now);
 
   const broker = new Broker(createNobitexFetcher({ symbol: "USDTIRT" }));
 
@@ -233,13 +245,17 @@ function main(): void {
           t: event.t,
         });
       },
+      onViewportChange: (viewport, priceScale) => {
+        saveUiState({ viewport, palette: rampPaletteName() });
+      },
     },
   });
 
-  // When the price broker inserts new data, request a redraw. Also re-fit the
-  // time range once on the first non-empty cache so the viewport shows the
-  // data instead of the default 24h guess.
-  let fitted = false;
+  // When the price broker inserts new data, request a redraw. If there's no
+  // saved viewport, re-fit the time range once on the first non-empty cache
+  // so the viewport shows the data instead of the default 24h guess. With a
+  // saved viewport we respect the user's last position and don't auto-fit.
+  let fitted = hasSavedViewport;
   broker.subscribe(() => {
     timeline.reqDraw();
     if (!fitted) {
@@ -379,7 +395,19 @@ function main(): void {
   palette.addEventListener("change", () => {
     // The select is populated from `Object.keys(PALETTES)`, so its value is
     // a PaletteName by construction.
-    timeline.setPalette(palette.value as PaletteName);
+    const name = palette.value as PaletteName;
+    timeline.setPalette(name);
+    saveUiState({ palette: name });
+  });
+
+  // Flush any debounced UI state on tab close/navigation so the last viewport
+  // and palette aren't lost. Without this, a close mid-debounce would revert
+  // to the previous save.
+  window.addEventListener("pagehide", () => {
+    flushUiState({
+      viewport: { min: timeline.getTimeRange().min, max: timeline.getTimeRange().max },
+      palette: rampPaletteName(),
+    });
   });
 }
 
