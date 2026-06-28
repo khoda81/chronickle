@@ -216,7 +216,7 @@ canvas.timeline:active {
 select {
   option {
     background: var(--bg);
-    color: var(--accent)
+    color: var(--accent);
 
     :hover {
       background: var(--accent);
