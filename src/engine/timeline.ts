@@ -92,6 +92,12 @@ export interface TimelineOptions {
    * them from this callback whenever the viewport moves.
    */
   readonly eventSource: EventSource;
+  /**
+   * Resolves a feed id to its color string (oklch or otherwise) for the
+   * event renderer. Required — the renderer is pure and does not own the
+   * FeedRegistry, so the caller injects the lookup.
+   */
+  readonly feedColorOf: (feedId: string) => string;
   /** Tunable parameters. Defaults to `DEFAULT_TIMELINE_CONFIG`. */
   readonly config?: Partial<TimelineConfig>;
 }
@@ -147,6 +153,7 @@ export class Timeline {
   private readonly callbacks: TimelineCallbacks;
   private readonly dataSource: DataSource;
   private readonly eventSource: EventSource;
+  private readonly feedColorOf: (feedId: string) => string;
   private readonly config: TimelineConfig;
   private rafId: number | null = null;
   private state: TimelineState;
@@ -172,6 +179,7 @@ export class Timeline {
     this.canvas = opts.canvas;
     this.dataSource = opts.dataSource;
     this.eventSource = opts.eventSource;
+    this.feedColorOf = opts.feedColorOf;
     this.config = { ...DEFAULT_TIMELINE_CONFIG, ...opts.config };
     this.plot = new Plot({
       canvas: opts.canvas,
@@ -337,7 +345,7 @@ export class Timeline {
       priceScale,
     );
     // heat.drawFadeOverlay();
-    frame.events().drawRow(events, hovered);
+    frame.events().drawRow(events, this.feedColorOf, hovered);
     frame.drawTimeAxis(this.config.minTickPx);
 
     // "Now" marker: a vertical line at the current wall-clock time. `drawNow`

@@ -143,6 +143,7 @@ function main(): void {
     initialTimeRange: initial,
     dataSource: (evalTime, maxDeltaTMs) => broker.query({ evalTime, maxDeltaTMs }),
     eventSource: (range) => eventBroker.query(range),
+    feedColorOf: (feedId) => registry.colorOf(feedId),
     callbacks: {
       onHover: (event) => {
         if (event === null) {
