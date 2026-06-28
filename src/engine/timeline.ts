@@ -195,9 +195,8 @@ export class Timeline {
 
     this.bindEvents();
     this.resize();
-    // Pull the initial event slice for the starting viewport, then kick the
-    // first frame. Subsequent draws are on-demand via reqDraw.
-    this.refreshEvents();
+    // Kick the first frame; the draw path queries eventSource and populates
+    // state.events. Subsequent draws are on-demand via reqDraw.
     this.reqDraw();
   }
 
@@ -217,11 +216,11 @@ export class Timeline {
 
   /**
    * Re-pull the visible event slice from the event source for the current
-   * viewport. Cheap (binary-search slice of the broker's sorted array) and
-   * safe to call frequently — the broker dedups backfill requests via its
-   * in-flight set, mirroring the price broker. Called automatically on
-   * viewport changes (pan/zoom/fit) and should be called by the broker's
-   * subscriber when new events land.
+   * viewport. Called by the EventBroker subscriber when new events land, so
+   * the next frame reflects the updated cache. The per-frame `draw` also
+   * queries eventSource directly, so this is only needed to force an
+   * immediate redraw outside the normal rAF cadence (e.g. after a feed
+   * toggle).
    */
   refreshEvents(): void {
     const { events } = this.eventSource(this.state.timeRange);
@@ -235,7 +234,6 @@ export class Timeline {
   setTimeRange(r: Range): void {
     this.state.timeRange = r;
     this.plot.setTimeRange(r);
-    this.refreshEvents();
     this.reqDraw();
   }
 
@@ -345,7 +343,12 @@ export class Timeline {
       priceScale,
     );
     // heat.drawFadeOverlay();
-    frame.events().drawRow(events, this.feedColorOf, hovered);
+    // Query the event source every frame, mirroring the price dataSource.
+    // The broker returns cached events synchronously and kicks async
+    // backfill per feed; its subscriber calls reqDraw() when data lands.
+    const eventResult = this.eventSource(this.state.timeRange);
+    this.state.events = { events: eventResult.events };
+    frame.events().drawRow(this.state.events, this.feedColorOf, hovered);
     frame.drawTimeAxis(this.config.minTickPx);
 
     // "Now" marker: a vertical line at the current wall-clock time. `drawNow`

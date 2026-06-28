@@ -240,11 +240,10 @@ function main(): void {
     }
   });
 
-  // When the EventBroker lands new events, re-pull the visible slice and
-  // redraw. refreshEvents is cheap (binary-search slice) and the broker
-  // dedups in-flight backfills, so notifying on every insert is fine.
+  // When the EventBroker lands new events, request a redraw. The draw path
+  // queries eventSource every frame, so the new events are picked up
+  // automatically on the next rAF.
   eventBroker.subscribe(() => {
-    timeline.refreshEvents();
     timeline.reqDraw();
   });
 
