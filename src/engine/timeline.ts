@@ -115,7 +115,7 @@ export const DEFAULT_TIMELINE_CONFIG: TimelineConfig = {
   wheelLineHeight: 16,
   wheelSensitivity: 0.003,
   timeScrollSensitivity: 3,
-  nowWidth: 1,
+  nowWidth: 2,
   // TODO: This should go to a theme object
   nowStroke: "rgba(255, 255, 255, 0.55)",
   minTickPx: DEFAULT_MIN_TICK_PX,
@@ -128,7 +128,7 @@ export class Timeline {
   private readonly dataSource: DataSource;
   private readonly config: TimelineConfig;
   private rafId: number | null = null;
-  state: TimelineState;
+  private state: TimelineState;
 
   // Pan scratch (no allocation in handlers).
   private dragging = false;
@@ -179,20 +179,20 @@ export class Timeline {
     if (this.rafId !== null) return;
     this.rafId = requestAnimationFrame(() => {
       this.rafId = null;
-      console.debug("Drawing");
       this.draw();
     });
   }
 
   /** Replace the event set. Triggers a redraw. */
   setEvents(events: EventSet): void {
-    this.state = { ...this.state, events, hovered: null };
+    this.state.events = events;
+    this.state.hovered = null;
     this.reqDraw();
   }
 
   /** Replace the visible time range (e.g. fit-to-data). Triggers a redraw. */
   setTimeRange(r: Range): void {
-    this.state = { ...this.state, timeRange: r };
+    this.state.timeRange = r;
     this.plot.setTimeRange(r);
     this.reqDraw();
   }
@@ -354,7 +354,7 @@ export class Timeline {
     const x = frame.tx.timeToX(now);
     frame.vline(x, 0, frame.height, this.config.nowStroke, this.config.nowWidth);
 
-    const SMOOTHING_FACTOR = 4;
+    const SMOOTHING_FACTOR = 10;
     const tillNextChange = timePerPx / SMOOTHING_FACTOR;
     // If `now` is before the visible window, wait for it to enter instead of
     // firing immediately — panning/zooming will re-arm via the redraw path.
