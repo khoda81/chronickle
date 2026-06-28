@@ -9,11 +9,11 @@
 import { Timeline } from "./engine/timeline.ts";
 import { Range } from "./engine/range.ts";
 import { PALETTES, rampPaletteName, setRampPalette, type PaletteName } from "./engine/ramp.ts";
-import { Broker } from "./data/brokerOrchestrator.ts";
-import { createNobitexFetcher } from "./data/nobitexFetcher.ts";
+import { Broker } from "./data/price/broker.ts";
+import { createNobitexFetcher } from "./data/price/exchanges/nobitexFetcher.ts";
 import { EventBroker, createRssEventFetcher, fetchFeed, defaultProxy } from "./data/index.ts";
-import { FeedRegistry } from "./data/feeds.ts";
-import { idToColor } from "./data/color.ts";
+import { FeedRegistry } from "./data/events/feeds.ts";
+import { idToColor } from "./data/events/color.ts";
 import type { RssFeed } from "./domain.ts";
 import { loadUiState, saveUiState, flushUiState } from "./uiState.ts";
 
@@ -258,22 +258,19 @@ function main(): void {
   let fitted = hasSavedViewport;
   broker.subscribe(() => {
     timeline.reqDraw();
-    if (!fitted) {
-      const cached = broker.cachedRange();
-      if (cached) {
-        timeline.setTimeRange(Range.fit(cached.min, cached.max));
-        fitted = true;
-        setStatus(status, `Loaded data: ${cached.min}..${cached.max}`);
-      }
-    }
+    if (fitted) return;
+
+    const cached = broker.cachedRange();
+    if (!cached) return;
+    timeline.setTimeRange(Range.fit(cached.min, cached.max));
+    fitted = true;
+    setStatus(status, `Loaded data: ${cached.min}..${cached.max}`);
   });
 
   // When the EventBroker lands new events, request a redraw. The draw path
   // queries eventSource every frame, so the new events are picked up
   // automatically on the next rAF.
-  eventBroker.subscribe(() => {
-    timeline.reqDraw();
-  });
+  eventBroker.subscribe(() => timeline.reqDraw());
 
   void load(timeline, status, broker);
 
@@ -376,9 +373,7 @@ function main(): void {
     }
   }
 
-  feedAdd.addEventListener("click", () => {
-    void addFeedFromInput();
-  });
+  feedAdd.addEventListener("click", () => void addFeedFromInput());
   feedInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
@@ -386,11 +381,9 @@ function main(): void {
     }
   });
 
-  reload.addEventListener("click", () => {
-    // For now, reload just re-queries; the broker cache persists. A true
-    // reload would clear the broker's store (to be added).
-    timeline.reqDraw();
-  });
+  // For now, reload just re-queries; the broker cache persists. A true
+  // reload would clear the broker's store (to be added).
+  reload.addEventListener("click", () => timeline.reqDraw());
 
   palette.addEventListener("change", () => {
     // The select is populated from `Object.keys(PALETTES)`, so its value is
@@ -403,12 +396,12 @@ function main(): void {
   // Flush any debounced UI state on tab close/navigation so the last viewport
   // and palette aren't lost. Without this, a close mid-debounce would revert
   // to the previous save.
-  window.addEventListener("pagehide", () => {
+  window.addEventListener("pagehide", () =>
     flushUiState({
       viewport: { min: timeline.getTimeRange().min, max: timeline.getTimeRange().max },
       palette: rampPaletteName(),
-    });
-  });
+    }),
+  );
 }
 
 main();

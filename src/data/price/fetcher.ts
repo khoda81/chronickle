@@ -13,8 +13,8 @@
  * second-precision APIs (e.g. Nobitex OHLC) convert at the boundary.
  */
 
-import { Range } from "../engine/range.ts";
-import { PricePoint } from "../domain.ts";
+import { Range } from "../../engine/range.ts";
+import { PricePoint } from "../../domain.ts";
 
 export interface FetchRangeOptions {
   /** Visible time range, inclusive. */

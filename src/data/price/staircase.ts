@@ -13,7 +13,7 @@
  * downstream format conversion.
  */
 
-import { Chunk } from "./broker.ts";
+import { Chunk } from "./store.ts";
 
 export interface StaircaseResult {
   /** Values aligned with the input `evalTime`. Length === evalTime.length. */
@@ -36,7 +36,10 @@ export interface StaircaseResult {
  *
  * Allocation: one `Float32Array(evalTime.length)`. No per-sample buffers.
  */
-export function evaluateStaircase(chunks: readonly Chunk[], evalTime: Float64Array): StaircaseResult {
+export function evaluateStaircase(
+  chunks: readonly Chunk[],
+  evalTime: Float64Array,
+): StaircaseResult {
   const n = evalTime.length;
   const out = new Float32Array(n);
 

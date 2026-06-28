@@ -20,8 +20,8 @@
  * clears `pending` without marking exhausted (retryable).
  */
 
-import type { NewsEvent, RssFeed } from "../domain.ts";
-import type { EventFetcher, FeedFetchResult } from "./eventBroker.ts";
+import type { NewsEvent, RssFeed } from "../../domain.ts";
+import type { EventFetcher, FeedFetchResult } from "./broker.ts";
 import { fetchFeed, type ParsedFeed, defaultProxy } from "./rss.ts";
 
 export interface RssEventFetcherOptions {

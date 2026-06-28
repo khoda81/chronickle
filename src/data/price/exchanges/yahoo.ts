@@ -6,7 +6,7 @@
  * this utilizes a public CORS proxy.
  */
 
-import { PricePoint, PriceSeries } from "../domain.ts";
+import { PricePoint, PriceSeries } from "../../../domain.ts";
 
 // Public CORS proxy to bypass browser restrictions on Yahoo Finance
 const CORS_PROXY = "https://corsproxy.io/?";

@@ -13,11 +13,11 @@
  *   43200 ("720"), 86400 ("D"), 172800 ("2D"), 259200 ("3D")
  */
 
-import { Fetcher, FetchRangeOptions, FetchRangeResult } from "./fetcher.ts";
-import { pickResolution } from "./resolution.ts";
+import { Fetcher, FetchRangeOptions, FetchRangeResult } from "../fetcher.ts";
+import { pickResolution } from "../resolution.ts";
 import { fetchOhlc, NobitexOhlcResponse, ohlcToPriceSeries } from "./nobitex.ts";
-import { PricePoint } from "../domain.ts";
-import { Range } from "../engine/range.ts";
+import { PricePoint } from "../../../domain.ts";
+import { Range } from "../../../engine/range.ts";
 
 const MS = 1000;
 

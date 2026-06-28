@@ -22,7 +22,7 @@
  * Cloudflare HTML block, no items) throw loudly.
  */
 
-import type { NewsEvent, RssFeed } from "../domain.ts";
+import type { NewsEvent, RssFeed } from "../../domain.ts";
 
 const DEFAULT_PROXY = "https://corsproxy.io/?url=";
 

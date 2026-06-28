@@ -24,8 +24,8 @@
  * (feedId, t, link).
  */
 
-import type { NewsEvent, RssFeed } from "../domain.ts";
-import { Range } from "../engine/range.ts";
+import type { NewsEvent, RssFeed } from "../../domain.ts";
+import { Range } from "../../engine/range.ts";
 
 /** Algebraic query status — mirrors the price broker's contract. */
 export type EventQueryStatus = "complete" | "partial" | "empty";

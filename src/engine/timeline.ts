@@ -30,8 +30,8 @@ import { setRampPalette, type PaletteName } from "./ramp.ts";
 import { maxSigmaFor } from "./gfx/layout.ts";
 import { DEFAULT_MIN_TICK_PX } from "./gfx/axis.ts";
 import type { Frame } from "./gfx/context.ts";
-import type { QueryResult } from "../data/brokerOrchestrator.ts";
-import type { EventQueryResult } from "../data/eventBroker.ts";
+import type { QueryResult } from "../data/price/broker.ts";
+import type { EventQueryResult } from "../data/events/broker.ts";
 
 /**
  * Synchronous data source the timeline queries every frame.

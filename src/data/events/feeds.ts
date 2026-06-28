@@ -22,7 +22,7 @@
  * defaults) are removable and the full list is persisted.
  */
 
-import type { RssFeed } from "../domain.ts";
+import type { RssFeed } from "../../domain.ts";
 import { idToColor } from "./color.ts";
 
 const STORAGE_KEY = "chronickle.feeds";

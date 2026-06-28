@@ -1,4 +1,4 @@
-import { Range } from "../engine/range.ts";
+import { Range } from "../../engine/range.ts";
 
 const CHUNK_CAPACITY = 1024;
 

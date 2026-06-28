@@ -15,7 +15,7 @@
  * pagination). For longer history, the OHLC endpoint should be used instead.
  */
 
-import { PricePoint, PriceSeries } from "../domain.ts";
+import { PricePoint, PriceSeries } from "../../../domain.ts";
 
 const NOBITEX_TRADES = "https://apiv2.nobitex.ir/v2/trades";
 const NOBITEX_OHLC = "https://apiv2.nobitex.ir/market/udf/history";
