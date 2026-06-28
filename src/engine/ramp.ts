@@ -42,10 +42,13 @@ export interface RampPalette {
  *  - "magenta-cyan": Magenta (~350°) vs cyan (~170°). Vivid, high saturation.
  *  - "red-green":   Red (~25°) vs green (~145°). Familiar but **not**
  *                   colorblind-safe; included for comparison only.
+ *
+ * Keyed by name so an unknown palette is unrepresentable at the type level:
+ * `setRampPalette` takes `keyof typeof PALETTES` rather than `string`, and the
+ * lookup is O(1) with no throw branch.
  */
-// TODO: This should be a record or a map
-export const PALETTES: readonly RampPalette[] = [
-  {
+export const PALETTES = {
+  "blue-orange": {
     name: "blue-orange",
     stops: [
       [0.0, 0.7, 0.16, 250],
@@ -53,7 +56,7 @@ export const PALETTES: readonly RampPalette[] = [
       [1.0, 0.7, 0.16, 30],
     ],
   },
-  {
+  "teal-red": {
     name: "teal-red",
     stops: [
       [0.0, 0.68, 0.14, 195],
@@ -61,7 +64,7 @@ export const PALETTES: readonly RampPalette[] = [
       [1.0, 0.68, 0.17, 28],
     ],
   },
-  {
+  "purple-green": {
     name: "purple-green",
     stops: [
       [0.0, 0.62, 0.18, 300],
@@ -69,7 +72,7 @@ export const PALETTES: readonly RampPalette[] = [
       [1.0, 0.62, 0.16, 130],
     ],
   },
-  {
+  "magenta-cyan": {
     name: "magenta-cyan",
     stops: [
       [0.0, 0.7, 0.2, 355],
@@ -77,7 +80,7 @@ export const PALETTES: readonly RampPalette[] = [
       [1.0, 0.7, 0.15, 175],
     ],
   },
-  {
+  "red-green": {
     name: "red-green",
     stops: [
       [0.0, 0.62, 0.19, 25],
@@ -85,30 +88,31 @@ export const PALETTES: readonly RampPalette[] = [
       [1.0, 0.62, 0.17, 145],
     ],
   },
-] as const;
+} as const satisfies Record<string, RampPalette>;
+
+/** Valid palette names. */
+export type PaletteName = keyof typeof PALETTES;
 
 export const RAMP_RESOLUTION = 4096;
 
-let activePalette: RampPalette = PALETTES[0]!;
+let activePalette: RampPalette = PALETTES["blue-orange"];
 let lut: Uint8ClampedArray | null = null;
 
 /**
  * Switch the active palette by name. Invalidates the cached LUT so the next
- * `rampLut()` rebuilds it. Throws if the name is unknown.
+ * `rampLut()` rebuilds it. The name is type-checked at compile time, so no
+ * runtime throw is needed.
  */
-export function setRampPalette(name: string): void {
-  const p = PALETTES.find((p) => p.name === name);
-  if (p === undefined) {
-    throw new Error(`Unknown ramp palette: ${name}`);
-  }
+export function setRampPalette(name: PaletteName): void {
+  const p = PALETTES[name];
   if (p === activePalette) return;
   activePalette = p;
   lut = null;
 }
 
 /** Current palette name. */
-export function rampPaletteName(): string {
-  return activePalette.name;
+export function rampPaletteName(): PaletteName {
+  return activePalette.name as PaletteName;
 }
 
 /**

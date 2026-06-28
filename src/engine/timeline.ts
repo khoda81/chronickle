@@ -26,7 +26,7 @@ import { Range } from "./range.ts";
 import { DataTransform } from "./transform.ts";
 import { Plot } from "./plot.ts";
 import { hitTestEvent } from "./hittest.ts";
-import { setRampPalette } from "./ramp.ts";
+import { setRampPalette, type PaletteName } from "./ramp.ts";
 import { maxSigmaFor } from "./gfx/layout.ts";
 import { DEFAULT_MIN_TICK_PX } from "./gfx/axis.ts";
 import type { Frame } from "./gfx/context.ts";
@@ -170,7 +170,7 @@ export class Timeline {
   }
 
   /** Switch the heatmap color palette by name. Triggers a redraw. */
-  setPalette(name: string): void {
+  setPalette(name: PaletteName): void {
     setRampPalette(name);
     this.state = { ...this.state, dirty: true };
   }

@@ -9,7 +9,7 @@
 import { fetchEventSet } from "./data/index.ts";
 import { Timeline } from "./engine/timeline.ts";
 import { Range } from "./engine/range.ts";
-import { PALETTES, rampPaletteName } from "./engine/ramp.ts";
+import { PALETTES, rampPaletteName, type PaletteName } from "./engine/ramp.ts";
 import { Broker } from "./data/brokerOrchestrator.ts";
 import { createNobitexFetcher } from "./data/nobitexFetcher.ts";
 
@@ -40,11 +40,12 @@ function buildApp(): {
   reload.textContent = "Reload";
 
   const palette = el<HTMLSelectElement>("select", "palette");
-  for (const p of PALETTES) {
+  const active = rampPaletteName();
+  for (const name of Object.keys(PALETTES) as PaletteName[]) {
     const opt = el<HTMLOptionElement>("option");
-    opt.value = p.name;
-    opt.textContent = p.name;
-    if (p.name === rampPaletteName()) opt.selected = true;
+    opt.value = name;
+    opt.textContent = name;
+    if (name === active) opt.selected = true;
     palette.append(opt);
   }
 
@@ -171,7 +172,9 @@ function main(): void {
   });
 
   palette.addEventListener("change", () => {
-    timeline.setPalette(palette.value);
+    // The select is populated from `Object.keys(PALETTES)`, so its value is
+    // a PaletteName by construction.
+    timeline.setPalette(palette.value as PaletteName);
   });
 }
 
