@@ -48,7 +48,8 @@ interface StoredFeed {
   readonly source: string;
   readonly url: string;
   readonly colorIndex: number;
-  readonly enabled: boolean;
+  /** Optional for backward compat with pre-enabled-flag storage; defaults true. */
+  readonly enabled?: boolean;
 }
 
 export class FeedRegistry {
@@ -103,7 +104,8 @@ export class FeedRegistry {
           source: entry.source,
           url: entry.url,
           color: idToColor(entry.colorIndex),
-          enabled: entry.enabled,
+          // Pre-enabled-flag storage (v1) implicitly had all feeds enabled.
+          enabled: entry.enabled ?? true,
         },
         entry.colorIndex,
       );
@@ -249,6 +251,7 @@ function isStoredFeed(v: unknown): v is StoredFeed {
     typeof o.source === "string" &&
     typeof o.url === "string" &&
     typeof o.colorIndex === "number" &&
-    typeof o.enabled === "boolean"
+    // `enabled` is optional for backward compat with v1 storage.
+    (o.enabled === undefined || typeof o.enabled === "boolean")
   );
 }
