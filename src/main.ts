@@ -251,26 +251,47 @@ function main(): void {
 
   // --- Feed management UI ----------------------------------------------
 
-  /** Render the feed list from the registry. Called after any add/remove. */
+  /**
+   * Render the feed list from the registry. Called after any add/remove/toggle.
+   * Clicking a row toggles the feed's enabled state (events show/hide);
+   * the × button removes the feed from the list entirely.
+   */
   function renderFeedList(): void {
     feedList.innerHTML = "";
     for (const feed of registry.all()) {
       const row = el<HTMLDivElement>("div", "feed-row");
+      if (!feed.enabled) row.classList.add("disabled");
+      row.title = feed.enabled ? `Click to hide ${feed.source}` : `Click to show ${feed.source}`;
+
       const swatch = el<HTMLSpanElement>("span", "feed-swatch");
       swatch.style.background = feed.color;
       const name = el<HTMLSpanElement>("span", "feed-name");
       name.textContent = feed.source;
+
+      // Click anywhere on the row (except the × button) toggles enabled.
+      row.addEventListener("click", (e) => {
+        if ((e.target as HTMLElement).closest(".feed-remove")) return;
+        registry.setEnabled(feed.id, !feed.enabled);
+        registry.save();
+        renderFeedList();
+        // Force an immediate slice update + redraw so the toggle is visible
+        // without waiting for the next broker fetch to notify.
+        timeline.refreshEvents();
+        timeline.reqDraw();
+      });
+
       const remove = el<HTMLButtonElement>("button", "feed-remove");
       remove.textContent = "×";
       remove.title = `Remove ${feed.source}`;
-      remove.addEventListener("click", () => {
+      remove.addEventListener("click", (e) => {
+        e.stopPropagation();
         registry.remove(feed.id);
         registry.save();
         renderFeedList();
-        // No cache invalidation yet (per the plan, feed modifications are a
-        // later task); a reload will pick up the change. For now just redraw.
+        timeline.refreshEvents();
         timeline.reqDraw();
       });
+
       row.append(swatch, name, remove);
       feedList.append(row);
     }

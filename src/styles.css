@@ -128,6 +128,17 @@ body {
   border: 1px solid #1a1d26;
   border-radius: 999px;
   font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+}
+.feed-row:hover {
+  border-color: #2a2f3a;
+}
+.feed-row.disabled {
+  opacity: 0.4;
+}
+.feed-row.disabled .feed-name {
+  text-decoration: line-through;
 }
 .feed-swatch {
   width: 10px;
