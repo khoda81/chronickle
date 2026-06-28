@@ -450,10 +450,12 @@ export class Timeline {
     if (!this.dragging) return;
     const dx = e.clientX - this.lastX;
     this.lastX = e.clientX;
-    const width = this.plot.cssWidth;
-    if (width <= 0) return;
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width <= 0) return;
     const span = this.state.timeRange.max - this.state.timeRange.min;
-    const dtMs = (dx / width) * span;
+    // dx is in layout-rect space; use rect.width (not cssWidth) for the ratio
+    // so the pan speed matches the visible canvas exactly.
+    const dtMs = (dx / rect.width) * span;
     this.setTimeRange(Range.pan(this.state.timeRange, -dtMs));
   };
 
@@ -465,21 +467,25 @@ export class Timeline {
   private onWheel = (e: WheelEvent): void => {
     e.preventDefault();
     const rect = this.canvas.getBoundingClientRect();
-    const px = e.clientX - rect.left;
-    const width = this.plot.cssWidth;
-    if (width <= 0) return;
+    const cssWidth = this.plot.cssWidth;
+    const cssHeight = this.plot.cssHeight;
+    if (cssWidth <= 0 || rect.width <= 0) return;
+    // Scale pointer x into cssWidth space (see onHoverMove for the rationale:
+    // canvas backing store is floored to integer device pixels, so cssWidth
+    // can be slightly smaller than rect.width).
+    const px = (e.clientX - rect.left) * (cssWidth / rect.width);
 
     const cfg = this.config;
     // Normalize deltaY to pixels across deltaModes.
     let dy = e.deltaY;
     if (e.deltaMode === WheelEvent.DOM_DELTA_LINE) dy *= cfg.wheelLineHeight;
-    else if (e.deltaMode === WheelEvent.DOM_DELTA_PAGE) dy *= this.plot.cssHeight;
+    else if (e.deltaMode === WheelEvent.DOM_DELTA_PAGE) dy *= cssHeight;
     else if (e.deltaMode === WheelEvent.DOM_DELTA_PIXEL) dy *= 1;
 
     // Apply horizontal scrolling
-    if (width > 0) {
+    if (cssWidth > 0) {
       const span = this.state.timeRange.max - this.state.timeRange.min;
-      const dt = (cfg.timeScrollSensitivity * (span * e.deltaX)) / width;
+      const dt = (cfg.timeScrollSensitivity * (span * e.deltaX)) / cssWidth;
       this.setTimeRange(Range.pan(this.state.timeRange, dt));
     }
 
@@ -489,8 +495,8 @@ export class Timeline {
     }
     const tx = new DataTransform(
       this.state.timeRange,
-      Range.create(0, width),
-      Range.create(0, this.plot.cssHeight),
+      Range.create(0, cssWidth),
+      Range.create(0, cssHeight),
     );
     const tFocus = tx.xToTime(px);
     const factor = Math.exp(-dy * cfg.wheelSensitivity);
@@ -500,16 +506,25 @@ export class Timeline {
   private onHoverMove = (e: PointerEvent): void => {
     if (this.dragging) return;
     const rect = this.canvas.getBoundingClientRect();
-    const px = e.clientX - rect.left;
-    const py = e.clientY - rect.top;
-    const width = this.plot.cssWidth;
-    const height = this.plot.cssHeight;
-    if (width <= 0 || height <= 0) return;
+    if (rect.width <= 0 || rect.height <= 0) return;
+
+    // The canvas backing store is floored to integer device pixels in resize(),
+    // so cssWidth/cssHeight (= canvas.width / dpr) can be slightly smaller than
+    // the layout rect. Pointer events are in rect space, so scale them into
+    // the cssWidth/cssHeight space the render transform uses — otherwise the
+    // hit-test y drifts from the drawn y by up to 1/dpr CSS px.
+    const cssWidth = this.plot.cssWidth;
+    const cssHeight = this.plot.cssHeight;
+    const sx = cssWidth / rect.width;
+    const sy = cssHeight / rect.height;
+    const px = (e.clientX - rect.left) * sx;
+    const py = (e.clientY - rect.top) * sy;
+    if (cssWidth <= 0 || cssHeight <= 0) return;
 
     const tx = new DataTransform(
       this.state.timeRange,
-      Range.create(0, width),
-      Range.create(0, height),
+      Range.create(0, cssWidth),
+      Range.create(0, cssHeight),
     );
     const idx = hitTestEvent(this.state.events, tx, px, py);
     if (idx !== this.state.hovered) {
