@@ -82,6 +82,76 @@ body {
   color: var(--accent);
 }
 
+.feed-input {
+  margin-left: auto;
+  width: 260px;
+  background: transparent;
+  border: 1px solid #2a2f3a;
+  color: var(--fg);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+.feed-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.feed-input::placeholder {
+  color: var(--muted);
+}
+
+.feed-add {
+  background: transparent;
+  border: 1px solid #2a2f3a;
+  color: var(--fg);
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.feed-add:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.feed-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.feed-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 6px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid #1a1d26;
+  border-radius: 999px;
+  font-size: 11px;
+}
+.feed-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.feed-name {
+  color: var(--fg);
+  white-space: nowrap;
+}
+.feed-remove {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.feed-remove:hover {
+  color: var(--error);
+}
+
 .canvas-wrap {
   position: relative;
   flex: 1;

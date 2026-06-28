@@ -11,8 +11,9 @@ import { Range } from "./engine/range.ts";
 import { PALETTES, rampPaletteName, type PaletteName } from "./engine/ramp.ts";
 import { Broker } from "./data/brokerOrchestrator.ts";
 import { createNobitexFetcher } from "./data/nobitexFetcher.ts";
-import { EventBroker, createRssEventFetcher } from "./data/index.ts";
+import { EventBroker, createRssEventFetcher, fetchFeed, defaultProxy } from "./data/index.ts";
 import { FeedRegistry } from "./data/feeds.ts";
+import type { RssFeed } from "./domain.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -28,6 +29,9 @@ function buildApp(): {
   status: HTMLDivElement;
   reload: HTMLButtonElement;
   palette: HTMLSelectElement;
+  feedInput: HTMLInputElement;
+  feedAdd: HTMLButtonElement;
+  feedList: HTMLDivElement;
 } {
   const app = document.getElementById("app")!;
   app.innerHTML = "";
@@ -50,7 +54,17 @@ function buildApp(): {
     palette.append(opt);
   }
 
-  header.append(title, subtitle, palette, reload);
+  // Add-feed control: a URL input + Add button. On submit, main.ts validates
+  // the URL, adds it to the FeedRegistry, fetches it once to verify and to
+  // extract the real <title>, and persists.
+  const feedInput = el<HTMLInputElement>("input", "feed-input");
+  feedInput.type = "url";
+  feedInput.placeholder = "Paste RSS feed URL…";
+  feedInput.spellcheck = false;
+  const feedAdd = el<HTMLButtonElement>("button", "feed-add");
+  feedAdd.textContent = "Add feed";
+
+  header.append(title, subtitle, palette, feedInput, feedAdd, reload);
 
   const canvasWrap = el<HTMLDivElement>("div", "canvas-wrap");
   const canvas = el<HTMLCanvasElement>("canvas", "timeline");
@@ -59,11 +73,15 @@ function buildApp(): {
   const tooltip = el<HTMLDivElement>("div", "tooltip hidden");
   canvasWrap.append(tooltip);
 
+  // Feed list: one row per registered feed with a color swatch, name, and a
+  // remove button. Rendered by main.ts from the FeedRegistry.
+  const feedList = el<HTMLDivElement>("div", "feed-list");
+
   const status = el<HTMLDivElement>("div", "status");
   status.textContent = "Initializing…";
 
-  app.append(header, canvasWrap, status);
-  return { canvas, tooltip, status, reload, palette };
+  app.append(header, feedList, canvasWrap, status);
+  return { canvas, tooltip, status, reload, palette, feedInput, feedAdd, feedList };
 }
 
 function setStatus(status: HTMLDivElement, msg: string, kind: "info" | "error" = "info"): void {
@@ -124,7 +142,7 @@ async function load(
 }
 
 function main(): void {
-  const { canvas, tooltip, status, reload, palette } = buildApp();
+  const { canvas, tooltip, status, reload, palette, feedInput, feedAdd, feedList } = buildApp();
 
   // Initial time range: last 24h. The broker will fetch this on the first
   // query and re-fit once data lands.
@@ -186,6 +204,94 @@ function main(): void {
   });
 
   void load(timeline, status, broker);
+
+  // --- Feed management UI ----------------------------------------------
+
+  /** Render the feed list from the registry. Called after any add/remove. */
+  function renderFeedList(): void {
+    feedList.innerHTML = "";
+    for (const feed of registry.all()) {
+      const row = el<HTMLDivElement>("div", "feed-row");
+      const swatch = el<HTMLSpanElement>("span", "feed-swatch");
+      swatch.style.background = feed.color;
+      const name = el<HTMLSpanElement>("span", "feed-name");
+      name.textContent = feed.source;
+      const remove = el<HTMLButtonElement>("button", "feed-remove");
+      remove.textContent = "×";
+      remove.title = `Remove ${feed.source}`;
+      remove.addEventListener("click", () => {
+        registry.remove(feed.id);
+        registry.save();
+        renderFeedList();
+        // No cache invalidation yet (per the plan, feed modifications are a
+        // later task); a reload will pick up the change. For now just redraw.
+        timeline.reqDraw();
+      });
+      row.append(swatch, name, remove);
+      feedList.append(row);
+    }
+  }
+  renderFeedList();
+
+  /**
+   * Add a feed from the input. Validates the URL, adds it to the registry,
+   * fetches it once to verify it parses and to extract the real <title>,
+   * then persists. On failure, removes the feed and surfaces the error.
+   */
+  async function addFeedFromInput(): Promise<void> {
+    const url = feedInput.value.trim();
+    if (url.length === 0) return;
+
+    // Basic URL validation. The input type=url already hints the browser, but
+    // we re-check explicitly to fail fast on junk like "foo".
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      setStatus(status, `Invalid URL: ${url}`, "error");
+      return;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      setStatus(status, `Feed URL must be http(s): ${url}`, "error");
+      return;
+    }
+
+    const feed = registry.add(url);
+    registry.save();
+    renderFeedList();
+    feedInput.value = "";
+    setStatus(status, `Verifying ${feed.source}…`);
+
+    try {
+      const parsedFeed = await fetchFeed(feed, defaultProxy, 15_000);
+      // If the feed exposed a real <title>, use it as the display name.
+      if (parsedFeed.title.length > 0) {
+        registry.rename(feed.id, parsedFeed.title);
+        registry.save();
+        renderFeedList();
+      }
+      setStatus(status, `Added feed: ${parsedFeed.title || feed.source}`);
+      // Kick the EventBroker to fetch the new feed's events for the current
+      // viewport. The broker's subscriber will refreshEvents + reqDraw.
+      timeline.refreshEvents();
+    } catch (err) {
+      // Verification failed: roll back the add and surface the error loudly.
+      registry.remove(feed.id);
+      registry.save();
+      renderFeedList();
+      setStatus(status, `Feed failed to load: ${(err as Error).message}`, "error");
+    }
+  }
+
+  feedAdd.addEventListener("click", () => {
+    void addFeedFromInput();
+  });
+  feedInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void addFeedFromInput();
+    }
+  });
 
   reload.addEventListener("click", () => {
     // For now, reload just re-queries; the broker cache persists. A true
