@@ -199,7 +199,7 @@ function main(): void {
   // Feeds + events: the registry persists user-added feeds to localStorage;
   // the EventBroker fetches on demand via the timeline's eventSource.
   const registry = FeedRegistry.load(DEFAULT_FEEDS);
-  const eventBroker = new EventBroker(createRssEventFetcher({ registry }));
+  const eventBroker = new EventBroker(createRssEventFetcher(), () => registry.active());
 
   const timeline = new Timeline({
     canvas,
