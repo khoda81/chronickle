@@ -142,19 +142,29 @@ function showTooltip(
     title: string;
     link: string;
     source: string;
+    color: string;
+    summary: string;
     t: number;
   },
 ): void {
   const date = new Date(data.t).toLocaleString().replace("T", " ").slice(0, 19);
   tooltip.innerHTML = "";
   const src = el<HTMLSpanElement>("span", "tooltip-source");
-  src.textContent = `${data.source} · ${date}`;
+  const swatch = el<HTMLSpanElement>("span", "tooltip-swatch");
+  swatch.style.background = data.color;
+  const srcText = document.createTextNode(`${data.source} · ${date}`);
+  src.append(swatch, srcText);
   const link = el<HTMLAnchorElement>("a", "tooltip-link");
   link.href = data.link;
   link.target = "_blank";
   link.rel = "noopener noreferrer";
   link.textContent = data.title;
   tooltip.append(src, link);
+  if (data.summary.length > 0) {
+    const summary = el<HTMLParagraphElement>("p", "tooltip-summary");
+    summary.textContent = data.summary;
+    tooltip.append(summary);
+  }
   tooltip.style.left = `${x}px`;
   tooltip.style.top = `${y}px`;
   tooltip.classList.remove("hidden");
@@ -218,6 +228,8 @@ function main(): void {
           title: event.title,
           link: event.link,
           source: feed.source,
+          color: feed.color,
+          summary: event.summary,
           t: event.t,
         });
       },

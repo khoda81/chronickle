@@ -64,6 +64,8 @@ export interface HoverInfo {
   readonly link: string;
   /** Stable feed id; the caller resolves it to a display name + color. */
   readonly feedId: string;
+  /** Plain-text summary for tooltip enrichment. May be empty. */
+  readonly summary: string;
   readonly t: number;
   /** Cursor x in canvas-relative CSS pixels. */
   readonly px: number;
@@ -517,6 +519,7 @@ export class Timeline {
       title: ev.title,
       link: ev.link,
       feedId: ev.feedId,
+      summary: ev.summary,
       t: ev.t,
       px,
       py,
