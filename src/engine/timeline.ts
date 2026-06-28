@@ -72,44 +72,63 @@ export interface TimelineOptions {
     * no longer stores a series; it pulls from this callback each draw.
     */
   readonly dataSource: DataSource;
-  /** Minimum on-screen spacing between axis ticks (CSS px). */
-  readonly minTickPx?: number;
+  /** Tunable parameters. Defaults to `DEFAULT_TIMELINE_CONFIG`. */
+  readonly config?: Partial<TimelineConfig>;
 }
 
+/**
+ * Render-only parameters that are not view state: they don't change with
+ * pan/zoom/hover, so they live on the Timeline rather than TimelineState.
+ * `priceScale` is the one exception — it's user-adjustable (shift+wheel) and
+ * read in the draw path, so it stays on TimelineState as a render parameter.
+ */
 interface TimelineState {
   events: EventSet;
   timeRange: Range;
-  // TODO: Maybe this should be in the transform state instead?
+  /** Heatmap vertical scale; adjusted via shift+wheel. Render parameter. */
   priceScale: number;
   hovered: number | null;
-  // TODO: Instead of a dirty flag, just request a draw using requestAnimationFrame
-  dirty: boolean;
 }
 
 const EMPTY_EVENTS: EventSet = { events: [] };
 
-// TODO: These should live in a config object instead of a global constant
-/** CSS line height used to normalize wheel `deltaMode: 1` (lines). */
-const WHEEL_LINE_HEIGHT = 16;
-/** Zoom sensitivity per normalized pixel of wheel delta. */
-const WHEEL_SENSITIVITY = 0.003;
-/** Time scroll sensitivity per normalized pixel of wheel delta. */
-const TIMESCROLL_SENSITIVITY = 3;
+/**
+ * Tunable timeline parameters. Grouped so they're passed as one value and
+ * overridable per-instance instead of scattered as module globals.
+ */
+export interface TimelineConfig {
+  /** CSS line height used to normalize wheel `deltaMode: 1` (lines). */
+  readonly wheelLineHeight: number;
+  /** Zoom sensitivity per normalized pixel of wheel delta. */
+  readonly wheelSensitivity: number;
+  /** Time scroll sensitivity per normalized pixel of horizontal wheel delta. */
+  readonly timeScrollSensitivity: number;
+  /** "Now" marker line width (CSS px). */
+  readonly nowWidth: number;
+  /** "Now" marker stroke color. */
+  readonly nowStroke: string;
+  /** Minimum on-screen spacing between axis ticks (CSS px). */
+  readonly minTickPx: number;
+}
 
-/** "Now" marker line width (CSS px). */
-const NOW_WIDTH = 1;
-// TODO: These should live in a theme or color config object instead of a global constant
-/** "Now" marker stroke color. */
-const NOW_STROKE = "rgba(255, 255, 255, 0.55)";
+export const DEFAULT_TIMELINE_CONFIG: TimelineConfig = {
+  wheelLineHeight: 16,
+  wheelSensitivity: 0.003,
+  timeScrollSensitivity: 3,
+  nowWidth: 1,
+  // TODO: This should go to a theme object
+  nowStroke: "rgba(255, 255, 255, 0.55)",
+  minTickPx: DEFAULT_MIN_TICK_PX,
+};
 
 export class Timeline {
   private readonly canvas: HTMLCanvasElement;
   private readonly plot: Plot;
   private readonly callbacks: TimelineCallbacks;
   private readonly dataSource: DataSource;
-  private readonly minTickPx: number;
-  private state: TimelineState;
+  private readonly config: TimelineConfig;
   private rafId: number | null = null;
+  state: TimelineState;
 
   // Pan scratch (no allocation in handlers).
   private dragging = false;
@@ -121,15 +140,17 @@ export class Timeline {
   // wavelet response on screen.
   private evalTime: Float64Array = new Float64Array(0);
 
-  // "Now" marker timer. Armed by `drawNow` to fire when wall-clock time
-  // crosses the next device-pixel boundary, so the line moves one pixel at a
-  // time without a 60fps timer. Cleared on dispose and re-armed every frame.
+  // "Now" marker timer. Armed by `drawNow` to fire at a fixed cadence
+  // (timePerPx / SMOOTHING_FACTOR) so the line appears to move smoothly
+  // without a 60fps timer. The line is recomputed from Date.now() on each
+  // tick, so no phase-locking is needed. Cleared on dispose and re-armed
+  // every draw.
   private nowTimer: number | null = null;
 
   constructor(opts: TimelineOptions) {
     this.canvas = opts.canvas;
     this.dataSource = opts.dataSource;
-    this.minTickPx = opts.minTickPx ?? DEFAULT_MIN_TICK_PX;
+    this.config = { ...DEFAULT_TIMELINE_CONFIG, ...opts.config };
     this.plot = new Plot({
       canvas: opts.canvas,
       initialTimeRange: opts.initialTimeRange,
@@ -140,28 +161,40 @@ export class Timeline {
       timeRange: opts.initialTimeRange,
       priceScale: 22,
       hovered: null,
-      dirty: true,
     };
 
     this.bindEvents();
     this.resize();
-    this.loop();
+    // Kick the first frame; subsequent draws are on-demand via requestRender.
+    this.reqDraw();
   }
 
-  /** Request a redraw on the next frame (e.g. when the broker has new data). */
+  /**
+   * Request a redraw on the next animation frame. Coalesces multiple calls
+   * within the same frame into one rAF: state mutations happen synchronously,
+   * and the callback reads the latest state at draw time, so ignored calls
+   * still get their mutations painted by the one scheduled frame.
+   */
   reqDraw(): void {
-    this.state = { ...this.state, dirty: true };
+    if (this.rafId !== null) return;
+    this.rafId = requestAnimationFrame(() => {
+      this.rafId = null;
+      console.debug("Drawing");
+      this.draw();
+    });
   }
 
   /** Replace the event set. Triggers a redraw. */
   setEvents(events: EventSet): void {
-    this.state = { ...this.state, events, hovered: null, dirty: true };
+    this.state = { ...this.state, events, hovered: null };
+    this.reqDraw();
   }
 
   /** Replace the visible time range (e.g. fit-to-data). Triggers a redraw. */
   setTimeRange(r: Range): void {
-    this.state = { ...this.state, timeRange: r, dirty: true };
+    this.state = { ...this.state, timeRange: r };
     this.plot.setTimeRange(r);
+    this.reqDraw();
   }
 
   /** Current visible time range. */
@@ -172,7 +205,7 @@ export class Timeline {
   /** Switch the heatmap color palette by name. Triggers a redraw. */
   setPalette(name: PaletteName): void {
     setRampPalette(name);
-    this.state = { ...this.state, dirty: true };
+    this.reqDraw();
   }
 
   /** Stop the render loop and detach listeners. */
@@ -212,30 +245,30 @@ export class Timeline {
     this.canvas.height = Math.floor(rect.height * dpr);
     // Note: no setTransform here — the Frame applies the DPR transform per
     // draw, so it can never be lost across save/restore.
-    // TODO: Get rid of the dirty flag and rely on requestAnimationFrame instead
-    this.state = { ...this.state, dirty: true };
+    this.reqDraw();
   }
 
   private onResize = (): void => this.resize();
 
-  private loop = (): void => {
-    this.rafId = requestAnimationFrame(this.loop);
-    if (!this.state.dirty) return;
-    this.state = { ...this.state, dirty: false };
-
+  /**
+   * One-shot draw. Reads the current state and paints a single frame. Called
+   * only via `requestRender`, which coalesces multiple requests into one rAF.
+   * The loop does not self-reschedule; the "now" marker timer and input
+   * handlers re-arm it on demand.
+   */
+  private draw = (): void => {
     using frame = this.plot.beginFrame();
     const { events, hovered, priceScale, timeRange } = this.state;
-    const width = frame.width;
+    const { width, height, dpr } = frame;
 
     // Background.
-    frame.fillRectPx(0, 0, frame.width, frame.height, "#05070d");
+    frame.fillRectPx(0, 0, width, height, "#05070d");
 
-    const dpr = window.devicePixelRatio || 1;
-    const numPx = Math.ceil(width * dpr);
+    // Number of device pixels
+    const numPx = width * dpr;
     const maxSigma = maxSigmaFor(numPx);
     // timePerPx in *device* pixels (maxSigma is in device pixels).
     const timePerPx = (timeRange.max - timeRange.min) / numPx;
-    const kernelReach = maxSigma * timePerPx; // in epoch ms
 
     // Pad by exactly kernelReach on each side: one maxSigma-width of samples
     // at the per-device-pixel spacing. The padded grid is uniform so the box
@@ -271,49 +304,60 @@ export class Timeline {
     );
     // heat.drawFadeOverlay();
     frame.events().drawRow(events, hovered);
-    frame.drawTimeAxis(this.minTickPx);
+    frame.drawTimeAxis(this.config.minTickPx);
 
-    // "Now" marker: a vertical line at the current wall-clock time. It only
-    // moves when `now` crosses a pixel boundary, so we schedule the next
-    // redraw for exactly that moment instead of running a 60fps timer. The
-    // delay is `timePerPx` ms (one device pixel of time); when zoomed out
-    // far enough that a pixel spans minutes or hours, the timer fires only
-    // every few minutes/hours. When `now` is off-screen, no timer is needed
-    // — panning/zooming back into view re-arms it via the redraw path.
-    this.drawNow(frame, timeRange, timePerPx);
+    // "Now" marker: a vertical line at the current wall-clock time. `drawNow`
+    // arms a timer at a fixed cadence (timePerPx / SMOOTHING_FACTOR) instead of
+    // running a 60fps timer. When zoomed out far enough that a pixel spans
+    // minutes or hours, the timer fires only every few minutes/hours. When
+    // `now` is off-screen, no timer is needed — panning/zooming back into view
+    // re-arms it via the redraw path.
+    this.drawNow(frame, timePerPx);
   };
 
   /**
-   * Draw the "now" vertical line and arm a timer for the next pixel crossing.
+   * Draw the "now" vertical line and arm a timer for the next redraw.
    *
    * The line is drawn at `Date.now()` if it falls within the visible time
-   * range. We then schedule a `reqDraw` for the moment `now` advances by one
-   * device pixel (`timePerPx` ms), so the line appears to move continuously
-   * without burning a per-frame timer. The timer is cleared and re-armed on
-   * every draw, so panning/zooming (which changes `timePerPx` or moves `now`
-   * on/off screen) is handled naturally by the next frame.
+   * range. We then schedule a `reqDraw` at a fixed cadence so the line appears
+   * to move smoothly without burning a per-frame timer. The timer is cleared
+   * and re-armed on every draw, so panning/zooming (which changes the
+   * time-per-pixel or moves `now` on/off screen) is handled naturally by the
+   * next frame.
+   *
+   * Cadence: `timePerPx` is the time span per device pixel (the draw loop
+   * computes it as span / ceil(width * dpr)). Visibility is defined in device
+   * pixels — the canvas rasterizes at device-px resolution, so the line's
+   * anti-aliasing changes when its device-px position crosses an integer. On
+   * a dpr=2 display, moving 1 CSS px moves the line 2 device px (clearly
+   * visible), so CSS px would skip real visible changes. We step
+   * SMOOTHING_FACTOR times per device pixel so the line glides instead of
+   * jumping (worst-case on 1x displays where 1 device px == 1 CSS px; harmless
+   * overkill on high-DPI). This is a taste/battery tradeoff, orthogonal to
+   * the device-px unit choice.
+   *
+   * No phase-locking is needed: the line is recomputed from `Date.now()` on
+   * every tick, so its position is always the true wall-clock position — there
+   * is no accumulated increment to drift. The timer just needs to fire often
+   * enough that the recomputed position doesn't jump more than
+   * 1/SMOOTHING_FACTOR of a device pixel between frames.
    */
-  private drawNow(frame: Frame, timeRange: Range, timePerPx: number): void {
-    if (this.nowTimer !== null) {
-      clearTimeout(this.nowTimer);
-      this.nowTimer = null;
-    }
+  private drawNow(frame: Frame, timePerPx: number): void {
+    if (this.nowTimer !== null) clearTimeout(this.nowTimer);
 
+    this.nowTimer = null;
     const now = Date.now();
+    const { timeRange } = this.state;
     if (now > timeRange.max) return;
 
+    // Position of now, in CSS pixels (timeToX maps to screenDomain = {0, width}).
     const x = frame.tx.timeToX(now);
-    frame.vline(x, 0, frame.height, NOW_STROKE, NOW_WIDTH);
+    frame.vline(x, 0, frame.height, this.config.nowStroke, this.config.nowWidth);
 
-    // Delay until `now` crosses the next device-pixel boundary. We compute
-    // the fractional pixel position and arm a timer for the remainder of the
-    // current pixel plus (n-1) full pixels — but since we only need to move by
-    // one pixel to be visually correct, the delay is simply `timePerPx` minus
-    // the sub-pixel remainder of the current position. Using the remainder
-    // keeps the line phase-locked to wall-clock time across re-arms.
-    const fracPx = x - Math.floor(x);
-    // TODO: Should this change based on dpr too?
-    const tillNextChange = (timePerPx * (1 - fracPx)) / 4;
+    const SMOOTHING_FACTOR = 4;
+    const tillNextChange = timePerPx / SMOOTHING_FACTOR;
+    // If `now` is before the visible window, wait for it to enter instead of
+    // firing immediately — panning/zooming will re-arm via the redraw path.
     const timeToMin = timeRange.min - now;
     const delayMs = Math.max(timeToMin, tillNextChange);
     this.nowTimer = setTimeout(() => {
@@ -351,23 +395,23 @@ export class Timeline {
     const width = this.plot.cssWidth;
     if (width <= 0) return;
 
+    const cfg = this.config;
     // Normalize deltaY to pixels across deltaModes.
     let dy = e.deltaY;
-    if (e.deltaMode === WheelEvent.DOM_DELTA_LINE) dy *= WHEEL_LINE_HEIGHT;
+    if (e.deltaMode === WheelEvent.DOM_DELTA_LINE) dy *= cfg.wheelLineHeight;
     else if (e.deltaMode === WheelEvent.DOM_DELTA_PAGE) dy *= this.plot.cssHeight;
     else if (e.deltaMode === WheelEvent.DOM_DELTA_PIXEL) dy *= 1;
 
     // Apply horizontal scrolling
     if (width > 0) {
       const span = this.state.timeRange.max - this.state.timeRange.min;
-      const dt = (TIMESCROLL_SENSITIVITY * (span * e.deltaX)) / width;
+      const dt = (cfg.timeScrollSensitivity * (span * e.deltaX)) / width;
       this.setTimeRange(Range.pan(this.state.timeRange, dt));
-      this.state.dirty = true;
     }
 
     if (e.shiftKey) {
-      this.state.priceScale -= dy * WHEEL_SENSITIVITY;
-      this.state.dirty = true;
+      this.state.priceScale -= dy * cfg.wheelSensitivity;
+      this.reqDraw();
       return;
     }
     const tx = new DataTransform(
@@ -376,7 +420,7 @@ export class Timeline {
       Range.create(0, this.plot.cssHeight),
     );
     const tFocus = tx.xToTime(px);
-    const factor = Math.exp(-dy * WHEEL_SENSITIVITY);
+    const factor = Math.exp(-dy * cfg.wheelSensitivity);
     this.setTimeRange(Range.zoom(this.state.timeRange, tFocus, factor));
   };
 
@@ -396,7 +440,8 @@ export class Timeline {
     );
     const idx = hitTestEvent(this.state.events, tx, px, py);
     if (idx !== this.state.hovered) {
-      this.state = { ...this.state, hovered: idx, dirty: true };
+      this.state = { ...this.state, hovered: idx };
+      this.reqDraw();
       this.fireHover(idx, px, py);
     }
   };
