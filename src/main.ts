@@ -11,6 +11,8 @@ import { Range } from "./engine/range.ts";
 import { PALETTES, rampPaletteName, type PaletteName } from "./engine/ramp.ts";
 import { Broker } from "./data/brokerOrchestrator.ts";
 import { createNobitexFetcher } from "./data/nobitexFetcher.ts";
+import { EventBroker, createRssEventFetcher } from "./data/index.ts";
+import { FeedRegistry } from "./data/feeds.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -117,9 +119,8 @@ async function load(
       timeline.setTimeRange(Range.fit(cached.min, cached.max));
     }
   }
-  // Events are now loaded on demand via the EventBroker (wired in a later
-  // commit). For now the timeline renders with an empty event set.
-  timeline.setEvents({ events: [] });
+  // Events stream in via the EventBroker's subscriber (wired in main). The
+  // timeline pulls the visible slice on viewport change and on broker notify.
 }
 
 function main(): void {
@@ -132,29 +133,34 @@ function main(): void {
 
   const broker = new Broker(createNobitexFetcher({ symbol: "USDTIRT" }));
 
+  // Feeds + events: the registry persists user-added feeds to localStorage;
+  // the EventBroker fetches on demand via the timeline's eventSource.
+  const registry = FeedRegistry.load();
+  const eventBroker = new EventBroker(createRssEventFetcher({ registry }));
+
   const timeline = new Timeline({
     canvas,
     initialTimeRange: initial,
     dataSource: (evalTime, maxDeltaTMs) => broker.query({ evalTime, maxDeltaTMs }),
+    eventSource: (range) => eventBroker.query(range),
     callbacks: {
       onHover: (event) => {
         if (event === null) {
           hideTooltip(tooltip);
           return;
         }
-        // Source display name will be resolved via FeedRegistry in a later
-        // commit; for now use the feedId as a placeholder label.
+        const feed = registry.get(event.feedId);
         showTooltip(tooltip, event.px, event.py, {
           title: event.title,
           link: event.link,
-          source: event.feedId,
+          source: feed.source,
           t: event.t,
         });
       },
     },
   });
 
-  // When the broker inserts new data, request a redraw. Also re-fit the
+  // When the price broker inserts new data, request a redraw. Also re-fit the
   // time range once on the first non-empty cache so the viewport shows the
   // data instead of the default 24h guess.
   let fitted = false;
@@ -168,6 +174,14 @@ function main(): void {
         setStatus(status, `Loaded data: ${cached.min}..${cached.max}`);
       }
     }
+  });
+
+  // When the EventBroker lands new events, re-pull the visible slice and
+  // redraw. refreshEvents is cheap (binary-search slice) and the broker
+  // dedups in-flight backfills, so notifying on every insert is fine.
+  eventBroker.subscribe(() => {
+    timeline.refreshEvents();
+    timeline.reqDraw();
   });
 
   void load(timeline, status, broker);

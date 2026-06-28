@@ -31,6 +31,7 @@ import { maxSigmaFor } from "./gfx/layout.ts";
 import { DEFAULT_MIN_TICK_PX } from "./gfx/axis.ts";
 import type { Frame } from "./gfx/context.ts";
 import type { QueryResult } from "../data/brokerOrchestrator.ts";
+import type { EventQueryResult } from "../data/eventBroker.ts";
 
 /**
  * Synchronous data source the timeline queries every frame.
@@ -45,6 +46,17 @@ import type { QueryResult } from "../data/brokerOrchestrator.ts";
  * is no draw without querying the source.
  */
 export type DataSource = (evalTime: Float64Array, maxDeltaTMs: number) => QueryResult;
+
+/**
+ * Synchronous event source the timeline queries on viewport changes.
+ *
+ * Returns the cached events in `range` (a snapshot, sorted ascending by t)
+ * and a status hint. The source (an `EventBroker` closure) may trigger an
+ * async backfill for unfilled sub-ranges; its subscribers should call
+ * `timeline.refreshEvents()` when new data lands so the visible slice is
+ * re-pulled.
+ */
+export type EventSource = (range: Range) => EventQueryResult;
 
 export interface HoverInfo {
   readonly index: number;
@@ -73,6 +85,13 @@ export interface TimelineOptions {
     * no longer stores a series; it pulls from this callback each draw.
     */
   readonly dataSource: DataSource;
+  /**
+   * Synchronous event source queried on viewport changes. Returns the
+   * cached events in the visible range and may trigger async backfill.
+   * Required — the timeline no longer stores events directly; it pulls
+   * them from this callback whenever the viewport moves.
+   */
+  readonly eventSource: EventSource;
   /** Tunable parameters. Defaults to `DEFAULT_TIMELINE_CONFIG`. */
   readonly config?: Partial<TimelineConfig>;
 }
@@ -127,6 +146,7 @@ export class Timeline {
   private readonly plot: Plot;
   private readonly callbacks: TimelineCallbacks;
   private readonly dataSource: DataSource;
+  private readonly eventSource: EventSource;
   private readonly config: TimelineConfig;
   private rafId: number | null = null;
   private state: TimelineState;
@@ -151,6 +171,7 @@ export class Timeline {
   constructor(opts: TimelineOptions) {
     this.canvas = opts.canvas;
     this.dataSource = opts.dataSource;
+    this.eventSource = opts.eventSource;
     this.config = { ...DEFAULT_TIMELINE_CONFIG, ...opts.config };
     this.plot = new Plot({
       canvas: opts.canvas,
@@ -166,7 +187,9 @@ export class Timeline {
 
     this.bindEvents();
     this.resize();
-    // Kick the first frame; subsequent draws are on-demand via requestRender.
+    // Pull the initial event slice for the starting viewport, then kick the
+    // first frame. Subsequent draws are on-demand via reqDraw.
+    this.refreshEvents();
     this.reqDraw();
   }
 
@@ -184,17 +207,27 @@ export class Timeline {
     });
   }
 
-  /** Replace the event set. Triggers a redraw. */
-  setEvents(events: EventSet): void {
-    this.state.events = events;
+  /**
+   * Re-pull the visible event slice from the event source for the current
+   * viewport. Cheap (binary-search slice of the broker's sorted array) and
+   * safe to call frequently — the broker dedups backfill requests via its
+   * in-flight set, mirroring the price broker. Called automatically on
+   * viewport changes (pan/zoom/fit) and should be called by the broker's
+   * subscriber when new events land.
+   */
+  refreshEvents(): void {
+    const { events } = this.eventSource(this.state.timeRange);
+    this.state.events = { events };
+    // Hovered index may now be stale (the slice changed); clear it so we
+    // don't highlight a wrong index. The next pointermove re-hit-tests.
     this.state.hovered = null;
-    this.reqDraw();
   }
 
   /** Replace the visible time range (e.g. fit-to-data). Triggers a redraw. */
   setTimeRange(r: Range): void {
     this.state.timeRange = r;
     this.plot.setTimeRange(r);
+    this.refreshEvents();
     this.reqDraw();
   }
 
