@@ -1,4 +1,4 @@
-# Chronicle
+# Chronickle
 
 Browser-based SPA that correlates market volatility (Nobitex USD/IRT trades) with real-world news events (RSS) on a scrubbable, zoomable HTML5 `<canvas>` timeline.
 

@@ -1,0 +1,58 @@
+name: Deploy to GitHub Pages
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build & publish dist/ to khoda81.github.io/chronickle/
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout chronickle
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install & build
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Checkout target Pages repo
+        uses: actions/checkout@v4
+        with:
+          repository: khoda81/khoda81.github.io
+          ref: gh-pages
+          path: pages-repo
+          token: ${{ secrets.PAGES_DEPLOY_TOKEN }}
+          persist-credentials: true
+
+      - name: Sync dist/ -> pages-repo/chronickle/
+        run: |
+          set -euo pipefail
+          TARGET="pages-repo/chronickle"
+          rm -rf "$TARGET"
+          mkdir -p "$TARGET"
+          cp -a dist/. "$TARGET/"
+
+      - name: Commit & push
+        working-directory: pages-repo
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to publish."
+            exit 0
+          fi
+          git commit -m "Deploy chronickle ${GITHUB_REF_NAME} (${GITHUB_SHA::7})"
+          git push origin gh-pages

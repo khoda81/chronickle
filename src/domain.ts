@@ -1,5 +1,5 @@
 /**
- * Shared domain types for Chronicle.
+ * Shared domain types for chronickle.
  *
  * Invariants are encoded structurally:
  *  - All timestamps are epoch milliseconds (number).

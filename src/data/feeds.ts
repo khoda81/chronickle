@@ -25,7 +25,7 @@
 import type { RssFeed } from "../domain.ts";
 import { idToColor } from "./color.ts";
 
-const STORAGE_KEY = "chronicle.feeds";
+const STORAGE_KEY = "chronickle.feeds";
 
 /**
  * A minimal, deterministic string hash (FNV-1a 32-bit). Good enough for feed

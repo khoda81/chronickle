@@ -15,7 +15,7 @@
  * UI state is ephemeral preference, not authoritative data.
  */
 
-const KEY = "chronicle.ui";
+const KEY = "chronickle.ui";
 const DEBOUNCE_MS = 300;
 
 export interface UiState {

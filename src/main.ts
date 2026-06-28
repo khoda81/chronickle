@@ -1,5 +1,5 @@
 /**
- * Chronicle entry point.
+ * Chronickle entry point.
  *
  * Wires the data layer (Nobitex trades + RSS) to the canvas timeline, and
  * renders an HTML tooltip on hover. Errors are surfaced explicitly in the
@@ -84,7 +84,7 @@ function buildApp(): {
 
   const header = el<HTMLDivElement>("div", "header");
   const title = el<HTMLHeadingElement>("h1");
-  title.textContent = "Chronicle";
+  title.textContent = "Chronickle";
   const subtitle = el<HTMLParagraphElement>("p", "subtitle");
   subtitle.textContent = "Market volatility × news events";
   const reload = el<HTMLButtonElement>("button", "reload");
