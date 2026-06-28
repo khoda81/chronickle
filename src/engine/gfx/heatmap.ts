@@ -294,7 +294,7 @@ class HeatmapImpl implements HeatmapLayer {
 
   drawFadeOverlay(): void {
     const { frame } = this;
-    const { tx, ctx: ctx } = frame;
+    const { tx, ctx } = frame;
     const width = tx.screenDomain.max - tx.screenDomain.min;
     const height = tx.yDomain.max - tx.yDomain.min;
     const y = heatTopY(height);

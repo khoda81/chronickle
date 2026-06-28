@@ -117,6 +117,7 @@ async function load(
       timeline.setTimeRange(Range.fit(cached.min, cached.max));
     }
   }
+  // TODO: We need some form of dynamic loading for paginated rss feeds
   timeline.setEvents(await fetchEventSet());
 }
 

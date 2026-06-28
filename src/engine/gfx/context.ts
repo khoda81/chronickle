@@ -31,8 +31,6 @@ import { Events } from "./events.ts";
 import { Axis } from "./axis.ts";
 
 export class Frame implements Disposable {
-  private saveDepth = 0;
-
   constructor(
     readonly ctx: CanvasRenderingContext2D,
     readonly tx: DataTransform,
@@ -43,7 +41,6 @@ export class Frame implements Disposable {
     // is preserved by the matching restore() in dispose().
     this.ctx.save();
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    this.saveDepth = 1;
   }
 
   /** CSS pixel width of the drawing surface (derived from the transform). */
@@ -54,23 +51,6 @@ export class Frame implements Disposable {
   /** CSS pixel height of the drawing surface (derived from the transform). */
   get height(): number {
     return this.tx.yDomain.max - this.tx.yDomain.min;
-  }
-
-  // --- L1: managed save/restore -------------------------------------------
-
-  /** Push ctx state. Must be matched by `pop()`. */
-  push(): void {
-    this.ctx.save();
-    this.saveDepth++;
-  }
-
-  /** Pop ctx state. Throws if unbalanced. */
-  pop(): void {
-    if (this.saveDepth <= 1) {
-      throw new Error("Frame.pop() without matching push()");
-    }
-    this.ctx.restore();
-    this.saveDepth--;
   }
 
   // --- L1: pixel primitives ----------------------------------------------
@@ -186,10 +166,6 @@ export class Frame implements Disposable {
   [Symbol.dispose](): void {
     // Restore to the pre-frame transform. We always opened one save() in the
     // constructor; any unmatched push() is a programmer error.
-    if (this.saveDepth !== 1) {
-      throw new Error(`Frame disposed with unbalanced save stack: depth ${this.saveDepth}`);
-    }
     this.ctx.restore();
-    this.saveDepth = 0;
   }
 }

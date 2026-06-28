@@ -36,12 +36,6 @@ export class PriceSeries {
 
     const sorted = [...points].sort((a, b) => a.t - b.t);
 
-    // Validate last point's price (loop above checks all but the last).
-    const last = sorted[sorted.length - 1]!;
-    if (!Number.isFinite(last.price) || last.price <= 0) {
-      throw new Error(`Invalid price at t=${last.t}: ${last.price}`);
-    }
-
     return new PriceSeries(sorted);
   }
 }

@@ -40,6 +40,14 @@ const LABEL_FONT = "11px ui-monospace, monospace";
 /** Default minimum on-screen spacing between two consecutive ticks (CSS px). */
 export const DEFAULT_MIN_TICK_PX = 256;
 
+const TIME_FMT = new Intl.DateTimeFormat("en-US", {
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
 const DATETIME_FMT = new Intl.DateTimeFormat("en-US", {
   month: "2-digit",
   day: "2-digit",
@@ -69,22 +77,14 @@ const YEAR_FMT = new Intl.DateTimeFormat("en-US", {
  * - null (ms-level):    full `mm/dd HH:MM`
  */
 function formatTick(t: number, interval: TimeInterval | null): string {
-  if (interval === timeMonth) return MONTH_FMT.format(t);
-  if (interval === timeYear) return YEAR_FMT.format(t);
-  if (interval === timeDay) return DATE_FMT.format(t);
-  // timeWeek is a filtered timeDay; treat it the same as day.
-  if (
-    interval === timeSecond ||
-    interval === timeMinute ||
-    interval === timeHour ||
-    interval === null
-  ) {
-    const d = new Date(t);
-    if (d.getHours() === 0 && d.getMinutes() === 0) return DATE_FMT.format(t);
-    return DATETIME_FMT.format(t).replace(",", "");
-  }
-  // Unknown interval (e.g. a filtered/custom one): fall back to date+time.
-  return DATETIME_FMT.format(t).replace(",", "");
+  const d = new Date(t);
+  if (d.getSeconds() !== 0) return TIME_FMT.format(t).replace(",", "");
+  if (d.getMinutes() !== 0) return DATETIME_FMT.format(t).replace(",", "");
+  if (d.getHours() !== 0) return DATETIME_FMT.format(t).replace(",", "");
+  if (d.getDate() !== 1) return DATE_FMT.format(t).replace(",", "");
+  if (d.getMonth() !== 0) return MONTH_FMT.format(t);
+
+  return YEAR_FMT.format(t);
 }
 
 export interface AxisLayer {

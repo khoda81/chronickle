@@ -14,23 +14,23 @@ export interface RssFeed {
 }
 
 export const DEFAULT_FEEDS: readonly RssFeed[] = [
-  // { source: "Reuters", url: "https://www.reutersagency.com/feed/?best-top-news&post_type=best" },
-  // { source: "Al Jazeera", url: "https://www.aljazeera.com/xml/rss/all.xml" },
-  // { source: "BBC World", url: "http://feeds.bbci.co.uk/news/world/rss.xml" },
-  // { source: "Yahoo World", url: "https://news.yahoo.com/rss/world" },
-  // { source: "NYT World", url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml" },
+  { source: "Reuters", url: "https://www.reutersagency.com/feed/?best-top-news&post_type=best" },
+  { source: "Al Jazeera", url: "https://www.aljazeera.com/xml/rss/all.xml" },
+  { source: "BBC World", url: "http://feeds.bbci.co.uk/news/world/rss.xml" },
+  { source: "Yahoo World", url: "https://news.yahoo.com/rss/world" },
+  { source: "NYT World", url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml" },
   // Core Macro & Commodities Coverage
-  { source: "Kitco Gold News", url: "https://www.kitco.com/rss/news/" },
-  { source: "ForexLive Macro", url: "https://www.forexlive.com/rss" },
-  { source: "FXStreet Commodities", url: "https://www.fxstreet.com/rss/news/commodities/gold" },
-  {
-    source: "Reuters Business",
-    url: "https://www.reutersagency.com/feed/?best-business-news&post_type=best",
-  },
-  {
-    source: "MarketWatch Top Stories",
-    url: "http://feeds.marketwatch.com/marketwatch/topstories/",
-  },
+  // { source: "Kitco Gold News", url: "https://www.kitco.com/rss/news/" },
+  // { source: "ForexLive Macro", url: "https://www.forexlive.com/rss" },
+  // { source: "FXStreet Commodities", url: "https://www.fxstreet.com/rss/news/commodities/gold" },
+  // {
+  //   source: "Reuters Business",
+  //   url: "https://www.reutersagency.com/feed/?best-business-news&post_type=best",
+  // },
+  // {
+  //   source: "MarketWatch Top Stories",
+  //   url: "http://feeds.marketwatch.com/marketwatch/topstories/",
+  // },
 ];
 
 export interface FetchEventsOptions {
@@ -70,10 +70,6 @@ export async function fetchFeed(
     }
 
     const xml = await res.text();
-
-    // DEBUG: Look at the first 100 characters to ensure it's actually XML (<?xml ...)
-    // You can remove this once everything is working.
-    console.debug(`Raw response from ${feed.source}:`, xml.substring(0, 100));
 
     return parseRssXml(xml, feed.source);
   } finally {

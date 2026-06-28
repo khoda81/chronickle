@@ -88,6 +88,7 @@ interface TimelineState {
 
 const EMPTY_EVENTS: EventSet = { events: [] };
 
+// TODO: These should live in a config object instead of a global constant
 /** CSS line height used to normalize wheel `deltaMode: 1` (lines). */
 const WHEEL_LINE_HEIGHT = 16;
 /** Zoom sensitivity per normalized pixel of wheel delta. */
@@ -95,10 +96,11 @@ const WHEEL_SENSITIVITY = 0.003;
 /** Time scroll sensitivity per normalized pixel of wheel delta. */
 const TIMESCROLL_SENSITIVITY = 3;
 
-/** "Now" marker stroke color. */
-const NOW_STROKE = "rgba(255, 255, 255, 0.55)";
 /** "Now" marker line width (CSS px). */
 const NOW_WIDTH = 1;
+// TODO: These should live in a theme or color config object instead of a global constant
+/** "Now" marker stroke color. */
+const NOW_STROKE = "rgba(255, 255, 255, 0.55)";
 
 export class Timeline {
   private readonly canvas: HTMLCanvasElement;
@@ -136,7 +138,7 @@ export class Timeline {
     this.state = {
       events: EMPTY_EVENTS,
       timeRange: opts.initialTimeRange,
-      priceScale: 19,
+      priceScale: 22,
       hovered: null,
       dirty: true,
     };
@@ -203,13 +205,14 @@ export class Timeline {
   }
 
   private resize(): void {
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = window.devicePixelRatio;
     this.plot.setDpr(dpr);
     const rect = this.canvas.getBoundingClientRect();
-    this.canvas.width = Math.max(1, Math.floor(rect.width * dpr));
-    this.canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    this.canvas.width = Math.floor(rect.width * dpr);
+    this.canvas.height = Math.floor(rect.height * dpr);
     // Note: no setTransform here — the Frame applies the DPR transform per
     // draw, so it can never be lost across save/restore.
+    // TODO: Get rid of the dirty flag and rely on requestAnimationFrame instead
     this.state = { ...this.state, dirty: true };
   }
 
@@ -297,7 +300,7 @@ export class Timeline {
     }
 
     const now = Date.now();
-    if (now < timeRange.min || now > timeRange.max) return;
+    if (now > timeRange.max) return;
 
     const x = frame.tx.timeToX(now);
     frame.vline(x, 0, frame.height, NOW_STROKE, NOW_WIDTH);
@@ -309,7 +312,10 @@ export class Timeline {
     // the sub-pixel remainder of the current position. Using the remainder
     // keeps the line phase-locked to wall-clock time across re-arms.
     const fracPx = x - Math.floor(x);
-    const delayMs = (timePerPx * (1 - fracPx)) / 30;
+    // TODO: Should this change based on dpr too?
+    const tillNextChange = (timePerPx * (1 - fracPx)) / 4;
+    const timeToMin = timeRange.min - now;
+    const delayMs = Math.max(timeToMin, tillNextChange);
     this.nowTimer = setTimeout(() => {
       this.nowTimer = null;
       this.reqDraw();
