@@ -3,20 +3,25 @@
  *
  * The timeline queries synchronously every frame with the visible time
  * range. The broker returns cached events in that range immediately and, per
- * feed, kicks off an async backfill if:
- *   - the feed is not already being fetched (pending), and
- *   - the feed's archive is not known to be exhausted, and
- *   - the oldest cached event from that feed is newer than `range.min`
- *     (i.e. we don't yet have coverage down to the left edge of the viewport).
+ * feed, kicks off an async backfill via that feed's `FeedWalker` when the
+ * viewport's left edge is not yet covered.
  *
- * When a fetch lands, the broker merges the new events, updates the feed's
- * oldest-seen timestamp and exhausted flag, and notifies subscribers — the
- * timeline re-queries on the next frame and picks up the new data.
+ * Per-feed state is a tagged union (`FeedState`) — invalid combinations like
+ * "fetching and exhausted" are unrepresentable. Transitions:
  *
- * This mirrors the price broker's contract: synchronous query, async
- * backfill, subscriber notification. The dedup unit is the **feed id**, not
- * the range — panning around does not spawn duplicate fetches for the same
- * feed, because a feed has at most one in-flight fetch at a time.
+ *   idle ──needs more──► fetching
+ *   fetching ──progress──► idle (oldestT updated)            [coverage reached]
+ *   fetching ──exhausted──► exhausted
+ *   fetching ──failed──► failed
+ *   fetching ──backoff──► backoff (nextAttemptAt = now + 2^attempt s, cap 60s)
+ *   backoff ──now >= nextAttemptAt + needs more──► fetching
+ *   backoff ──success──► idle (attempt reset)
+ *
+ * Failure handling:
+ *  - Terminal failures (`failed`) are never retried. The feed is dead.
+ *  - Transient failures (`backoff`) use exponential backoff capped at 60s.
+ *  - Mid-walk events are committed incrementally via the walker's `onEvents`
+ *    callback, so a failure on page N does not lose pages 1..N-1.
  *
  * Storage: a single sorted array of `NewsEvent` (events are sparse — a few
  * thousand at most — so the chunked level store used for prices is overkill).
@@ -26,6 +31,7 @@
 
 import type { NewsEvent, RssFeed } from "../../domain.ts";
 import { Range } from "../../engine/range.ts";
+import { FeedWalker, type FeedWalkerOptions } from "./walker.ts";
 
 /** Algebraic query status — mirrors the price broker's contract. */
 export type EventQueryStatus = "complete" | "partial" | "empty";
@@ -37,59 +43,52 @@ export interface EventQueryResult {
 }
 
 /**
- * Per-feed fetch state. The broker reasons about feeds, not ranges, because
- * RSS has no range-query API — you can only walk a feed's archive forward.
+ * Per-feed state machine. Tagged union — invalid combinations are
+ * unrepresentable.
  *
- *  - `pending`: a fetch is in flight for this feed. Blocks new requests until
- *    it resolves (success or failure), at which point it is cleared.
- *  - `oldestT`: the oldest event timestamp seen from this feed so far, or
- *    null if no events have been fetched yet. Used to decide whether the
- *    viewport's left edge (`range.min`) is already covered.
- *  - `exhausted`: the feed's archive chain ended (no more pages). Once true,
- *    the broker never re-requests this feed — there is nothing more to fetch.
+ *  - `idle`:      not fetching, not terminal. `oldestT` is the oldest event
+ *                 timestamp seen for this feed (Infinity if none yet).
+ *  - `fetching`:  a walk is in flight. Blocks new walks until it resolves.
+ *  - `exhausted`: the feed's archive chain ended. Never re-requested.
+ *  - `failed`:    a terminal failure occurred. Never re-requested.
+ *  - `backoff`:   a transient failure occurred. Retry after `nextAttemptAt`.
  */
-interface FeedFetchState {
-  pending: boolean;
-  oldestT: number | null;
-  exhausted: boolean;
-}
+type FeedState =
+  | { readonly kind: "idle"; readonly oldestT: number }
+  | { readonly kind: "fetching" }
+  | { readonly kind: "exhausted"; readonly oldestT: number }
+  | { readonly kind: "failed"; readonly reason: string }
+  | {
+      readonly kind: "backoff";
+      readonly oldestT: number;
+      readonly nextAttemptAt: number;
+      readonly attempt: number;
+    };
 
-export interface FeedFetchResult {
-  /** Events fetched for this feed (any timestamp; the broker filters by range). */
-  readonly events: NewsEvent[];
-  /** True if the feed's archive chain ended — no more pages to walk. */
-  readonly exhausted: boolean;
-}
-
-export interface EventFetcher {
-  /**
-   * Fetch events for a single feed, walking its archive until the oldest
-   * returned event is at or before `targetMin`, or the archive ends. The
-   * fetcher may cache already-walked pages and reuse them across calls for
-   * the same feed — only newly-needed pages are fetched.
-   */
-  fetchFeed(feed: RssFeed, targetMin: number): Promise<FeedFetchResult>;
-}
+/** Backoff cap: 60s. Base: 1s, doubling per attempt. */
+const BACKOFF_BASE_MS = 1_000;
+const BACKOFF_CAP_MS = 60_000;
 
 export class EventBroker {
   private events: NewsEvent[] = [];
-  private readonly feedState = new Map<string, FeedFetchState>();
+  private readonly feedState = new Map<string, FeedState>();
+  private readonly walkers = new Map<string, FeedWalker>();
   private readonly subscribers = new Set<() => void>();
   /** Callback returning the currently enabled feeds — toggles are live. */
   private readonly activeFeeds: () => readonly RssFeed[];
+  private readonly walkerOpts: FeedWalkerOptions;
 
-  constructor(fetcher: EventFetcher, activeFeeds: () => readonly RssFeed[]) {
-    this.fetcher = fetcher;
+  constructor(walkerOpts: FeedWalkerOptions = {}, activeFeeds: () => readonly RssFeed[]) {
+    this.walkerOpts = walkerOpts;
     this.activeFeeds = activeFeeds;
   }
-
-  private readonly fetcher: EventFetcher;
 
   /**
    * Synchronous query. Returns cached events in `range` (filtered to enabled
    * feeds) and kicks off per-feed backfill for any enabled feed whose oldest
    * cached event is newer than `range.min`. Safe to call every frame — the
-   * per-feed `pending` flag dedups in-flight requests.
+   * `fetching` state dedups in-flight walks, and `backoff`/`failed`/`exhausted`
+   * prevent redundant requests.
    */
   query(range: Range): EventQueryResult {
     const enabledIds = new Set(this.activeFeeds().map((f) => f.id));
@@ -101,13 +100,8 @@ export class EventBroker {
     let allCovered = true;
     for (const feed of this.activeFeeds()) {
       const st = this.stateOf(feed.id);
-      if (st.pending || st.exhausted) {
-        if (!st.exhausted) allCovered = false;
-        continue;
-      }
-      if (st.oldestT !== null && st.oldestT <= range.min) continue;
-      allCovered = false;
-      void this.requestFetch(feed, range.min);
+      const covered = this.kickIfNeeded(feed, st, range.min);
+      if (!covered) allCovered = false;
     }
 
     let status: EventQueryStatus;
@@ -124,78 +118,158 @@ export class EventBroker {
     return () => this.subscribers.delete(fn);
   }
 
-  /** All cached events, sorted ascending by t. For diagnostics. */
-  all(): readonly NewsEvent[] {
-    return this.events;
+  /**
+   * Decide whether `feed` is covered for `range.min`, and kick a walk if not.
+   * Returns true if the feed is covered (or terminal — nothing more to fetch).
+   */
+  private kickIfNeeded(feed: RssFeed, st: FeedState, rangeMin: number): boolean {
+    switch (st.kind) {
+      case "fetching":
+        return false; // in flight; not yet covered
+      case "exhausted":
+      case "failed":
+        return true; // terminal — nothing more to fetch, treat as covered
+      case "idle":
+        if (st.oldestT <= rangeMin) return true; // already covered
+        void this.requestWalk(feed, rangeMin, 0);
+        return false;
+      case "backoff": {
+        if (Date.now() < st.nextAttemptAt) return false; // waiting
+        if (st.oldestT <= rangeMin) return true; // covered, no retry needed
+        void this.requestWalk(feed, rangeMin, st.attempt);
+        return false;
+      }
+    }
   }
 
-  /** Covered time range, or null if empty. */
-  cachedRange(): Range | null {
-    if (this.events.length === 0) return null;
-    return Range.create(this.events[0]!.t, this.events[this.events.length - 1]!.t);
-  }
-
-  /** Get or create the fetch state for a feed. */
-  private stateOf(feedId: string): FeedFetchState {
+  /** Get or create the feed state. New feeds start in `idle` with oldestT=∞. */
+  private stateOf(feedId: string): FeedState {
     let st = this.feedState.get(feedId);
     if (st === undefined) {
-      st = { pending: false, oldestT: null, exhausted: false };
+      st = { kind: "idle", oldestT: Infinity };
       this.feedState.set(feedId, st);
     }
     return st;
   }
 
-  /**
-   * Request a fetch for `feed` walking its archive toward `targetMin`. Sets
-   * `pending` for the duration; on resolution, merges events, updates
-   * `oldestT`/`exhausted`, and notifies subscribers. On failure, clears
-   * `pending` without marking exhausted (a later query will retry).
-   */
-  private async requestFetch(feed: RssFeed, targetMin: number): Promise<void> {
-    const st = this.stateOf(feed.id);
-    if (st.pending) return;
-    st.pending = true;
-
-    try {
-      const { events, exhausted } = await this.fetcher.fetchFeed(feed, targetMin);
-      if (events.length > 0) this.merge(events);
-      // Update oldestT to the oldest event we now know about for this feed
-      // (across all fetches, not just this one).
-      if (events.length > 0) {
-        const oldest = events[0]!.t;
-        if (st.oldestT === null || oldest < st.oldestT) st.oldestT = oldest;
-      }
-      st.exhausted = exhausted;
-      this.notify();
-    } catch (err) {
-      // Surface loudly; do not mark exhausted so a later query retries.
-      console.error(`[EventBroker] fetch failed for feed ${feed.source}:`, err);
-    } finally {
-      st.pending = false;
+  /** Get or create the walker for a feed. */
+  private walkerOf(feed: RssFeed): FeedWalker {
+    let w = this.walkers.get(feed.id);
+    if (w === undefined) {
+      w = new FeedWalker(feed, this.walkerOpts);
+      this.walkers.set(feed.id, w);
     }
+    return w;
   }
 
-  private notify(): void {
-    for (const fn of this.subscribers) fn();
+  /**
+   * Request a walk for `feed` toward `targetMin`. Transitions to `fetching`
+   * for the duration. The walker commits events incrementally via `onEvents`,
+   * which merges into the store and updates `oldestT`. On resolution,
+   * transitions to `idle`/`exhausted`/`failed`/`backoff` and notifies.
+   */
+  private async requestWalk(feed: RssFeed, targetMin: number, attempt: number): Promise<void> {
+    const st = this.stateOf(feed.id);
+    if (st.kind === "fetching") return; // dedup
+
+    this.feedState.set(feed.id, { kind: "fetching" });
+    const walker = this.walkerOf(feed);
+
+    try {
+      const outcome = await walker.walk(targetMin, (pageEvents) => {
+        this.merge(pageEvents);
+        // Update oldestT from the store — the source of truth. We need the
+        // current state's oldestT to compare, so recompute from the merged
+        // store for this feed.
+        this.updateOldestT(feed.id);
+      });
+
+      // Transition based on outcome. Read current oldestT from the store.
+      const oldestT = this.oldestTForFeed(feed.id);
+      switch (outcome) {
+        case "exhausted":
+          this.feedState.set(feed.id, { kind: "exhausted", oldestT });
+          console.debug(`Feed exhausted: ${feed.source}`);
+          break;
+        case "failed":
+          this.feedState.set(feed.id, {
+            kind: "failed",
+            reason: walker.failureReason ?? "unknown",
+          });
+          console.debug(`Feed failed: ${feed.source}`);
+          break;
+        case "backoff": {
+          const delay = Math.min(BACKOFF_BASE_MS * 2 ** attempt, BACKOFF_CAP_MS);
+          this.feedState.set(feed.id, {
+            kind: "backoff",
+            oldestT,
+            nextAttemptAt: Date.now() + delay,
+            attempt: attempt + 1,
+          });
+          console.debug(`Backing off for ${feed.source}: delay=${delay}ms`);
+          break;
+        }
+      }
+      this.notify();
+    } catch (err) {
+      // Should not happen — the walker catches and classifies its own errors.
+      // If it does, treat as backoff so we retry rather than silently dying.
+      console.error(`[EventBroker] unexpected walk failure for ${feed.source}:`, err);
+      const delay = Math.min(BACKOFF_BASE_MS * 2 ** attempt, BACKOFF_CAP_MS);
+      this.feedState.set(feed.id, {
+        kind: "backoff",
+        oldestT: this.oldestTForFeed(feed.id),
+        nextAttemptAt: Date.now() + delay,
+        attempt: attempt + 1,
+      });
+    }
   }
 
   /**
    * Merge `incoming` into the sorted store, deduplicating by (feedId, t, link).
    * Events are sparse enough that an O(n+m) merge is fine.
    */
-  private merge(incoming: NewsEvent[]): void {
+  private merge(incoming: readonly NewsEvent[]): void {
     if (incoming.length === 0) return;
     const seen = new Set(this.events.map(keyOf));
     const fresh: NewsEvent[] = [];
     for (const e of incoming) {
       const k = keyOf(e);
-      if (!seen.has(k)) {
-        seen.add(k);
-        fresh.push(e);
-      }
+      if (seen.has(k)) continue;
+      seen.add(k);
+      fresh.push(e);
     }
     if (fresh.length === 0) return;
     this.events = [...this.events, ...fresh].sort((a, b) => a.t - b.t);
+  }
+
+  /** Update the `oldestT` on the current `idle`/`backoff` state for a feed. */
+  private updateOldestT(feedId: string): void {
+    const oldestT = this.oldestTForFeed(feedId);
+    const st = this.feedState.get(feedId);
+    if (st === undefined) return;
+    switch (st.kind) {
+      case "idle":
+        this.feedState.set(feedId, { kind: "idle", oldestT });
+        break;
+      case "backoff":
+        this.feedState.set(feedId, { ...st, oldestT });
+        break;
+      // fetching/exhausted/failed: oldestT is set on transition, not here.
+    }
+  }
+
+  /** The oldest event timestamp in the store for a given feed, or Infinity. */
+  private oldestTForFeed(feedId: string): number {
+    let oldest = Infinity;
+    for (const e of this.events) {
+      if (e.feedId === feedId && e.t < oldest) oldest = e.t;
+    }
+    return oldest;
+  }
+
+  private notify(): void {
+    for (const fn of this.subscribers) fn();
   }
 }
 

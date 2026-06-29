@@ -11,7 +11,7 @@ import { Range } from "./engine/range.ts";
 import { PALETTES, rampPaletteName, setRampPalette, type PaletteName } from "./engine/ramp.ts";
 import { Broker } from "./data/price/broker.ts";
 import { createNobitexFetcher } from "./data/price/exchanges/nobitexFetcher.ts";
-import { EventBroker, createRssEventFetcher, fetchFeed, defaultProxy } from "./data/index.ts";
+import { EventBroker, fetchFeed, defaultProxy } from "./data/index.ts";
 import { FeedRegistry } from "./data/events/feeds.ts";
 import { idToColor } from "./data/events/color.ts";
 import type { RssFeed } from "./domain.ts";
@@ -221,7 +221,7 @@ function main(): void {
   // Feeds + events: the registry persists user-added feeds to localStorage;
   // the EventBroker fetches on demand via the timeline's eventSource.
   const registry = FeedRegistry.load(DEFAULT_FEEDS);
-  const eventBroker = new EventBroker(createRssEventFetcher(), () => registry.active());
+  const eventBroker = new EventBroker({}, () => registry.active());
 
   const timeline = new Timeline({
     canvas,
