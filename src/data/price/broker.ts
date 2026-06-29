@@ -16,15 +16,14 @@
  * One broker per price source. `main.ts` may own several brokers.
  */
 
-import { Chunk, ChunkedLevelStore } from "./store.ts";
+import { ChunkedLevelStore } from "./store.ts";
 import { evaluateStaircase, StaircaseResult } from "./staircase.ts";
 import { RangeSet } from "../rangeSet.ts";
 import { Fetcher } from "./fetcher.ts";
 import { Range } from "../../engine/range.ts";
-import { PricePoint } from "../../domain.ts";
 
-/** Algebraic query status — not a nullable, not a flag field. */
-export type QueryStatus =
+/** Algebraic query status */
+type QueryStatus =
   /** All eval points fell within cached coverage at sufficient resolution. */
   | "complete"
   /** Some eval points were covered; a fetch is in flight for the rest. */
@@ -75,7 +74,7 @@ export class Broker {
 
     const tMin = evalTime[0]!;
     const tMax = evalTime[evalTime.length - 1]!;
-    const range = safeRange(tMin, tMax);
+    const range = Range.create(tMin, tMax);
 
     // Coverage check: which sub-ranges of the visible window have we already
     // fetched? `RangeSet.gaps` returns the unfilled sub-ranges in ascending
@@ -114,11 +113,6 @@ export class Broker {
   /** Current cached time range, or null if empty. */
   cachedRange(): Range | null {
     return this.store.timeRange();
-  }
-
-  /** Direct access to chunks (e.g. for diagnostics or custom evaluators). */
-  chunks(): readonly Chunk[] {
-    return this.store.chunks;
   }
 
   /**
@@ -167,11 +161,4 @@ export class Broker {
   private notify(): void {
     for (const fn of this.subscribers) fn();
   }
-}
-
-/** Build a Range, tolerating min === max by nudging max by 1ms. */
-function safeRange(min: number, max: number): Range {
-  if (min === max) return Range.create(min, min + 1);
-  if (min > max) return Range.create(max, min);
-  return Range.create(min, max);
 }

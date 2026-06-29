@@ -11,6 +11,7 @@
 
 import { Range } from "../engine/range.ts";
 
+// TODO:‌ This should keep the ranges sorted and use binary search
 export class RangeSet {
   private readonly intervals: Range[] = [];
 
