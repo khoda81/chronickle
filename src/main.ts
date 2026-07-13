@@ -5,6 +5,7 @@ import { FeedRegistry } from "./data/events/feeds.ts";
 import { idToColor } from "./data/events/color.ts";
 import { Broker } from "./data/price/broker.ts";
 import { MARKET_SOURCES, marketSource, type MarketSourceId } from "./data/price/markets.ts";
+import { filterMarketSymbols, type MarketSymbol } from "./data/price/symbols.ts";
 import type { RssFeed } from "./domain.ts";
 import { PALETTES, rampPaletteName, setRampPalette, type PaletteName } from "./engine/ramp.ts";
 import { Range } from "./engine/range.ts";
@@ -58,8 +59,10 @@ interface AppElements {
   readonly palette: HTMLSelectElement;
   readonly wavelet: HTMLSelectElement;
   readonly source: HTMLSelectElement;
+  readonly symbolPicker: HTMLDivElement;
   readonly symbol: HTMLInputElement;
-  readonly symbolList: HTMLDataListElement;
+  readonly symbolToggle: HTMLButtonElement;
+  readonly symbolMenu: HTMLDivElement;
   readonly addChart: HTMLButtonElement;
   readonly activeCharts: HTMLDivElement;
   readonly canvas: HTMLCanvasElement;
@@ -122,15 +125,26 @@ function buildApp(): AppElements {
     option.textContent = market.label;
     source.append(option);
   }
-  const symbolList = el<HTMLDataListElement>("datalist");
-  symbolList.id = "market-symbols";
+  const symbolPicker = el<HTMLDivElement>("div", "symbol-picker");
   const symbol = el<HTMLInputElement>("input", "market-symbol");
-  symbol.setAttribute("list", symbolList.id);
+  symbol.setAttribute("role", "combobox");
+  symbol.setAttribute("aria-autocomplete", "list");
+  symbol.setAttribute("aria-expanded", "false");
+  symbol.setAttribute("aria-controls", "market-symbol-menu");
   symbol.placeholder = "Ticker, e.g. BTCUSDT";
   symbol.spellcheck = false;
+  const symbolToggle = el<HTMLButtonElement>("button", "symbol-toggle");
+  symbolToggle.type = "button";
+  symbolToggle.textContent = "▾";
+  symbolToggle.title = "Show available tickers";
+  symbolToggle.setAttribute("aria-label", "Show available tickers");
+  const symbolMenu = el<HTMLDivElement>("div", "symbol-menu hidden");
+  symbolMenu.id = "market-symbol-menu";
+  symbolMenu.setAttribute("role", "listbox");
+  symbolPicker.append(symbol, symbolToggle, symbolMenu);
   const addChart = el<HTMLButtonElement>("button", "chart-add");
   addChart.textContent = "Add row";
-  marketControls.append(source, symbol, symbolList, addChart);
+  marketControls.append(source, symbolPicker, addChart);
   const activeCharts = el<HTMLDivElement>("div", "active-charts");
 
   const feedControls = el<HTMLDivElement>("div", "feed-controls");
@@ -156,8 +170,10 @@ function buildApp(): AppElements {
     palette,
     wavelet,
     source,
+    symbolPicker,
     symbol,
-    symbolList,
+    symbolToggle,
+    symbolMenu,
     addChart,
     activeCharts,
     canvas,
@@ -319,16 +335,87 @@ function main(): void {
     return true;
   }
 
-  function updateSymbolSuggestions(): void {
-    const source = marketSource(app.source.value);
-    app.symbolList.innerHTML = "";
-    if (source === null) return;
-    for (const example of source.examples) {
-      const option = el<HTMLOptionElement>("option");
-      option.value = example;
-      app.symbolList.append(option);
+  let symbolOptions: readonly MarketSymbol[] = [];
+  let highlightedSymbol = -1;
+  let symbolLoadGeneration = 0;
+
+  function closeSymbolMenu(): void {
+    app.symbolMenu.classList.add("hidden");
+    app.symbol.setAttribute("aria-expanded", "false");
+    app.symbol.removeAttribute("aria-activedescendant");
+    highlightedSymbol = -1;
+  }
+
+  function selectSymbol(option: MarketSymbol): void {
+    app.symbol.value = option.symbol;
+    closeSymbolMenu();
+    app.symbol.focus();
+  }
+
+  function renderSymbolMenu(open = true): void {
+    const matches = filterMarketSymbols(symbolOptions, app.symbol.value);
+    app.symbolMenu.innerHTML = "";
+    highlightedSymbol = Math.min(highlightedSymbol, matches.length - 1);
+    if (matches.length === 0) {
+      const empty = el<HTMLDivElement>("div", "symbol-empty");
+      empty.textContent = "No listed match — you can still add the typed ticker";
+      app.symbolMenu.append(empty);
+    } else {
+      for (let index = 0; index < matches.length; index++) {
+        const option = matches[index]!;
+        const row = el<HTMLButtonElement>("button", "symbol-option");
+        row.type = "button";
+        row.id = `market-symbol-option-${index}`;
+        row.setAttribute("role", "option");
+        row.setAttribute("aria-selected", String(index === highlightedSymbol));
+        if (index === highlightedSymbol) row.classList.add("highlighted");
+        const ticker = el<HTMLSpanElement>("span", "symbol-option-ticker");
+        ticker.textContent = option.symbol;
+        const label = el<HTMLSpanElement>("span", "symbol-option-label");
+        label.textContent = option.label;
+        row.append(ticker, label);
+        row.addEventListener("pointerdown", (event) => {
+          event.preventDefault();
+          selectSymbol(option);
+        });
+        app.symbolMenu.append(row);
+      }
     }
-    if (app.symbol.value.trim().length === 0) app.symbol.value = source.examples[0] ?? "";
+    if (open) {
+      app.symbolMenu.classList.remove("hidden");
+      app.symbol.setAttribute("aria-expanded", "true");
+      if (highlightedSymbol >= 0) {
+        app.symbol.setAttribute(
+          "aria-activedescendant",
+          `market-symbol-option-${highlightedSymbol}`,
+        );
+      }
+    }
+  }
+
+  async function updateSymbolSuggestions(): Promise<void> {
+    const source = marketSource(app.source.value);
+    if (source === null) return;
+    const generation = ++symbolLoadGeneration;
+    symbolOptions = source.examples;
+    highlightedSymbol = -1;
+    if (app.symbol.value.trim().length === 0) app.symbol.value = source.examples[0]?.symbol ?? "";
+    renderSymbolMenu(false);
+    try {
+      const loaded = await source.loadSymbols();
+      if (generation !== symbolLoadGeneration) return;
+      const bySymbol = new Map<string, MarketSymbol>();
+      for (const option of [...source.examples, ...loaded]) bySymbol.set(option.symbol, option);
+      symbolOptions = [...bySymbol.values()];
+      if (!app.symbolMenu.classList.contains("hidden")) renderSymbolMenu(true);
+    } catch (error) {
+      if (generation !== symbolLoadGeneration) return;
+      console.warn(`${source.label} ticker discovery failed`, error);
+      setStatus(
+        app.status,
+        `${source.label} ticker list unavailable; examples and free-form entry still work`,
+      );
+    }
   }
 
   const addSelectedChart = () => {
@@ -336,16 +423,56 @@ function main(): void {
   };
   app.source.addEventListener("change", () => {
     app.symbol.value = "";
-    updateSymbolSuggestions();
+    closeSymbolMenu();
+    void updateSymbolSuggestions();
   });
   app.addChart.addEventListener("click", addSelectedChart);
+  app.symbol.addEventListener("input", () => {
+    highlightedSymbol = -1;
+    renderSymbolMenu(true);
+  });
+  app.symbol.addEventListener("focus", () => renderSymbolMenu(true));
   app.symbol.addEventListener("keydown", (event) => {
+    const matches = filterMarketSymbols(symbolOptions, app.symbol.value);
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      highlightedSymbol =
+        matches.length === 0
+          ? -1
+          : (highlightedSymbol + direction + matches.length) % matches.length;
+      renderSymbolMenu(true);
+      app.symbolMenu.querySelector(".highlighted")?.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    if (event.key === "Escape") {
+      closeSymbolMenu();
+      return;
+    }
     if (event.key === "Enter") {
       event.preventDefault();
-      addSelectedChart();
+      const highlighted = matches[highlightedSymbol];
+      if (highlighted !== undefined) selectSymbol(highlighted);
+      else addSelectedChart();
     }
   });
-  updateSymbolSuggestions();
+  app.symbolToggle.addEventListener("click", () => {
+    if (app.symbolMenu.classList.contains("hidden")) {
+      app.symbol.focus();
+      renderSymbolMenu(true);
+    } else {
+      closeSymbolMenu();
+    }
+  });
+  app.symbolPicker.addEventListener("focusout", () => {
+    queueMicrotask(() => {
+      if (!app.symbolPicker.contains(document.activeElement)) closeSymbolMenu();
+    });
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!app.symbolPicker.contains(event.target as Node)) closeSymbolMenu();
+  });
+  void updateSymbolSuggestions();
 
   const savedCharts = Array.isArray(ui.charts)
     ? ui.charts

@@ -28,7 +28,7 @@ src/
   domain.ts            # Shared immutable types: HeatSample, HeatSeries, NewsEvent, EventSet
   uiState.ts           # Persistent viewport, palette, wavelet, and chart selections
   data/
-    price/             # Evidence-backed broker plus Nobitex/Binance adapters
+    price/             # Broker plus Nobitex, Binance, and Yahoo/oil adapters
     events/            # RSS parsing, archive walking, and event broker
     index.ts           # Re-exports
   engine/
@@ -40,3 +40,5 @@ src/
 ```
 
 Each market row owns a price broker, while one timeline stacks a resizable news row above all price heatmaps and draws a single shared time axis between them. Reload increments broker generations, clears price/event caches, and ignores responses from requests that began before the reload.
+
+The market picker loads active Binance and Nobitex symbols into a filterable autocomplete while preserving free-form entry. Yahoo Finance supports futures and other symbols, including `CL=F` (WTI crude) and `BZ=F` (Brent crude).

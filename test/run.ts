@@ -3,7 +3,16 @@ import { EventBroker } from "../src/data/events/broker.ts";
 import { Broker } from "../src/data/price/broker.ts";
 import { CoverageIndex } from "../src/data/price/coverage.ts";
 import { createBinanceFetcher } from "../src/data/price/exchanges/binanceFetcher.ts";
+import {
+  chooseYahooInterval,
+  createYahooFetcher,
+} from "../src/data/price/exchanges/yahoo.ts";
 import type { Fetcher, FetchRangeResult } from "../src/data/price/fetcher.ts";
+import { marketSource } from "../src/data/price/markets.ts";
+import {
+  filterMarketSymbols,
+  parseNobitexMarketKey,
+} from "../src/data/price/symbols.ts";
 import { ReturnPyramid } from "../src/data/price/returnPyramid.ts";
 import { ChunkedLevelStore } from "../src/data/price/store.ts";
 import { evaluateStaircase } from "../src/data/price/staircase.ts";
@@ -478,6 +487,61 @@ test("Binance adapter maps arbitrary symbols and range resolution", async () => 
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("Yahoo adapter supports WTI and Brent futures with range-aware intervals", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = "";
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    requestedUrl = input instanceof Request ? input.url : input.toString();
+    return new Response(
+      JSON.stringify({
+        chart: {
+          result: [
+            {
+              timestamp: [0, 3_600],
+              indicators: { quote: [{ open: [75.5, 76.25] }] },
+            },
+          ],
+          error: null,
+        },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+  try {
+    const fetcher = createYahooFetcher({ symbol: "bz=f", now: () => 7_200_000 });
+    const result = await fetcher.fetchRange({
+      range: Range.create(0, 7_200_000),
+      maxDeltaTMs: 3_600_000,
+    });
+    const target = new URL(requestedUrl).searchParams.get("url") ?? "";
+    assert(target.includes("/BZ%3DF?"), "Brent symbol was not encoded in Yahoo request");
+    assert(target.includes("interval=60m"), "wrong Yahoo interval");
+    assert(result.points.length === 2 && result.points[1]!.t === 3_600_000, "bad Yahoo rows");
+    assert(result.resolutionHintMs === 3_600_000, "wrong Yahoo resolution hint");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert(
+    chooseYahooInterval(60_000, 0, 9 * 86_400_000)?.interval === "2m",
+    "Yahoo lookback limit did not select the finest available fallback",
+  );
+  assert(marketSource("yahoo")?.normalizeSymbol(" cl=f ") === "CL=F", "WTI was rejected");
+});
+
+test("market symbol discovery normalizes Nobitex pairs and filters without forcing a match", () => {
+  const rial = parseNobitexMarketKey("btc-rls");
+  assert(rial?.symbol === "BTCIRT", "Nobitex RLS pair was not mapped to its candle symbol");
+  const options = [
+    { symbol: "BTCUSDT", label: "BTC / USDT" },
+    { symbol: "ETHUSDT", label: "ETH / USDT" },
+    { symbol: "BTCEUR", label: "BTC / EUR" },
+  ];
+  const filtered = filterMarketSymbols(options, "btc");
+  assert(filtered.length === 2, "autocomplete did not filter by typed value");
+  assert(filterMarketSymbols(options, "NEWCOIN").length === 0, "unknown ticker was invented");
 });
 
 test("broker exposes failures and uses the fetcher's retry policy", async () => {
