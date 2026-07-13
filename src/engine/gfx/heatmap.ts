@@ -1,7 +1,12 @@
 import type { Frame } from "./context.ts";
 import { MIN_SIGMA, maxSigmaFor } from "./layout.ts";
-import { rampLut, rampIndex, rampPaletteName } from "../ramp.ts";
-import { computeWaveletField, logPriceEdgesToReturns, type WaveletMode } from "../wavelet.ts";
+import { RAMP_RESOLUTION, rampLut, rampIndex, rampPaletteName } from "../ramp.ts";
+import {
+  computeWaveletField,
+  logPriceEdgesToReturns,
+  WaveletWorkspace,
+  type WaveletMode,
+} from "../wavelet.ts";
 
 /**
  * Uniform time-cell grid passed to the transform.
@@ -36,8 +41,25 @@ interface HeatmapResources {
   returns: Float64Array;
   scalesMs: Float64Array;
   imageData: ImageData | null;
+  imagePixels: Uint32Array | null;
   lastRenderKey: string | null;
+  readonly wavelet: WaveletWorkspace;
 }
+
+// Adjacent rows are logarithmically close in scale and the Gaussian scale-space
+// is smooth along that axis. Evaluate a compact set of anchor scales, then
+// interpolate values before the sigmoid. At typical row heights this removes
+// ~80% of inverse FFTs while retaining one displayed value per CSS row.
+const MAX_TRANSFORM_BANDS = 32;
+
+const SIGMOID_MIN = -18;
+const SIGMOID_MAX = 18;
+const SIGMOID_LUT_SIZE = 1 << 17;
+let sigmoidLut: Uint16Array | null = null;
+let packedRampName: string | null = null;
+let packedRamp: Uint32Array | null = null;
+const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([0x01020304]).buffer)[0] === 0x04;
+const INVALID_PIXEL = packRgba(5, 7, 13, 255);
 
 // Frame/L2 wrappers are short-lived, but the expensive canvas and typed-array
 // resources are persistent per rendering context.
@@ -69,6 +91,7 @@ class HeatmapImpl implements HeatmapLayer {
     // rows would duplicate work on HiDPI screens without a perceptible gain;
     // Canvas performs the final DPR rasterization.
     const bandCount = Math.max(2, Math.ceil(heatHeight));
+    const transformBandCount = Math.min(bandCount, MAX_TRANSFORM_BANDS);
     if (numPx <= 0) return;
 
     const { evalTime, value, padLeft, padRight } = padded;
@@ -111,43 +134,48 @@ class HeatmapImpl implements HeatmapLayer {
     }
     resources.returns = logPriceEdgesToReturns(value, resources.returns);
 
-    if (resources.scalesMs.length !== bandCount) resources.scalesMs = new Float64Array(bandCount);
+    if (resources.scalesMs.length !== transformBandCount) {
+      resources.scalesMs = new Float64Array(transformBandCount);
+    }
     const maxSigma = maxSigmaFor(numPx);
-    for (let band = 0; band < bandCount; band++) {
-      const sigmaPx = MIN_SIGMA * Math.pow(maxSigma / MIN_SIGMA, band / (bandCount - 1));
+    for (let band = 0; band < transformBandCount; band++) {
+      const sigmaPx = MIN_SIGMA * Math.pow(maxSigma / MIN_SIGMA, band / (transformBandCount - 1));
       resources.scalesMs[band] = sigmaPx * stepMs;
     }
 
-    const field = computeWaveletField(resources.returns, stepMs, resources.scalesMs, mode);
+    const field = computeWaveletField(
+      resources.returns,
+      stepMs,
+      resources.scalesMs,
+      mode,
+      undefined,
+      resources.wavelet,
+    );
     ensureImage(resources, numPx, bandCount);
-    const image = resources.imageData!;
-    const pixels = image.data;
-    const ramp = rampLut();
+    const imagePixels = resources.imagePixels!;
+    const ramp = packedRampLut();
     const gain = Math.exp(priceScale);
+    const scaleRatio = (transformBandCount - 1) / (bandCount - 1);
 
     for (let band = 0; band < bandCount; band++) {
-      const fieldOffset = band * value.length + padLeft;
+      const sourceBand = band * scaleRatio;
+      const lowerBand = Math.floor(sourceBand);
+      const upperBand = Math.min(transformBandCount - 1, lowerBand + 1);
+      const mix = sourceBand - lowerBand;
+      const lowerOffset = lowerBand * value.length + padLeft;
+      const upperOffset = upperBand * value.length + padLeft;
       const pixelBandOffset = band * numPx;
       for (let x = 0; x < numPx; x++) {
-        const z = field.values[fieldOffset + x]!;
-        const pixelOffset = (pixelBandOffset + x) * 4;
-        if (!Number.isFinite(z)) {
-          pixels[pixelOffset] = 5;
-          pixels[pixelOffset + 1] = 7;
-          pixels[pixelOffset + 2] = 13;
-          pixels[pixelOffset + 3] = 255;
-          continue;
-        }
-        const normalized = 1 / (1 + Math.exp(z * gain));
-        const rampOffset = rampIndex(normalized) * 4;
-        pixels[pixelOffset] = ramp[rampOffset]!;
-        pixels[pixelOffset + 1] = ramp[rampOffset + 1]!;
-        pixels[pixelOffset + 2] = ramp[rampOffset + 2]!;
-        pixels[pixelOffset + 3] = 255;
+        const lower = field.values[lowerOffset + x]!;
+        const upper = field.values[upperOffset + x]!;
+        const z = lower + (upper - lower) * mix;
+        imagePixels[pixelBandOffset + x] = Number.isFinite(z)
+          ? ramp[sigmoidRampIndex(z * gain)]!
+          : INVALID_PIXEL;
       }
     }
 
-    resources.offCtx.putImageData(image, 0, 0);
+    resources.offCtx.putImageData(resources.imageData!, 0, 0);
     resources.lastRenderKey = renderKey;
     ctx.drawImage(resources.offscreen, tx.screenDomain.min, y, width, heatHeight);
   }
@@ -180,7 +208,9 @@ function resourcesFor(ctx: CanvasRenderingContext2D, rowId: string): HeatmapReso
     returns: new Float64Array(0),
     scalesMs: new Float64Array(0),
     imageData: null,
+    imagePixels: null,
     lastRenderKey: null,
+    wavelet: new WaveletWorkspace(),
   };
   byRow.set(rowId, resources);
   return resources;
@@ -191,9 +221,51 @@ function ensureImage(resources: HeatmapResources, width: number, bandCount: numb
     resources.offscreen.width = width;
     resources.offscreen.height = bandCount;
     resources.imageData = null;
+    resources.imagePixels = null;
     resources.lastRenderKey = null;
   }
   if (resources.imageData === null) {
     resources.imageData = resources.offCtx.createImageData(width, bandCount);
+    const data = resources.imageData.data;
+    resources.imagePixels = new Uint32Array(data.buffer, data.byteOffset, data.byteLength / 4);
   }
+}
+
+function sigmoidRampIndex(value: number): number {
+  if (Number.isNaN(value)) return Math.floor((RAMP_RESOLUTION - 1) / 2);
+  if (value === Number.NEGATIVE_INFINITY) return RAMP_RESOLUTION - 1;
+  if (value >= SIGMOID_MAX) return 0;
+  if (value <= SIGMOID_MIN) return RAMP_RESOLUTION - 2;
+  let lut = sigmoidLut;
+  if (lut === null) {
+    lut = new Uint16Array(SIGMOID_LUT_SIZE);
+    const span = SIGMOID_MAX - SIGMOID_MIN;
+    for (let i = 0; i < lut.length; i++) {
+      const x = SIGMOID_MIN + (i / (lut.length - 1)) * span;
+      lut[i] = rampIndex(1 / (1 + Math.exp(x)));
+    }
+    sigmoidLut = lut;
+  }
+  const position = ((value - SIGMOID_MIN) / (SIGMOID_MAX - SIGMOID_MIN)) * (SIGMOID_LUT_SIZE - 1);
+  return lut[Math.round(position)]!;
+}
+
+function packedRampLut(): Uint32Array {
+  const name = rampPaletteName();
+  if (packedRamp !== null && packedRampName === name) return packedRamp;
+  const rgba = rampLut();
+  const result = new Uint32Array(RAMP_RESOLUTION);
+  for (let index = 0; index < result.length; index++) {
+    const offset = index * 4;
+    result[index] = packRgba(rgba[offset]!, rgba[offset + 1]!, rgba[offset + 2]!, 255);
+  }
+  packedRampName = name;
+  packedRamp = result;
+  return result;
+}
+
+function packRgba(red: number, green: number, blue: number, alpha: number): number {
+  return LITTLE_ENDIAN
+    ? (red | (green << 8) | (blue << 16) | (alpha << 24)) >>> 0
+    : (alpha | (blue << 8) | (green << 16) | (red << 24)) >>> 0;
 }

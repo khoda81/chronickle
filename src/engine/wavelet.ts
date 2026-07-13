@@ -31,6 +31,39 @@ export interface KernelContext {
   readonly rightCells: number;
 }
 
+/** Persistent buffers reused by one heatmap row across renders. */
+export class WaveletWorkspace implements WaveletField {
+  values = new Float64Array(0);
+  bandCount = 0;
+  sampleCount = 0;
+  signalReal = new Float64Array(0);
+  signalImaginary = new Float64Array(0);
+  workReal = new Float64Array(0);
+  workImaginary = new Float64Array(0);
+  causalState = new Float64Array(0);
+
+  prepareField(sampleCount: number, bandCount: number): Float64Array {
+    this.sampleCount = sampleCount;
+    this.bandCount = bandCount;
+    const length = sampleCount * bandCount;
+    if (this.values.length !== length) this.values = new Float64Array(length);
+    return this.values;
+  }
+
+  ensureFft(length: number): void {
+    if (this.signalReal.length === length) return;
+    this.signalReal = new Float64Array(length);
+    this.signalImaginary = new Float64Array(length);
+    this.workReal = new Float64Array(length);
+    this.workImaginary = new Float64Array(length);
+  }
+
+  ensureCausalState(stages: number): Float64Array {
+    if (this.causalState.length !== stages) this.causalState = new Float64Array(stages);
+    return this.causalState;
+  }
+}
+
 /**
  * Convert ZOH log-price samples at cell edges into return impulses located at
  * those same timestamps. `out[i]` uses only edges at or before `i`; this is
@@ -53,9 +86,9 @@ export function logPriceEdgesToReturns(logPrice: Float64Array, reuse?: Float64Ar
 export function kernelContext(
   mode: WaveletMode,
   maxSigmaCells: number,
-  options: Partial<WaveletOptions> = {},
+  options?: Partial<WaveletOptions>,
 ): KernelContext {
-  const opts = { ...DEFAULT_WAVELET_OPTIONS, ...options };
+  const opts = resolveOptions(options);
   validateOptions(opts);
   if (!(maxSigmaCells > 0) || !Number.isFinite(maxSigmaCells)) {
     throw new Error(`kernelContext: invalid sigma ${maxSigmaCells}`);
@@ -83,12 +116,13 @@ export function computeWaveletField(
   stepMs: number,
   scalesMs: Float64Array,
   mode: WaveletMode,
-  options: Partial<WaveletOptions> = {},
+  options?: Partial<WaveletOptions>,
+  workspace: WaveletWorkspace = new WaveletWorkspace(),
 ): WaveletField {
   if (!(stepMs > 0) || !Number.isFinite(stepMs)) {
     throw new Error(`computeWaveletField: invalid step ${stepMs}`);
   }
-  const opts = { ...DEFAULT_WAVELET_OPTIONS, ...options };
+  const opts = resolveOptions(options);
   validateOptions(opts);
   for (const scale of scalesMs) {
     if (!(scale > 0) || !Number.isFinite(scale)) {
@@ -97,8 +131,8 @@ export function computeWaveletField(
   }
 
   return mode === "centered"
-    ? centeredGaussianFft(returns, stepMs, scalesMs, opts)
-    : causalCascade(returns, stepMs, scalesMs, opts);
+    ? centeredGaussianFft(returns, stepMs, scalesMs, opts, workspace)
+    : causalCascade(returns, stepMs, scalesMs, opts, workspace);
 }
 
 /** Slow exact implementation retained as the numerical oracle for tests. */
@@ -106,9 +140,9 @@ export function computeCenteredGaussianReference(
   returns: Float64Array,
   stepMs: number,
   scalesMs: Float64Array,
-  options: Partial<WaveletOptions> = {},
+  options?: Partial<WaveletOptions>,
 ): WaveletField {
-  const opts = { ...DEFAULT_WAVELET_OPTIONS, ...options };
+  const opts = resolveOptions(options);
   validateOptions(opts);
   return centeredGaussianReference(returns, stepMs, scalesMs, opts);
 }
@@ -148,9 +182,8 @@ function centeredGaussianReference(
 }
 
 interface KernelSpectrum {
-  readonly radius: number;
+  /** Spectrum of an even, zero-centered kernel; imaginary components are zero. */
   readonly real: Float64Array;
-  readonly imaginary: Float64Array;
 }
 
 interface KernelBank {
@@ -159,22 +192,20 @@ interface KernelBank {
 }
 
 const KERNEL_CACHE = new Map<string, KernelBank>();
-// A per-row transform can contain hundreds of spectra. Retaining only the
-// active geometry prevents resize history from turning into a large memory
-// cache; the rendered image cache still makes hover-only redraws free.
-const MAX_KERNEL_CACHE_ENTRIES = 1;
+// A handful of active row geometries is normal. Keeping one entry caused every
+// differently-sized row to evict the previous row's bank on every frame.
+const MAX_KERNEL_CACHE_ENTRIES = 8;
 
 function centeredGaussianFft(
   returns: Float64Array,
   stepMs: number,
   scalesMs: Float64Array,
   opts: WaveletOptions,
+  workspace: WaveletWorkspace,
 ): WaveletField {
   const n = returns.length;
-  const values = new Float64Array(n * scalesMs.length);
-  if (n === 0 || scalesMs.length === 0) {
-    return { values, bandCount: scalesMs.length, sampleCount: n };
-  }
+  const values = workspace.prepareField(n, scalesMs.length);
+  if (n === 0 || scalesMs.length === 0) return workspace;
 
   let maxRadius = 0;
   for (const scaleMs of scalesMs) {
@@ -183,36 +214,44 @@ function centeredGaussianFft(
   const nfft = nextPowerOfTwo(n + maxRadius * 2);
   const bank = kernelBank(nfft, stepMs, scalesMs, opts.gaussianCutoff);
 
-  const signalReal = new Float64Array(nfft);
-  const signalImaginary = new Float64Array(nfft);
+  workspace.ensureFft(nfft);
+  const { signalReal, signalImaginary, workReal, workImaginary } = workspace;
+  signalReal.fill(0);
+  signalImaginary.fill(0);
   for (let i = 0; i < n; i++) {
     const delta = returns[i]!;
     signalReal[i] = Number.isFinite(delta) ? delta / stepMs : 0;
   }
   fft(signalReal, signalImaginary);
 
-  const workReal = new Float64Array(nfft);
-  const workImaginary = new Float64Array(nfft);
-  for (let band = 0; band < bank.spectra.length; band++) {
-    const spectrum = bank.spectra[band]!;
+  // Two real filtered bands can share one complex inverse FFT:
+  // IFFT(A + iB) = a + ib when A/B are the spectra of real outputs a/b.
+  for (let band = 0; band < bank.spectra.length; band += 2) {
+    const spectrumA = bank.spectra[band]!.real;
+    const spectrumB = bank.spectra[band + 1]?.real;
     for (let k = 0; k < nfft; k++) {
-      const ar = signalReal[k]!;
-      const ai = signalImaginary[k]!;
-      const br = spectrum.real[k]!;
-      const bi = spectrum.imaginary[k]!;
-      workReal[k] = ar * br - ai * bi;
-      workImaginary[k] = ar * bi + ai * br;
+      const xr = signalReal[k]!;
+      const xi = signalImaginary[k]!;
+      const ka = spectrumA[k]!;
+      if (spectrumB === undefined) {
+        workReal[k] = xr * ka;
+        workImaginary[k] = xi * ka;
+      } else {
+        const kb = spectrumB[k]!;
+        workReal[k] = xr * ka - xi * kb;
+        workImaginary[k] = xi * ka + xr * kb;
+      }
     }
     fft(workReal, workImaginary, true);
 
-    const radius = spectrum.radius;
-    const offset = band * n;
+    const offsetA = band * n;
+    const offsetB = offsetA + n;
     for (let i = 0; i < n; i++) {
-      // Standard linear convolution with a [0, 2r] kernel is centered at i+r.
-      values[offset + i] = workReal[i + radius]!;
+      values[offsetA + i] = workReal[i]!;
+      if (spectrumB !== undefined) values[offsetB + i] = workImaginary[i]!;
     }
   }
-  return { values, bandCount: scalesMs.length, sampleCount: n };
+  return workspace;
 }
 
 function kernelBank(
@@ -221,25 +260,35 @@ function kernelBank(
   scalesMs: Float64Array,
   cutoff: number,
 ): KernelBank {
-  const scaleCells = [...scalesMs].map((scale) => scale / stepMs);
-  const key = `${nfft}|${cutoff}|${scaleCells.map((s) => s.toPrecision(12)).join(",")}`;
+  let key = `${nfft}|${cutoff}`;
+  for (const scale of scalesMs) key += `|${(scale / stepMs).toPrecision(12)}`;
   const cached = KERNEL_CACHE.get(key);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) {
+    // Promote hits so occasional resize geometries, not active rows, are evicted.
+    KERNEL_CACHE.delete(key);
+    KERNEL_CACHE.set(key, cached);
+    return cached;
+  }
 
   const spectra: KernelSpectrum[] = [];
-  for (const sigmaCells of scaleCells) {
+  const imaginary = new Float64Array(nfft);
+  for (const scale of scalesMs) {
+    const sigmaCells = scale / stepMs;
     const radius = Math.max(1, Math.ceil(cutoff * sigmaCells));
     const real = new Float64Array(nfft);
-    const imaginary = new Float64Array(nfft);
     let sum = 0;
     for (let k = -radius; k <= radius; k++) {
       const weight = Math.exp(-0.5 * (k / sigmaCells) ** 2);
-      real[k + radius] = weight;
+      real[k < 0 ? nfft + k : k] = weight;
       sum += weight;
     }
-    for (let k = 0; k <= radius * 2; k++) real[k] = real[k]! / sum;
+    for (let k = -radius; k <= radius; k++) {
+      const index = k < 0 ? nfft + k : k;
+      real[index] = real[index]! / sum;
+    }
+    imaginary.fill(0);
     fft(real, imaginary);
-    spectra.push({ radius, real, imaginary });
+    spectra.push({ real });
   }
 
   const bank = { nfft, spectra };
@@ -256,16 +305,18 @@ function causalCascade(
   stepMs: number,
   scalesMs: Float64Array,
   opts: WaveletOptions,
+  workspace: WaveletWorkspace,
 ): WaveletField {
   const n = returns.length;
-  const values = new Float64Array(n * scalesMs.length);
+  const values = workspace.prepareField(n, scalesMs.length);
+  const state = workspace.ensureCausalState(opts.causalStages);
 
   for (let band = 0; band < scalesMs.length; band++) {
     // Equal first-order stages form an Erlang kernel. Choosing each stage's
     // time constant as sigma/sqrt(K) gives the cascade variance sigma².
     const stageTauMs = scalesMs[band]! / Math.sqrt(opts.causalStages);
     const alpha = 1 - Math.exp(-stepMs / stageTauMs);
-    const state = new Float64Array(opts.causalStages);
+    state.fill(0);
 
     for (let i = 0; i < n; i++) {
       const raw = returns[i]!;
@@ -279,7 +330,13 @@ function causalCascade(
       values[band * n + i] = x;
     }
   }
-  return { values, bandCount: scalesMs.length, sampleCount: n };
+  return workspace;
+}
+
+function resolveOptions(options: Partial<WaveletOptions> | undefined): WaveletOptions {
+  return options === undefined
+    ? DEFAULT_WAVELET_OPTIONS
+    : { ...DEFAULT_WAVELET_OPTIONS, ...options };
 }
 
 function validateOptions(opts: WaveletOptions): void {
