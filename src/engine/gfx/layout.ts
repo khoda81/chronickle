@@ -1,49 +1,49 @@
-/**
- * Shared vertical layout constants (CSS pixels).
- *
- * Centralized so the heatmap, event, and axis layers agree on geometry. These
- * are pure values; the layers read them directly.
- */
+/** Shared vertical layout measurements, in CSS pixels. */
 
-/** Height of the heatmap strip at the bottom of the canvas. */
-export const HEAT_HEIGHT = 220;
-/** Number of vertical frequency scales. */
-export const NUM_BANDS = 32; // Number of vertical frequency scales
+/** Initial user-resizable heatmap height. */
+export const DEFAULT_HEAT_HEIGHT = 220;
+export const MIN_HEAT_HEIGHT = 96;
+export const MAX_HEAT_HEIGHT = 420;
 
-/**
- * Smallest Gaussian sigma (in pixels) used by the wavelet heatmap. Below
- * this the triple-box approximation degrades, and finer detail than this is
- * not meaningful on a scrubbable timeline.
- */
+/** Coverage/resolution diagnostics below the transform. */
+export const RESOLUTION_BAR_HEIGHT = 34;
+/** Hit target around the heatmap's upper resize edge. */
+export const RESIZE_HANDLE_RADIUS = 6;
+
+/** Smallest Gaussian sigma (in horizontal device pixels). */
 export const MIN_SIGMA = 14;
-/** Largest Gaussian sigma (in pixels), capped to keep the kernel finite. */
+/** Largest Gaussian sigma, capped to keep context finite. */
 export const MAX_SIGMA_CAP = 128;
 
-/**
- * Largest Gaussian sigma (in pixels) for a heatmap of `numPx` device pixels.
- * Capped at `MAX_SIGMA_CAP` and at `numPx/4` so the kernel never reaches
- * across more than a quarter of the viewport — beyond that the bottom band
- * is a flat smear with no useful information.
- */
 export function maxSigmaFor(numPx: number): number {
   return Math.max(MIN_SIGMA, Math.min(MAX_SIGMA_CAP, numPx / 4));
 }
-/** Height of the event-node row above the heatmap. */
+
+/** Height reserved for the news row above the time axis. */
 export const EVENT_AREA_HEIGHT = 80;
-/** Top padding above the event row. */
-export const TOP_PADDING = 24;
 
-/** Y center of the event row. */
-export function eventRowY(height: number): number {
-  return height - (TOP_PADDING + EVENT_AREA_HEIGHT / 2);
+export function clampHeatHeight(height: number, canvasHeight: number): number {
+  // Preserve enough room for the axis and news row even in a short canvas.
+  const available = Math.max(MIN_HEAT_HEIGHT, canvasHeight - RESOLUTION_BAR_HEIGHT - 112);
+  return Math.min(Math.max(height, MIN_HEAT_HEIGHT), Math.min(MAX_HEAT_HEIGHT, available));
 }
 
-/** Y of the axis tick line (just above the heatmap). */
-export function axisY(height: number): number {
-  return height - HEAT_HEIGHT - 6;
+export function resolutionBarY(height: number): number {
+  return height - RESOLUTION_BAR_HEIGHT;
 }
 
-/** Y of the top of the heatmap strip. */
-export function heatTopY(height: number): number {
-  return height - HEAT_HEIGHT;
+export function heatTopY(height: number, heatHeight: number): number {
+  return resolutionBarY(height) - heatHeight;
+}
+
+export function heatBottomY(height: number): number {
+  return resolutionBarY(height);
+}
+
+export function axisY(height: number, heatHeight: number): number {
+  return heatTopY(height, heatHeight) - 6;
+}
+
+export function eventRowY(height: number, heatHeight: number): number {
+  return axisY(height, heatHeight) - EVENT_AREA_HEIGHT / 2;
 }

@@ -31,6 +31,24 @@ export interface KernelContext {
   readonly rightCells: number;
 }
 
+/**
+ * Convert ZOH log-price samples at cell edges into return impulses located at
+ * those same timestamps. `out[i]` uses only edges at or before `i`; this is
+ * essential for a genuinely causal rendering. Unknown edges represent no
+ * observed impulse and therefore contribute zero.
+ */
+export function logPriceEdgesToReturns(logPrice: Float64Array, reuse?: Float64Array): Float64Array {
+  const out = reuse?.length === logPrice.length ? reuse : new Float64Array(logPrice.length);
+  if (out.length === 0) return out;
+  out[0] = 0;
+  for (let i = 1; i < logPrice.length; i++) {
+    const previous = logPrice[i - 1]!;
+    const current = logPrice[i]!;
+    out[i] = Number.isFinite(previous) && Number.isFinite(current) ? current - previous : 0;
+  }
+  return out;
+}
+
 /** Context required for the largest scale, expressed in input cells. */
 export function kernelContext(
   mode: WaveletMode,
@@ -103,7 +121,6 @@ function centeredGaussianReference(
 ): WaveletField {
   const n = returns.length;
   const values = new Float64Array(n * scalesMs.length);
-  values.fill(NaN);
 
   for (let band = 0; band < scalesMs.length; band++) {
     const sigmaCells = scalesMs[band]! / stepMs;
@@ -115,18 +132,16 @@ function centeredGaussianReference(
       weights[k + radius] = w;
       weightSum += w;
     }
-    for (let i = radius; i < n - radius; i++) {
+    for (let i = 0; i < n; i++) {
       let sum = 0;
-      let valid = true;
       for (let k = -radius; k <= radius; k++) {
-        const delta = returns[i - k]!;
-        if (!Number.isFinite(delta)) {
-          valid = false;
-          break;
-        }
+        const source = i - k;
+        if (source < 0 || source >= n) continue;
+        const raw = returns[source]!;
+        const delta = Number.isFinite(raw) ? raw : 0;
         sum += (delta / stepMs) * weights[k + radius]!;
       }
-      if (valid) values[band * n + i] = sum / weightSum;
+      values[band * n + i] = sum / weightSum;
     }
   }
   return { values, bandCount: scalesMs.length, sampleCount: n };
@@ -144,7 +159,10 @@ interface KernelBank {
 }
 
 const KERNEL_CACHE = new Map<string, KernelBank>();
-const MAX_KERNEL_CACHE_ENTRIES = 4;
+// A per-row transform can contain hundreds of spectra. Retaining only the
+// active geometry prevents resize history from turning into a large memory
+// cache; the rendered image cache still makes hover-only redraws free.
+const MAX_KERNEL_CACHE_ENTRIES = 1;
 
 function centeredGaussianFft(
   returns: Float64Array,
@@ -154,7 +172,6 @@ function centeredGaussianFft(
 ): WaveletField {
   const n = returns.length;
   const values = new Float64Array(n * scalesMs.length);
-  values.fill(NaN);
   if (n === 0 || scalesMs.length === 0) {
     return { values, bandCount: scalesMs.length, sampleCount: n };
   }
@@ -168,12 +185,9 @@ function centeredGaussianFft(
 
   const signalReal = new Float64Array(nfft);
   const signalImaginary = new Float64Array(nfft);
-  const invalidPrefix = new Uint32Array(n + 1);
   for (let i = 0; i < n; i++) {
     const delta = returns[i]!;
-    const valid = Number.isFinite(delta);
-    signalReal[i] = valid ? delta / stepMs : 0;
-    invalidPrefix[i + 1] = invalidPrefix[i]! + (valid ? 0 : 1);
+    signalReal[i] = Number.isFinite(delta) ? delta / stepMs : 0;
   }
   fft(signalReal, signalImaginary);
 
@@ -193,8 +207,7 @@ function centeredGaussianFft(
 
     const radius = spectrum.radius;
     const offset = band * n;
-    for (let i = radius; i < n - radius; i++) {
-      if (invalidPrefix[i + radius + 1]! !== invalidPrefix[i - radius]!) continue;
+    for (let i = 0; i < n; i++) {
       // Standard linear convolution with a [0, 2r] kernel is centered at i+r.
       values[offset + i] = workReal[i + radius]!;
     }
@@ -246,33 +259,24 @@ function causalCascade(
 ): WaveletField {
   const n = returns.length;
   const values = new Float64Array(n * scalesMs.length);
-  values.fill(NaN);
 
   for (let band = 0; band < scalesMs.length; band++) {
     // Equal first-order stages form an Erlang kernel. Choosing each stage's
     // time constant as sigma/sqrt(K) gives the cascade variance sigma².
     const stageTauMs = scalesMs[band]! / Math.sqrt(opts.causalStages);
     const alpha = 1 - Math.exp(-stepMs / stageTauMs);
-    const meanDelayMs = opts.causalStages * stageTauMs;
-    const warmupSamples = Math.ceil((opts.causalWarmup * meanDelayMs) / stepMs);
     const state = new Float64Array(opts.causalStages);
-    let validRun = 0;
 
     for (let i = 0; i < n; i++) {
-      const delta = returns[i]!;
-      if (!Number.isFinite(delta)) {
-        state.fill(0);
-        validRun = 0;
-        continue;
-      }
+      const raw = returns[i]!;
+      const delta = Number.isFinite(raw) ? raw : 0;
       let x = delta / stepMs;
       for (let stage = 0; stage < state.length; stage++) {
         const next = state[stage]! + alpha * (x - state[stage]!);
         state[stage] = next;
         x = next;
       }
-      validRun++;
-      if (validRun >= warmupSamples) values[band * n + i] = x;
+      values[band * n + i] = x;
     }
   }
   return { values, bandCount: scalesMs.length, sampleCount: n };

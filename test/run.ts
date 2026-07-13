@@ -10,6 +10,7 @@ import {
   computeCenteredGaussianReference,
   computeWaveletField,
   kernelContext,
+  logPriceEdgesToReturns,
 } from "../src/engine/wavelet.ts";
 
 type Test = { readonly name: string; readonly run: () => void | Promise<void> };
@@ -114,6 +115,23 @@ test("causal transform never responds before an impulse", () => {
   assert(context.rightCells === 0 && context.leftCells > 0, "causal context is not one-sided");
 });
 
+test("ZOH returns are timestamp-aligned, causal, and zero-fill unknown data", () => {
+  const returns = logPriceEdgesToReturns(new Float64Array([10, 10, 11, NaN, 12, 12]));
+  assert(returns.length === 6, "return grid no longer matches the edge grid");
+  approx(returns[0]!, 0);
+  approx(returns[1]!, 0);
+  approx(returns[2]!, 1);
+  approx(returns[3]!, 0);
+  approx(returns[4]!, 0);
+  approx(returns[5]!, 0);
+
+  const field = computeWaveletField(returns, 1, new Float64Array([1]), "causal", {
+    causalStages: 1,
+  });
+  approx(field.values[1]!, 0);
+  assert(field.values[2]! > 0, "causal response was drawn before the price-change timestamp");
+});
+
 test("broker fetches a finer level after a coarse range is cached", async () => {
   const requests: number[] = [];
   const native = [1_000, 5_000] as const;
@@ -141,6 +159,50 @@ test("broker fetches a finer level after a coarse range is cached", async () => 
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert(requests.includes(5_000), "coarse level was not fetched");
   assert(requests.includes(1_000), "fine level was suppressed by coarse coverage");
+});
+
+test("broker exposes pending spans and scrolling requests uncovered ranges", () => {
+  const requests: Range[] = [];
+  const fetcher: Fetcher = {
+    nativePeriodsMs: [1_000],
+    fetchRange({ range }) {
+      requests.push(range);
+      return new Promise(() => undefined);
+    },
+  };
+  const broker = new Broker(fetcher);
+  const first = broker.query({
+    evalTime: new Float64Array([0, 1_000, 2_000]),
+    maxDeltaTMs: 1_000,
+  });
+  assert(
+    first.resolution.some((segment) => segment.state === "pending"),
+    "pending gap hidden",
+  );
+  broker.query({
+    evalTime: new Float64Array([2_000, 3_000, 4_000]),
+    maxDeltaTMs: 1_000,
+  });
+  assert(requests.length === 2, `scroll did not request the new gap (requests=${requests.length})`);
+  assert(requests[1]!.min === 2_000 && requests[1]!.max === 4_000, "wrong scrolled gap");
+});
+
+test("broker exposes failed spans with the API error", async () => {
+  const fetcher: Fetcher = {
+    nativePeriodsMs: [1_000],
+    async fetchRange() {
+      throw new Error("upstream unavailable");
+    },
+  };
+  const broker = new Broker(fetcher);
+  const evalTime = new Float64Array([0, 1_000]);
+  broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const result = broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  const failed = result.resolution.find((segment) => segment.state === "failed");
+  assert(failed !== undefined, "failed request was still presented as pending");
+  assert(failed.message === "upstream unavailable", "failure detail was lost");
+  broker.dispose();
 });
 
 let failures = 0;

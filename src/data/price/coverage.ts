@@ -2,12 +2,14 @@ import { Range } from "../../engine/range.ts";
 import { RangeSet } from "../rangeSet.ts";
 import type { FetchCoverage } from "./fetcher.ts";
 
-export type CoverageState = "ready" | "empty" | "loading";
+export type CoverageState = "ready" | "empty" | "pending" | "failed";
 
 export interface ResolutionSegment {
   readonly range: Range;
   readonly resolutionMs: number;
   readonly state: CoverageState;
+  /** Populated for failed spans; intended for diagnostics/tooltips. */
+  readonly message?: string;
 }
 
 interface CoverageLevel {

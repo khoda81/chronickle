@@ -1,7 +1,7 @@
 import type { Frame } from "./context.ts";
-import { HEAT_HEIGHT, heatTopY, MIN_SIGMA, NUM_BANDS, maxSigmaFor } from "./layout.ts";
+import { heatTopY, MIN_SIGMA, maxSigmaFor } from "./layout.ts";
 import { rampLut, rampIndex, rampPaletteName } from "../ramp.ts";
-import { computeWaveletField, type WaveletMode } from "../wavelet.ts";
+import { computeWaveletField, logPriceEdgesToReturns, type WaveletMode } from "../wavelet.ts";
 
 /**
  * Uniform time-cell grid passed to the transform.
@@ -20,8 +20,13 @@ export interface PaddedEval {
 }
 
 export interface HeatmapLayer {
-  drawWaveletField(padded: PaddedEval, priceScale: number, mode: WaveletMode): void;
-  drawFadeOverlay(): void;
+  drawWaveletField(
+    padded: PaddedEval,
+    priceScale: number,
+    mode: WaveletMode,
+    heatHeight: number,
+  ): void;
+  drawFadeOverlay(heatHeight: number): void;
 }
 
 interface HeatmapResources {
@@ -49,11 +54,20 @@ class HeatmapImpl implements HeatmapLayer {
     private readonly resources: HeatmapResources,
   ) {}
 
-  drawWaveletField(padded: PaddedEval, priceScale: number, mode: WaveletMode): void {
+  drawWaveletField(
+    padded: PaddedEval,
+    priceScale: number,
+    mode: WaveletMode,
+    heatHeight: number,
+  ): void {
     const { tx, ctx, dpr } = this.frame;
     const width = tx.screenDomain.max - tx.screenDomain.min;
     const height = tx.yDomain.max - tx.yDomain.min;
     const numPx = Math.ceil(width * dpr);
+    // One independently evaluated scale per visible CSS row. Using device
+    // rows would duplicate work on HiDPI screens without a perceptible gain;
+    // Canvas performs the final DPR rasterization.
+    const bandCount = Math.max(2, Math.ceil(heatHeight));
     if (numPx <= 0) return;
 
     const { evalTime, value, padLeft, padRight } = padded;
@@ -88,34 +102,36 @@ class HeatmapImpl implements HeatmapLayer {
       priceScale,
       mode,
       rampPaletteName(),
+      bandCount,
     ].join("|");
     if (resources.lastRenderKey === renderKey) {
-      ctx.drawImage(resources.offscreen, tx.screenDomain.min, heatTopY(height), width, HEAT_HEIGHT);
+      ctx.drawImage(
+        resources.offscreen,
+        tx.screenDomain.min,
+        heatTopY(height, heatHeight),
+        width,
+        heatHeight,
+      );
       return;
     }
-    if (resources.returns.length !== cellCount) resources.returns = new Float64Array(cellCount);
-    for (let i = 0; i < cellCount; i++) {
-      const a = value[i]!;
-      const b = value[i + 1]!;
-      resources.returns[i] = Number.isFinite(a) && Number.isFinite(b) ? b - a : NaN;
-    }
+    resources.returns = logPriceEdgesToReturns(value, resources.returns);
 
-    if (resources.scalesMs.length !== NUM_BANDS) resources.scalesMs = new Float64Array(NUM_BANDS);
+    if (resources.scalesMs.length !== bandCount) resources.scalesMs = new Float64Array(bandCount);
     const maxSigma = maxSigmaFor(numPx);
-    for (let band = 0; band < NUM_BANDS; band++) {
-      const sigmaPx = MIN_SIGMA * Math.pow(maxSigma / MIN_SIGMA, band / (NUM_BANDS - 1));
+    for (let band = 0; band < bandCount; band++) {
+      const sigmaPx = MIN_SIGMA * Math.pow(maxSigma / MIN_SIGMA, band / (bandCount - 1));
       resources.scalesMs[band] = sigmaPx * stepMs;
     }
 
     const field = computeWaveletField(resources.returns, stepMs, resources.scalesMs, mode);
-    ensureImage(resources, numPx);
+    ensureImage(resources, numPx, bandCount);
     const image = resources.imageData!;
     const pixels = image.data;
     const ramp = rampLut();
     const gain = Math.exp(priceScale);
 
-    for (let band = 0; band < NUM_BANDS; band++) {
-      const fieldOffset = band * cellCount + padLeft;
+    for (let band = 0; band < bandCount; band++) {
+      const fieldOffset = band * value.length + padLeft;
       const pixelBandOffset = band * numPx;
       for (let x = 0; x < numPx; x++) {
         const z = field.values[fieldOffset + x]!;
@@ -138,19 +154,25 @@ class HeatmapImpl implements HeatmapLayer {
 
     resources.offCtx.putImageData(image, 0, 0);
     resources.lastRenderKey = renderKey;
-    ctx.drawImage(resources.offscreen, tx.screenDomain.min, heatTopY(height), width, HEAT_HEIGHT);
+    ctx.drawImage(
+      resources.offscreen,
+      tx.screenDomain.min,
+      heatTopY(height, heatHeight),
+      width,
+      heatHeight,
+    );
   }
 
-  drawFadeOverlay(): void {
+  drawFadeOverlay(heatHeight: number): void {
     const { tx, ctx } = this.frame;
     const width = tx.screenDomain.max - tx.screenDomain.min;
     const height = tx.yDomain.max - tx.yDomain.min;
-    const y = heatTopY(height);
-    const grad = ctx.createLinearGradient(0, y, 0, y + HEAT_HEIGHT);
+    const y = heatTopY(height, heatHeight);
+    const grad = ctx.createLinearGradient(0, y, 0, y + heatHeight);
     grad.addColorStop(0, "rgba(0, 0, 0, 0)");
     grad.addColorStop(1, "rgba(0, 0, 0, 0.55)");
     ctx.fillStyle = grad;
-    ctx.fillRect(tx.screenDomain.min, y, width, HEAT_HEIGHT);
+    ctx.fillRect(tx.screenDomain.min, y, width, heatHeight);
   }
 }
 
@@ -172,14 +194,14 @@ function resourcesFor(ctx: CanvasRenderingContext2D): HeatmapResources {
   return resources;
 }
 
-function ensureImage(resources: HeatmapResources, width: number): void {
-  if (resources.offscreen.width !== width || resources.offscreen.height !== NUM_BANDS) {
+function ensureImage(resources: HeatmapResources, width: number, bandCount: number): void {
+  if (resources.offscreen.width !== width || resources.offscreen.height !== bandCount) {
     resources.offscreen.width = width;
-    resources.offscreen.height = NUM_BANDS;
+    resources.offscreen.height = bandCount;
     resources.imageData = null;
     resources.lastRenderKey = null;
   }
   if (resources.imageData === null) {
-    resources.imageData = resources.offCtx.createImageData(width, NUM_BANDS);
+    resources.imageData = resources.offCtx.createImageData(width, bandCount);
   }
 }

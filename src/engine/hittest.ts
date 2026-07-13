@@ -23,10 +23,11 @@ export function hitTestEvent(
   tx: DataTransform,
   px: number,
   py: number,
+  heatHeight: number,
   radius = 10,
 ): number | null {
   const height = tx.yDomain.max - tx.yDomain.min;
-  const baseY = eventRowY(height);
+  const baseY = eventRowY(height, heatHeight);
   if (Math.abs(py - baseY) > radius) return null;
 
   const xs = events.events;

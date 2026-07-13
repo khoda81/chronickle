@@ -20,7 +20,12 @@ export interface EventLayer {
    * Draw all visible events; `hovered` is the index to highlight, or null.
    * `colorOf` resolves a feedId to its color string (oklch or otherwise).
    */
-  drawRow(events: EventSet, colorOf: (feedId: string) => string, hovered: number | null): void;
+  drawRow(
+    events: EventSet,
+    colorOf: (feedId: string) => string,
+    hovered: number | null,
+    heatHeight: number,
+  ): void;
 }
 
 export const Events = {
@@ -32,13 +37,18 @@ export const Events = {
 class EventsImpl implements EventLayer {
   constructor(private readonly frame: Frame) {}
 
-  drawRow(events: EventSet, colorOf: (feedId: string) => string, hovered: number | null): void {
+  drawRow(
+    events: EventSet,
+    colorOf: (feedId: string) => string,
+    hovered: number | null,
+    heatHeight: number,
+  ): void {
     const { frame } = this;
     const { tx } = frame;
     if (events.events.length === 0) return;
 
     const height = tx.yDomain.max - tx.yDomain.min;
-    const y = eventRowY(height);
+    const y = eventRowY(height, heatHeight);
 
     for (let i = 0; i < events.events.length; i++) {
       const e = events.events[i]!;

@@ -27,7 +27,14 @@ import { DataTransform } from "./transform.ts";
 import { Plot } from "./plot.ts";
 import { hitTestEvent } from "./hittest.ts";
 import { setRampPalette, type PaletteName } from "./ramp.ts";
-import { maxSigmaFor } from "./gfx/layout.ts";
+import {
+  clampHeatHeight,
+  DEFAULT_HEAT_HEIGHT,
+  heatTopY,
+  RESIZE_HANDLE_RADIUS,
+  resolutionBarY,
+  maxSigmaFor,
+} from "./gfx/layout.ts";
 import { kernelContext, type WaveletMode } from "./wavelet.ts";
 import { DEFAULT_MIN_TICK_PX } from "./gfx/axis.ts";
 import type { Frame } from "./gfx/context.ts";
@@ -123,6 +130,8 @@ interface TimelineState {
   /** Heatmap vertical scale; adjusted via shift+wheel. Render parameter. */
   priceScale: number;
   waveletMode: WaveletMode;
+  /** User-resizable wavelet height in CSS pixels. */
+  heatHeight: number;
   hovered: number | null;
 }
 
@@ -170,6 +179,7 @@ export class Timeline {
 
   // Pan scratch (no allocation in handlers).
   private dragging = false;
+  private resizingHeat = false;
   private lastX = 0;
 
   // Reusable eval-time buffer, grown as needed. Avoids per-frame allocation
@@ -201,6 +211,7 @@ export class Timeline {
       timeRange: opts.initialTimeRange,
       priceScale: 22,
       waveletMode: "centered",
+      heatHeight: DEFAULT_HEAT_HEIGHT,
       hovered: null,
     };
 
@@ -325,6 +336,10 @@ export class Timeline {
     const rect = this.canvas.getBoundingClientRect();
     this.canvas.width = Math.floor(rect.width * dpr);
     this.canvas.height = Math.floor(rect.height * dpr);
+    this.state = {
+      ...this.state,
+      heatHeight: clampHeatHeight(this.state.heatHeight, this.plot.cssHeight),
+    };
     // Note: no setTransform here — the Frame applies the DPR transform per
     // draw, so it can never be lost across save/restore.
     this.reqDraw();
@@ -340,7 +355,7 @@ export class Timeline {
    */
   private draw = (): void => {
     using frame = this.plot.beginFrame();
-    const { hovered, priceScale, timeRange, waveletMode } = this.state;
+    const { hovered, priceScale, timeRange, waveletMode, heatHeight } = this.state;
     const { width, height, dpr } = frame;
 
     // Background.
@@ -388,6 +403,7 @@ export class Timeline {
       },
       priceScale,
       waveletMode,
+      heatHeight,
     );
     // heat.drawFadeOverlay();
     // Query the event source every frame, mirroring the price dataSource.
@@ -395,8 +411,14 @@ export class Timeline {
     // backfill per feed; its subscriber calls reqDraw() when data lands.
     const eventResult = this.eventSource(this.state.timeRange);
     this.state.events = { events: eventResult.events };
-    frame.events().drawRow(this.state.events, this.feedColorOf, hovered);
-    frame.drawTimeAxis(this.config.minTickPx);
+    frame.events().drawRow(this.state.events, this.feedColorOf, hovered, heatHeight);
+    frame.drawTimeAxis(heatHeight, this.config.minTickPx);
+    frame.resolution().draw(result.resolution, result.targetResolutionMs);
+
+    // Visible resize affordance at the transform's upper edge.
+    const resizeY = heatTopY(height, heatHeight);
+    frame.fillRectPx(0, resizeY, width, 1, "rgba(255,255,255,0.18)");
+    frame.fillRectPx(width / 2 - 22, resizeY - 2, 44, 4, "rgba(203,213,225,0.7)");
 
     // "Now" marker: a vertical line at the current wall-clock time. `drawNow`
     // arms a timer at a fixed cadence (timePerPx / SMOOTHING_FACTOR) instead of
@@ -459,12 +481,32 @@ export class Timeline {
   }
 
   private onPointerDown = (e: PointerEvent): void => {
+    const localY = this.pointerY(e);
+    const resizeY = heatTopY(this.plot.cssHeight, this.state.heatHeight);
+    if (Math.abs(localY - resizeY) <= RESIZE_HANDLE_RADIUS) {
+      this.resizingHeat = true;
+      this.dragging = false;
+      this.state = { ...this.state, hovered: null };
+      this.canvas.style.cursor = "ns-resize";
+      this.canvas.setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+      return;
+    }
     this.dragging = true;
     this.lastX = e.clientX;
     this.canvas.setPointerCapture?.(e.pointerId);
   };
 
   private onPointerMove = (e: PointerEvent): void => {
+    if (this.resizingHeat) {
+      const desired = resolutionBarY(this.plot.cssHeight) - this.pointerY(e);
+      const heatHeight = clampHeatHeight(desired, this.plot.cssHeight);
+      if (heatHeight !== this.state.heatHeight) {
+        this.state = { ...this.state, heatHeight };
+        this.reqDraw();
+      }
+      return;
+    }
     if (!this.dragging) return;
     const dx = e.clientX - this.lastX;
     this.lastX = e.clientX;
@@ -479,6 +521,7 @@ export class Timeline {
 
   private onPointerUp = (e: PointerEvent): void => {
     this.dragging = false;
+    this.resizingHeat = false;
     this.canvas.releasePointerCapture?.(e.pointerId);
   };
 
@@ -522,7 +565,7 @@ export class Timeline {
   };
 
   private onHoverMove = (e: PointerEvent): void => {
-    if (this.dragging) return;
+    if (this.dragging || this.resizingHeat) return;
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
 
@@ -544,7 +587,10 @@ export class Timeline {
       Range.create(0, cssWidth),
       Range.create(0, cssHeight),
     );
-    const idx = hitTestEvent(this.state.events, tx, px, py);
+    const resizeY = heatTopY(cssHeight, this.state.heatHeight);
+    this.canvas.style.cursor = Math.abs(py - resizeY) <= RESIZE_HANDLE_RADIUS ? "ns-resize" : "";
+
+    const idx = hitTestEvent(this.state.events, tx, px, py, this.state.heatHeight);
     if (idx !== this.state.hovered) {
       this.state = { ...this.state, hovered: idx };
       this.reqDraw();
@@ -557,6 +603,12 @@ export class Timeline {
     const ev = this.eventAt(this.state.hovered);
     window.open(ev.link, "_blank", "noopener,noreferrer");
   };
+
+  private pointerY(e: PointerEvent): number {
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.height <= 0) return 0;
+    return (e.clientY - rect.top) * (this.plot.cssHeight / rect.height);
+  }
 
   private eventAt(i: number): NewsEvent {
     const e = this.state.events.events[i];

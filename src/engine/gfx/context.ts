@@ -26,9 +26,11 @@ import type { DataTransform } from "../transform.ts";
 import type { HeatmapLayer } from "./heatmap.ts";
 import type { EventLayer } from "./events.ts";
 import type { AxisLayer } from "./axis.ts";
+import type { ResolutionLayer } from "./resolution.ts";
 import { Heatmap } from "./heatmap.ts";
 import { Events } from "./events.ts";
 import { Axis } from "./axis.ts";
+import { Resolution } from "./resolution.ts";
 
 export class Frame implements Disposable {
   constructor(
@@ -156,9 +158,13 @@ export class Frame implements Disposable {
     return Axis.create(this);
   }
 
+  resolution(): ResolutionLayer {
+    return Resolution.create(this);
+  }
+
   /** Draw the time axis with an explicit minimum tick spacing (CSS px). */
-  drawTimeAxis(minTickPx?: number): void {
-    this.axis().drawTimeAxis(minTickPx);
+  drawTimeAxis(heatHeight: number, minTickPx?: number): void {
+    this.axis().drawTimeAxis(heatHeight, minTickPx);
   }
 
   // --- lifecycle ---------------------------------------------------------

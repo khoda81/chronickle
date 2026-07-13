@@ -15,6 +15,7 @@ import { evaluateStaircase, type StaircaseResult } from "./staircase.ts";
 import { CoverageIndex, type ResolutionSegment } from "./coverage.ts";
 import type { Fetcher } from "./fetcher.ts";
 import { pickResolution } from "./resolution.ts";
+import { RangeSet } from "../rangeSet.ts";
 
 export type QueryStatus = "complete" | "partial" | "empty";
 
@@ -22,7 +23,7 @@ export interface QueryResult extends StaircaseResult {
   readonly status: QueryStatus;
   /** Native period requested for the current viewport. */
   readonly targetResolutionMs: number;
-  /** Actual ready/loading/empty resolution spans used for diagnostics/UI. */
+  /** Actual ready/pending/failed/empty resolution spans used for diagnostics/UI. */
   readonly resolution: readonly ResolutionSegment[];
   /** Monotonic cache revision; stable across read-only queries. */
   readonly revision: number;
@@ -35,11 +36,27 @@ export interface QueryOptions {
   readonly maxDeltaTMs: number;
 }
 
+interface InFlightRequest {
+  readonly range: Range;
+  readonly resolutionMs: number;
+}
+
+interface FailedRequest extends InFlightRequest {
+  readonly message: string;
+  readonly retryAt: number;
+  readonly timer: number;
+}
+
+const RETRY_BASE_MS = 2_000;
+const RETRY_MAX_MS = 30_000;
+
 export class Broker {
   private readonly stores = new Map<number, ChunkedLevelStore>();
   private readonly coverage = new CoverageIndex();
   private readonly subscribers = new Set<() => void>();
-  private readonly inFlight = new Set<string>();
+  private readonly inFlight = new Map<string, InFlightRequest>();
+  private readonly failures = new Map<string, FailedRequest>();
+  private readonly failureAttempts = new Map<string, number>();
   private revision = 0;
 
   constructor(private readonly fetcher: Fetcher) {}
@@ -64,7 +81,22 @@ export class Broker {
 
     const range = Range.create(evalTime[0]!, evalTime[evalTime.length - 1]!);
     const gaps = this.coverage.gaps(targetResolutionMs, range);
-    for (const gap of gaps) void this.requestFetch(gap, maxDeltaTMs);
+    for (const gap of gaps) {
+      const blocked = new RangeSet();
+      for (const request of this.inFlight.values()) {
+        if (request.resolutionMs !== targetResolutionMs) continue;
+        const overlap = intersect(request.range, gap);
+        if (overlap !== null) blocked.add(overlap);
+      }
+      for (const failure of this.failures.values()) {
+        if (failure.resolutionMs !== targetResolutionMs || failure.retryAt <= Date.now()) continue;
+        const overlap = intersect(failure.range, gap);
+        if (overlap !== null) blocked.add(overlap);
+      }
+      for (const requestRange of blocked.gaps(gap)) {
+        void this.requestFetch(requestRange, maxDeltaTMs, targetResolutionMs);
+      }
+    }
 
     // Prefer the requested level, then progressively finer cached levels. A
     // coarser level is allowed only as a provisional visual fallback while the
@@ -106,11 +138,7 @@ export class Broker {
     const resolution = [
       ...readySegments(evalTime, usedResolution),
       ...this.coverage.segments(targetResolutionMs, range).filter((s) => s.state === "empty"),
-      ...gaps.map((gap): ResolutionSegment => ({
-        range: gap,
-        resolutionMs: targetResolutionMs,
-        state: "loading",
-      })),
+      ...this.gapSegments(gaps, targetResolutionMs),
     ].sort((a, b) => a.range.min - b.range.min || a.resolutionMs - b.resolutionMs);
 
     return {
@@ -129,6 +157,13 @@ export class Broker {
     return () => this.subscribers.delete(fn);
   }
 
+  /** Release retry timers and observers (primarily useful for tests/teardown). */
+  dispose(): void {
+    for (const failure of this.failures.values()) clearTimeout(failure.timer);
+    this.failures.clear();
+    this.subscribers.clear();
+  }
+
   cachedRange(): Range | null {
     let min = Infinity;
     let max = -Infinity;
@@ -141,11 +176,10 @@ export class Broker {
     return min < max ? Range.create(min, max) : null;
   }
 
-  private async requestFetch(range: Range, maxDeltaTMs: number): Promise<void> {
-    const target = pickResolution(this.fetcher.nativePeriodsMs, maxDeltaTMs);
+  private async requestFetch(range: Range, maxDeltaTMs: number, target: number): Promise<void> {
     const key = `${range.min}:${range.max}:${target}`;
-    if (this.inFlight.has(key)) return;
-    this.inFlight.add(key);
+    if (this.inFlight.has(key) || this.failures.has(key)) return;
+    this.inFlight.set(key, { range, resolutionMs: target });
 
     try {
       const result = await this.fetcher.fetchRange({ range, maxDeltaTMs });
@@ -167,13 +201,79 @@ export class Broker {
         this.store(result.resolutionMs).insertBatch(time, logPrice);
       }
       this.coverage.add(result.resolutionMs, result.coverage);
+      this.clearFailures(result.resolutionMs, result.coverage.range);
+      this.failureAttempts.delete(key);
       this.revision++;
       this.notify();
     } catch (err) {
-      // Leave the range uncovered so a later query retries it.
+      // Keep the range uncovered, but expose the failure and use bounded
+      // backoff so a redraw loop cannot hammer an unhealthy API.
       console.error("[Broker] fetch failed for", range, err);
+      const attempt = (this.failureAttempts.get(key) ?? 0) + 1;
+      this.failureAttempts.set(key, attempt);
+      const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (attempt - 1));
+      const message = err instanceof Error ? err.message : String(err);
+      const retryAt = Date.now() + delay;
+      const timer = setTimeout(() => {
+        const failure = this.failures.get(key);
+        if (failure === undefined || failure.retryAt !== retryAt) return;
+        this.failures.delete(key);
+        this.revision++;
+        this.notify();
+      }, delay) as unknown as number;
+      this.failures.set(key, { range, resolutionMs: target, message, retryAt, timer });
+      this.revision++;
+      this.notify();
     } finally {
       this.inFlight.delete(key);
+    }
+  }
+
+  private gapSegments(gaps: readonly Range[], resolutionMs: number): ResolutionSegment[] {
+    const out: ResolutionSegment[] = [];
+    for (const gap of gaps) {
+      const boundaries = [gap.min, gap.max];
+      for (const request of this.inFlight.values()) {
+        if (request.resolutionMs !== resolutionMs) continue;
+        const overlap = intersect(request.range, gap);
+        if (overlap !== null) boundaries.push(overlap.min, overlap.max);
+      }
+      for (const failure of this.failures.values()) {
+        if (failure.resolutionMs !== resolutionMs || failure.retryAt <= Date.now()) continue;
+        const overlap = intersect(failure.range, gap);
+        if (overlap !== null) boundaries.push(overlap.min, overlap.max);
+      }
+      boundaries.sort((a, b) => a - b);
+      for (let i = 0; i + 1 < boundaries.length; i++) {
+        const min = boundaries[i]!;
+        const max = boundaries[i + 1]!;
+        if (!(min < max)) continue;
+        const middle = min + (max - min) / 2;
+        const failure = [...this.failures.values()].find(
+          (entry) =>
+            entry.resolutionMs === resolutionMs &&
+            entry.retryAt > Date.now() &&
+            entry.range.min <= middle &&
+            entry.range.max >= middle,
+        );
+        out.push({
+          range: Range.create(min, max),
+          resolutionMs,
+          state: failure === undefined ? "pending" : "failed",
+          ...(failure === undefined ? {} : { message: failure.message }),
+        });
+      }
+    }
+    return out;
+  }
+
+  private clearFailures(resolutionMs: number, range: Range): void {
+    for (const [key, failure] of this.failures) {
+      if (failure.resolutionMs !== resolutionMs || intersect(failure.range, range) === null)
+        continue;
+      clearTimeout(failure.timer);
+      this.failures.delete(key);
+      this.failureAttempts.delete(key);
     }
   }
 
@@ -189,6 +289,12 @@ export class Broker {
   private notify(): void {
     for (const fn of this.subscribers) fn();
   }
+}
+
+function intersect(a: Range, b: Range): Range | null {
+  const min = Math.max(a.min, b.min);
+  const max = Math.min(a.max, b.max);
+  return min < max ? Range.create(min, max) : null;
 }
 
 function candidateRank(periodMs: number, targetMs: number): number {
