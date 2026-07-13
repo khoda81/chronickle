@@ -50,6 +50,7 @@ export function createNobitexFetcher(opts: NobitexFetcherOptions = {}): Fetcher 
   const timeoutMs = opts.timeoutMs;
 
   return {
+    liveRetryDelayMs: 1_000,
     // Nobitex applies endpoint-wide throttling. The broker owns transient
     // failure state but asks the adapter how long to suppress retries.
     retryDelayMs(_error, attempt) {

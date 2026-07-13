@@ -34,6 +34,7 @@ export interface BrokerOptions {
 interface RequestState {
   readonly range: Range;
   readonly maxDeltaTMs: number;
+  readonly liveEdge: boolean;
 }
 
 interface FailedRequest extends RequestState {
@@ -42,6 +43,15 @@ interface FailedRequest extends RequestState {
   readonly timer: number;
 }
 
+interface LiveRefresh {
+  readonly through: number;
+  readonly maxDeltaTMs: number;
+  readonly at: number;
+  timer: number | null;
+}
+
+const LIVE_EDGE_SLOP_MS = 1_000;
+const LIVE_PUBLICATION_GRACE_MS = 250;
 const DEFAULT_RETRY = (attempt: number): number => Math.min(30_000, 2_000 * 2 ** (attempt - 1));
 
 export class Broker {
@@ -51,12 +61,14 @@ export class Broker {
   private readonly inFlight = new Map<string, RequestState>();
   private readonly failures = new Map<string, FailedRequest>();
   private readonly failureAttempts = new Map<string, number>();
+  private liveRefresh: LiveRefresh | null = null;
   private readonly now: () => number;
   private readonly defaultRetryDelayMs: (attempt: number) => number;
   private readonly onError: (message: string, error?: unknown) => void;
   private readonly onWarning: (message: string) => void;
   private generation = 0;
   private revision = 0;
+  private wantedResolution: Float64Array = new Float64Array(0);
 
   constructor(
     private readonly fetcher: Fetcher,
@@ -89,21 +101,22 @@ export class Broker {
     }
 
     const queryRange = Range.create(evalTime[0]!, evalTime[evalTime.length - 1]!);
-    const historicalRange = clampToNow(queryRange, this.now());
+    const wallNow = this.now();
+    const historicalRange = clampToNow(queryRange, wallNow);
     if (historicalRange !== null) this.planRequests(historicalRange, maxDeltaTMs);
 
-    const wantedResolution = new Float64Array(evalTime.length);
-    wantedResolution.fill(NaN);
-    for (let i = 0; i < evalTime.length; i++) {
-      const t = evalTime[i]!;
-      const ready = this.coverage.finestReadyAt(t, maxDeltaTMs);
-      const fallback = ready ?? this.coverage.closestCoarserAt(t, maxDeltaTMs);
-      if (fallback !== null) wantedResolution[i] = fallback;
-    }
+    this.wantedResolution = this.coverage.resolve(evalTime, maxDeltaTMs, this.wantedResolution);
+    const wantedResolution = this.wantedResolution;
     for (const [resolutionMs, store] of this.stores) {
       const sampled = evaluateStaircase(store.chunks, evalTime).value;
       for (let i = 0; i < evalTime.length; i++) {
-        if (wantedResolution[i] !== resolutionMs || !Number.isFinite(sampled[i]!)) continue;
+        if (
+          evalTime[i]! > wallNow ||
+          wantedResolution[i] !== resolutionMs ||
+          !Number.isFinite(sampled[i]!)
+        ) {
+          continue;
+        }
         value[i] = sampled[i]!;
       }
     }
@@ -124,10 +137,13 @@ export class Broker {
       historicalRange === null ? [] : this.unresolved(historicalRange, maxDeltaTMs);
     const status: QueryStatus =
       finiteCount === 0 ? "empty" : unresolved.length === 0 ? "complete" : "partial";
-    const resolution = [
-      ...this.coverage.segments(queryRange, maxDeltaTMs),
-      ...this.transientSegments(queryRange),
-    ].sort((a, b) => b.resolutionMs - a.resolutionMs || a.range.min - b.range.min);
+    const resolution =
+      historicalRange === null
+        ? []
+        : [
+            ...this.coverage.segments(historicalRange, maxDeltaTMs),
+            ...this.transientSegments(historicalRange),
+          ].sort((a, b) => b.resolutionMs - a.resolutionMs || a.range.min - b.range.min);
 
     return {
       value,
@@ -142,12 +158,14 @@ export class Broker {
 
   subscribe(fn: () => void): () => void {
     this.subscribers.add(fn);
+    this.armLiveRefresh();
     return () => this.subscribers.delete(fn);
   }
 
   dispose(): void {
     this.generation++;
     for (const failure of this.failures.values()) clearTimeout(failure.timer);
+    this.clearLiveRefresh();
     this.inFlight.clear();
     this.failures.clear();
     this.subscribers.clear();
@@ -161,6 +179,7 @@ export class Broker {
     this.coverage.clear();
     this.inFlight.clear();
     for (const failure of this.failures.values()) clearTimeout(failure.timer);
+    this.clearLiveRefresh();
     this.failures.clear();
     this.failureAttempts.clear();
     this.revision++;
@@ -180,14 +199,41 @@ export class Broker {
   }
 
   private planRequests(range: Range, maxDeltaTMs: number): void {
+    // The overwhelmingly common steady-state path is already answered by one
+    // ready level. Avoid constructing and merging a temporary RangeSet on
+    // every animation frame in that case.
+    if (this.coverage.answers(range, maxDeltaTMs) || this.transientlyBlocks(range, maxDeltaTMs)) {
+      return;
+    }
     const blocked = this.blockers(range, maxDeltaTMs);
     for (const gap of blocked.gaps(range)) void this.requestFetch(gap, maxDeltaTMs);
+  }
+
+  private transientlyBlocks(range: Range, maxDeltaTMs: number): boolean {
+    if (this.fetcher.serializeRequests === true && this.inFlight.size > 0) return true;
+    for (const request of this.inFlight.values()) {
+      if (request.maxDeltaTMs <= maxDeltaTMs && covers(request.range, range)) return true;
+    }
+    if (this.fetcher.sourceWideBackoff === true && this.failures.size > 0) return true;
+    for (const failure of this.failures.values()) {
+      if (covers(failure.range, range)) return true;
+    }
+    return false;
   }
 
   private blockers(range: Range, maxDeltaTMs: number): RangeSet {
     const blocked = new RangeSet();
     this.coverage.addReadyBlockers(blocked, maxDeltaTMs, range);
     this.coverage.addEmptyBlockers(blocked, maxDeltaTMs, range);
+    const liveRefresh = this.liveRefresh;
+    if (
+      liveRefresh !== null &&
+      liveRefresh.maxDeltaTMs <= maxDeltaTMs &&
+      this.now() < liveRefresh.at
+    ) {
+      const min = Math.max(range.min, liveRefresh.through);
+      if (min < range.max) blocked.add(Range.create(min, range.max));
+    }
 
     // Finer ready/pending work satisfies a coarser query. A coarser request
     // deliberately does not suppress a new finer request.
@@ -214,6 +260,7 @@ export class Broker {
   }
 
   private unresolved(range: Range, maxDeltaTMs: number): readonly Range[] {
+    if (this.coverage.answers(range, maxDeltaTMs)) return [];
     const answered = new RangeSet();
     this.coverage.addReadyBlockers(answered, maxDeltaTMs, range);
     this.coverage.addEmptyBlockers(answered, maxDeltaTMs, range);
@@ -225,7 +272,12 @@ export class Broker {
     if (this.fetcher.sourceWideBackoff === true && this.failures.size > 0) return;
     const key = requestKey(range, maxDeltaTMs);
     if (this.inFlight.has(key) || this.failures.has(key)) return;
-    const request = { range, maxDeltaTMs };
+    const startedAt = this.now();
+    const request = {
+      range,
+      maxDeltaTMs,
+      liveEdge: startedAt >= range.max && startedAt - range.max <= LIVE_EDGE_SLOP_MS,
+    };
     const generation = this.generation;
     this.inFlight.set(key, request);
     let notifyAfterRequest = false;
@@ -233,7 +285,8 @@ export class Broker {
     try {
       const result = await this.fetcher.fetchRange(request);
       if (generation !== this.generation) return;
-      this.ingest(request, result);
+      const liveRefresh = this.ingest(request, result);
+      if (liveRefresh !== null) this.setLiveRefresh(liveRefresh);
       this.failureAttempts.delete(key);
       this.revision++;
       notifyAfterRequest = true;
@@ -269,7 +322,7 @@ export class Broker {
     }
   }
 
-  private ingest(request: RequestState, result: FetchRangeResult): void {
+  private ingest(request: RequestState, result: FetchRangeResult): LiveRefresh | null {
     const clipped = clipPoints(PriceSeries.from(result.points).observations, request.range);
     const points = clipped.points;
     if (clipped.discardedFutureCount > 0) {
@@ -286,16 +339,23 @@ export class Broker {
 
     const searched = searchedRange(request.range, result, points, nominalResolutionMs);
     if (points.length > 0) {
-      // The final ZOH step is evidence-backed only through the interval the
-      // adapter says it actually searched, never through the whole query by
-      // implication.
-      this.ingestObserved(points, nominalResolutionMs, searched?.max ?? request.range.max);
+      // A sample represents its zero-order-held value for one native sample
+      // period. In particular, an OHLC candle open is already known at the
+      // candle boundary and remains the displayed value until the next open.
+      // Extending that final step to its expected lifetime prevents the moving
+      // wall clock from manufacturing millisecond-sized "uncovered" tails.
+      this.ingestObserved(
+        points,
+        nominalResolutionMs,
+        searched?.max ?? request.range.max,
+        searched !== null && searched.max >= request.range.max,
+      );
     }
     if (searched === null) {
       if (points.length === 0) {
         throw new Error("Fetcher returned no points and no searchedRange");
       }
-      return;
+      return this.liveRefreshAfter(request, points, nominalResolutionMs, false);
     }
 
     // Only portions not actually supported by observations are empty, and
@@ -305,12 +365,65 @@ export class Broker {
     for (const gap of observed.gaps(searched)) {
       this.coverage.addEmpty(request.maxDeltaTMs, gap);
     }
+    return this.liveRefreshAfter(
+      request,
+      points,
+      nominalResolutionMs,
+      searched.max >= request.range.max,
+    );
+  }
+
+  private liveRefreshAfter(
+    request: RequestState,
+    points: readonly PricePoint[],
+    nominalResolutionMs: number,
+    searchedThroughRequestEnd: boolean,
+  ): LiveRefresh | null {
+    if (!request.liveEdge || !searchedThroughRequestEnd) return null;
+    const now = this.now();
+    const last = points[points.length - 1];
+    const expectedNext = last === undefined ? -Infinity : last.t + nominalResolutionMs;
+    const fallbackDelay =
+      this.fetcher.liveRetryDelayMs ?? Math.min(30_000, Math.max(1_000, nominalResolutionMs / 10));
+    if (!(fallbackDelay > 0) || !Number.isFinite(fallbackDelay)) {
+      throw new Error(`Fetcher has invalid liveRetryDelayMs ${fallbackDelay}`);
+    }
+    return {
+      through: request.range.max,
+      maxDeltaTMs: request.maxDeltaTMs,
+      at: expectedNext > now ? expectedNext + LIVE_PUBLICATION_GRACE_MS : now + fallbackDelay,
+      timer: null,
+    };
+  }
+
+  private setLiveRefresh(refresh: LiveRefresh): void {
+    this.clearLiveRefresh();
+    this.liveRefresh = refresh;
+    this.armLiveRefresh();
+  }
+
+  private armLiveRefresh(): void {
+    const refresh = this.liveRefresh;
+    if (refresh === null || refresh.timer !== null || this.subscribers.size === 0) return;
+    const delay = Math.max(0, refresh.at - this.now());
+    refresh.timer = setTimeout(() => {
+      if (this.liveRefresh !== refresh) return;
+      this.liveRefresh = null;
+      this.notify();
+    }, delay) as unknown as number;
+  }
+
+  private clearLiveRefresh(): void {
+    const refresh = this.liveRefresh;
+    if (refresh?.timer !== null && refresh?.timer !== undefined) clearTimeout(refresh.timer);
+    this.liveRefresh = null;
   }
 
   private ingestObserved(
     points: readonly PricePoint[],
     nominalResolutionMs: number,
     observedThroughMs: number,
+    searchedThroughRequestEnd: boolean,
   ): void {
     const buckets = new Map<number, PricePoint[]>();
     for (let i = 1; i < points.length; i++) {
@@ -325,7 +438,10 @@ export class Broker {
     }
     const last = points[points.length - 1];
     if (last !== undefined) {
-      const heldUntil = Math.min(last.t + nominalResolutionMs, observedThroughMs);
+      const expectedUntil = last.t + nominalResolutionMs;
+      const heldUntil = searchedThroughRequestEnd
+        ? expectedUntil
+        : Math.min(expectedUntil, observedThroughMs);
       if (last.t < heldUntil) {
         this.coverage.addReady(nominalResolutionMs, Range.create(last.t, heldUntil));
       }
@@ -476,6 +592,10 @@ function searchedRange(
 
 function requestKey(range: Range, maxDeltaTMs: number): string {
   return `${range.min}:${range.max}:${maxDeltaTMs}`;
+}
+
+function covers(outer: Range, inner: Range): boolean {
+  return outer.min <= inner.min && outer.max >= inner.max;
 }
 
 function intersect(a: Range, b: Range): Range | null {

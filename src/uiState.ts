@@ -32,8 +32,16 @@ export interface UiState {
   }[];
 }
 
+interface MutableUiState {
+  viewport?: { readonly min: number; readonly max: number };
+  palette?: string;
+  waveletMode?: "centered" | "causal";
+  charts?: readonly { readonly sourceId: string; readonly symbol: string }[];
+}
+
 let saveTimer: number | null = null;
-let pending: UiState = {};
+let lastSaveRequest = 0;
+let pending: MutableUiState = {};
 
 /**
  * Load saved UI state, or an empty object if storage is absent/corrupt.
@@ -58,13 +66,30 @@ export function loadUiState(): UiState {
  * independent callers (viewport, palette) don't clobber each other.
  */
 export function saveUiState(state: UiState): void {
-  pending = { ...pending, ...state };
-  if (saveTimer !== null) clearTimeout(saveTimer);
+  mergePending(state);
+  lastSaveRequest = performance.now();
+  if (saveTimer === null) scheduleSave(DEBOUNCE_MS);
+}
+
+function scheduleSave(delayMs: number): void {
   saveTimer = setTimeout(() => {
+    const remaining = DEBOUNCE_MS - (performance.now() - lastSaveRequest);
+    if (remaining > 0) {
+      scheduleSave(remaining);
+      return;
+    }
     localStorage.setItem(KEY, JSON.stringify({ ...loadUiState(), ...pending }));
     pending = {};
     saveTimer = null;
-  }, DEBOUNCE_MS) as unknown as number;
+  }, delayMs) as unknown as number;
+}
+
+function mergePending(state: UiState): void {
+  // Avoid object spreads and timer cancellation in the pointer/wheel hot path.
+  if (state.viewport !== undefined) pending.viewport = state.viewport;
+  if (state.palette !== undefined) pending.palette = state.palette;
+  if (state.waveletMode !== undefined) pending.waveletMode = state.waveletMode;
+  if (state.charts !== undefined) pending.charts = state.charts;
 }
 
 /**

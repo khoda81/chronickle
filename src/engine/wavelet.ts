@@ -31,6 +31,16 @@ export interface KernelContext {
   readonly rightCells: number;
 }
 
+/**
+ * Output interval that must be exact. A centered transform may use circular
+ * convolution when the caller has already supplied enough context around this
+ * interval; samples outside the interval are then intentionally unspecified.
+ */
+export interface WaveletWindow {
+  readonly start: number;
+  readonly count: number;
+}
+
 /** Persistent buffers reused by one heatmap row across renders. */
 export class WaveletWorkspace implements WaveletField {
   values = new Float64Array(0);
@@ -118,6 +128,7 @@ export function computeWaveletField(
   mode: WaveletMode,
   options?: Partial<WaveletOptions>,
   workspace: WaveletWorkspace = new WaveletWorkspace(),
+  validWindow?: WaveletWindow,
 ): WaveletField {
   if (!(stepMs > 0) || !Number.isFinite(stepMs)) {
     throw new Error(`computeWaveletField: invalid step ${stepMs}`);
@@ -131,7 +142,7 @@ export function computeWaveletField(
   }
 
   return mode === "centered"
-    ? centeredGaussianFft(returns, stepMs, scalesMs, opts, workspace)
+    ? centeredGaussianFft(returns, stepMs, scalesMs, opts, workspace, validWindow)
     : causalCascade(returns, stepMs, scalesMs, opts, workspace);
 }
 
@@ -202,6 +213,7 @@ function centeredGaussianFft(
   scalesMs: Float64Array,
   opts: WaveletOptions,
   workspace: WaveletWorkspace,
+  validWindow: WaveletWindow | undefined,
 ): WaveletField {
   const n = returns.length;
   const values = workspace.prepareField(n, scalesMs.length);
@@ -211,7 +223,24 @@ function centeredGaussianFft(
   for (const scaleMs of scalesMs) {
     maxRadius = Math.max(maxRadius, Math.ceil(opts.gaussianCutoff * (scaleMs / stepMs)));
   }
-  const nfft = nextPowerOfTwo(n + maxRadius * 2);
+  // The renderer supplies max-radius context on both sides of the visible
+  // interval. Circular convolution is therefore identical to linear
+  // convolution inside that interval, so no second round of FFT padding is
+  // necessary. Full-field callers retain the conventional linear size.
+  let nfftInputLength = n + maxRadius * 2;
+  if (validWindow !== undefined) {
+    const { start, count } = validWindow;
+    if (!Number.isInteger(start) || !Number.isInteger(count) || count < 0) {
+      throw new Error(`centeredGaussianFft: invalid window ${start}+${count}`);
+    }
+    if (start < maxRadius || start + count > n - maxRadius) {
+      throw new Error(
+        `centeredGaussianFft: window ${start}..${start + count} lacks radius ${maxRadius} context in ${n} samples`,
+      );
+    }
+    nfftInputLength = n;
+  }
+  const nfft = nextPowerOfTwo(nfftInputLength);
   const bank = kernelBank(nfft, stepMs, scalesMs, opts.gaussianCutoff);
 
   workspace.ensureFft(nfft);

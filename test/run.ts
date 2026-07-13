@@ -3,21 +3,16 @@ import { EventBroker } from "../src/data/events/broker.ts";
 import { Broker } from "../src/data/price/broker.ts";
 import { CoverageIndex } from "../src/data/price/coverage.ts";
 import { createBinanceFetcher } from "../src/data/price/exchanges/binanceFetcher.ts";
-import {
-  chooseYahooInterval,
-  createYahooFetcher,
-} from "../src/data/price/exchanges/yahoo.ts";
+import { chooseYahooInterval, createYahooFetcher } from "../src/data/price/exchanges/yahoo.ts";
 import type { Fetcher, FetchRangeResult } from "../src/data/price/fetcher.ts";
 import { marketSource } from "../src/data/price/markets.ts";
-import {
-  filterMarketSymbols,
-  parseNobitexMarketKey,
-} from "../src/data/price/symbols.ts";
+import { filterMarketSymbols, parseNobitexMarketKey } from "../src/data/price/symbols.ts";
 import { ReturnPyramid } from "../src/data/price/returnPyramid.ts";
 import { ChunkedLevelStore } from "../src/data/price/store.ts";
 import { evaluateStaircase } from "../src/data/price/staircase.ts";
 import { Range } from "../src/engine/range.ts";
 import { fitStackLayout } from "../src/engine/gfx/layout.ts";
+import { placeTooltip } from "../src/ui/tooltip.ts";
 import {
   computeCenteredGaussianReference,
   computeWaveletField,
@@ -69,13 +64,43 @@ test("stack layout fills the canvas and preserves every resizable row", () => {
   approx(used, 800, 1e-9);
   assert(layout.rowHeights.length === 3, "a price row disappeared");
   assert(layout.newsHeight >= 64, "news row fell below its preferred minimum");
-  assert(layout.rowHeights.every((height) => height >= 130), "price row fell below minimum");
+  assert(
+    layout.rowHeights.every((height) => height >= 130),
+    "price row fell below minimum",
+  );
 
   const compact = fitStackLayout(110, [220, 180, 140], 240);
   const compactUsed =
     compact.newsHeight + compact.rowHeights.reduce((sum, height) => sum + height, 0);
   approx(compactUsed, 240, 1e-9);
-  assert(compact.rowHeights.every((height) => height > 0), "compact row collapsed");
+  assert(
+    compact.rowHeights.every((height) => height > 0),
+    "compact row collapsed",
+  );
+});
+
+test("hover labels flip around their anchor and remain inside the viewport", () => {
+  const nearTopRight = placeTooltip({
+    anchorX: 292,
+    anchorY: 18,
+    width: 120,
+    height: 80,
+    viewportWidth: 300,
+    viewportHeight: 180,
+  });
+  assert(nearTopRight.placement === "below-left", "top-right label did not flip both axes");
+  assert(nearTopRight.x >= 8 && nearTopRight.x + 120 <= 292, "label lost its node anchor");
+  assert(nearTopRight.y >= 8 && nearTopRight.y + 80 <= 172, "label escaped vertically");
+
+  const cramped = placeTooltip({
+    anchorX: 50,
+    anchorY: 25,
+    width: 140,
+    height: 90,
+    viewportWidth: 100,
+    viewportHeight: 60,
+  });
+  assert(cramped.x === 8 && cramped.y === 8, "oversized label was not clamped to the viewport");
 });
 
 test("staircase returns NaN when empty and holds the final observation", () => {
@@ -138,6 +163,25 @@ test("FFT Gaussian backend agrees with the direct reference", () => {
       assert(Number.isNaN(a) && Number.isNaN(b), `validity mismatch at ${i}`);
     } else {
       approx(a, b, 2e-14);
+    }
+  }
+});
+
+test("context-padded circular FFT is exact throughout the requested window", () => {
+  const radius = 65;
+  const visible = 173;
+  const returns = new Float64Array(radius + visible + radius);
+  for (let i = 0; i < returns.length; i += 11) returns[i] = Math.cos(i * 0.37) * 0.01;
+  const scales = new Float64Array([2.5, 7, 13]);
+  const full = computeWaveletField(returns, 1, scales, "centered");
+  const windowed = computeWaveletField(returns, 1, scales, "centered", undefined, undefined, {
+    start: radius,
+    count: visible,
+  });
+  for (let band = 0; band < scales.length; band++) {
+    const offset = band * returns.length;
+    for (let i = radius; i < radius + visible; i++) {
+      approx(windowed.values[offset + i]!, full.values[offset + i]!, 2e-14);
     }
   }
 });
@@ -222,7 +266,80 @@ test("broker clamps fetches to now and later renders fetch elapsed time", async 
   assert(requests[1]!.min === 10_000 && requests[1]!.max === 12_000, "wrong live gap");
 });
 
-test("last-point coverage and returned future points never extend past now", async () => {
+test("last-point expected lifetime suppresses moving-now micro-requests", async () => {
+  let now = 7_500;
+  const requests: Range[] = [];
+  const fetcher: Fetcher = {
+    async fetchRange({ range }) {
+      requests.push(range);
+      return {
+        points: [
+          { t: 0, price: 10 },
+          { t: 5_000, price: 11 },
+        ],
+        resolutionHintMs: 5_000,
+        searchedRange: range,
+      };
+    },
+  };
+  const broker = new Broker(fetcher, { now: () => now });
+  const evalTime = new Float64Array([0, 5_000, 10_000, 15_000]);
+  broker.query({ evalTime, maxDeltaTMs: 5_000 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert(count(requests) === 1, "initial live request was not issued");
+
+  now = 8_000;
+  broker.query({ evalTime, maxDeltaTMs: 5_000 });
+  now = 9_999;
+  broker.query({ evalTime, maxDeltaTMs: 5_000 });
+  assert(count(requests) === 1, "wall-clock movement refetched the same candle");
+
+  now = 10_251;
+  broker.query({ evalTime, maxDeltaTMs: 5_000 });
+  assert(count(requests) === 2, "crossing the publication grace did not refresh");
+  assert(
+    requests[1]!.min === 10_000 && requests[1]!.max === 10_251,
+    "live refresh did not begin at the next sample boundary",
+  );
+});
+
+test("a lagging live endpoint is polled on its refresh cadence, not every redraw", async () => {
+  let now = 10_001;
+  let notifications = 0;
+  const requests: Range[] = [];
+  const fetcher: Fetcher = {
+    liveRetryDelayMs: 5,
+    async fetchRange({ range }) {
+      requests.push(range);
+      return {
+        points: [
+          { t: 0, price: 10 },
+          { t: 5_000, price: 11 },
+        ],
+        resolutionHintMs: 5_000,
+        searchedRange: range,
+      };
+    },
+  };
+  const broker = new Broker(fetcher, { now: () => now });
+  broker.subscribe(() => notifications++);
+  const evalTime = new Float64Array([0, 5_000, 10_000, 15_000]);
+  broker.query({ evalTime, maxDeltaTMs: 5_000 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  now = 10_003;
+  broker.query({ evalTime, maxDeltaTMs: 5_000 });
+  assert(count(requests) === 1, "redraw bypassed the live refresh lease");
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert(notifications >= 2, "live refresh timer did not invalidate the subscriber");
+  now = 10_020;
+  broker.query({ evalTime, maxDeltaTMs: 5_000 });
+  assert(count(requests) === 2, "expired live refresh lease suppressed polling");
+  broker.dispose();
+});
+
+test("returned future points are discarded while the last valid sample is held", async () => {
   const warnings: string[] = [];
   const fetcher: Fetcher = {
     async fetchRange({ range }) {
@@ -247,12 +364,33 @@ test("last-point coverage and returned future points never extend past now", asy
   const ready = result.resolution.filter((segment) => segment.state === "ready");
   assert(
     ready.every((segment) => segment.range.max <= 7_500),
-    "ready coverage entered future",
+    "presented coverage entered the future",
   );
+  assert(Number.isNaN(result.value[2]!), "future value was rendered");
   assert(
     warnings.some((message) => message.includes("10000")),
     "future API point was silent",
   );
+});
+
+test("coverage sweep exactly matches pointwise resolution selection", () => {
+  const coverage = new CoverageIndex();
+  coverage.addReady(1_000, Range.create(2_000, 7_000));
+  coverage.addReady(5_000, Range.create(0, 10_000));
+  coverage.addReady(60_000, Range.create(-5_000, 20_000));
+  const evalTime = new Float64Array(31);
+  for (let i = 0; i < evalTime.length; i++) evalTime[i] = -5_000 + i * 1_000;
+
+  for (const target of [500, 1_000, 3_000, 5_000, 10_000, 120_000]) {
+    const swept = coverage.resolve(evalTime, target);
+    for (let i = 0; i < evalTime.length; i++) {
+      const t = evalTime[i]!;
+      const expected =
+        coverage.finestReadyAt(t, target) ?? coverage.closestCoarserAt(t, target) ?? NaN;
+      if (Number.isNaN(expected)) assert(Number.isNaN(swept[i]!), `expected NaN at ${i}`);
+      else assert(swept[i] === expected, `resolution mismatch at ${i}: ${swept[i]} vs ${expected}`);
+    }
+  }
 });
 
 test("finer ready evidence removes overlapping coarser empty evidence", () => {

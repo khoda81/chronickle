@@ -20,6 +20,15 @@ export class RangeSet {
     return this.intervals.slice();
   }
 
+  /**
+   * Allocation-free read-only view for internal sweep algorithms. Callers must
+   * never retain and mutate the backing array. Individual Range values are
+   * immutable, and RangeSet preserves the array identity across updates.
+   */
+  view(): readonly Range[] {
+    return this.intervals;
+  }
+
   /** True if every point in `r` lies inside some covered interval. */
   covers(r: Range): boolean {
     for (const iv of this.intervals) {

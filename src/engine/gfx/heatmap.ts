@@ -6,6 +6,7 @@ import {
   logPriceEdgesToReturns,
   WaveletWorkspace,
   type WaveletMode,
+  type WaveletWindow,
 } from "../wavelet.ts";
 
 /**
@@ -44,6 +45,7 @@ interface HeatmapResources {
   imagePixels: Uint32Array | null;
   lastRenderKey: string | null;
   readonly wavelet: WaveletWorkspace;
+  readonly validWindow: { start: number; count: number };
 }
 
 // Adjacent rows are logarithmically close in scale and the Gaussian scale-space
@@ -143,6 +145,8 @@ class HeatmapImpl implements HeatmapLayer {
       resources.scalesMs[band] = sigmaPx * stepMs;
     }
 
+    resources.validWindow.start = padLeft;
+    resources.validWindow.count = numPx;
     const field = computeWaveletField(
       resources.returns,
       stepMs,
@@ -150,10 +154,14 @@ class HeatmapImpl implements HeatmapLayer {
       mode,
       undefined,
       resources.wavelet,
+      mode === "centered" ? resources.validWindow : undefined,
     );
     ensureImage(resources, numPx, bandCount);
     const imagePixels = resources.imagePixels!;
     const ramp = packedRampLut();
+    const sigmoid = sigmoidIndexLut();
+    const sigmoidScale = (SIGMOID_LUT_SIZE - 1) / (SIGMOID_MAX - SIGMOID_MIN);
+    const sigmoidMidpoint = Math.floor((RAMP_RESOLUTION - 1) / 2);
     const gain = Math.exp(priceScale);
     const scaleRatio = (transformBandCount - 1) / (bandCount - 1);
 
@@ -169,9 +177,21 @@ class HeatmapImpl implements HeatmapLayer {
         const lower = field.values[lowerOffset + x]!;
         const upper = field.values[upperOffset + x]!;
         const z = lower + (upper - lower) * mix;
-        imagePixels[pixelBandOffset + x] = Number.isFinite(z)
-          ? ramp[sigmoidRampIndex(z * gain)]!
-          : INVALID_PIXEL;
+        if (!Number.isFinite(z)) {
+          imagePixels[pixelBandOffset + x] = INVALID_PIXEL;
+          continue;
+        }
+        const amplified = z * gain;
+        let rampOffset: number;
+        if (Number.isNaN(amplified)) rampOffset = sigmoidMidpoint;
+        else if (amplified === Number.NEGATIVE_INFINITY) rampOffset = RAMP_RESOLUTION - 1;
+        else if (amplified >= SIGMOID_MAX) rampOffset = 0;
+        else if (amplified <= SIGMOID_MIN) rampOffset = RAMP_RESOLUTION - 2;
+        else {
+          const position = (amplified - SIGMOID_MIN) * sigmoidScale;
+          rampOffset = sigmoid[(position + 0.5) | 0]!;
+        }
+        imagePixels[pixelBandOffset + x] = ramp[rampOffset]!;
       }
     }
 
@@ -211,6 +231,7 @@ function resourcesFor(ctx: CanvasRenderingContext2D, rowId: string): HeatmapReso
     imagePixels: null,
     lastRenderKey: null,
     wavelet: new WaveletWorkspace(),
+    validWindow: { start: 0, count: 0 } satisfies WaveletWindow,
   };
   byRow.set(rowId, resources);
   return resources;
@@ -231,23 +252,17 @@ function ensureImage(resources: HeatmapResources, width: number, bandCount: numb
   }
 }
 
-function sigmoidRampIndex(value: number): number {
-  if (Number.isNaN(value)) return Math.floor((RAMP_RESOLUTION - 1) / 2);
-  if (value === Number.NEGATIVE_INFINITY) return RAMP_RESOLUTION - 1;
-  if (value >= SIGMOID_MAX) return 0;
-  if (value <= SIGMOID_MIN) return RAMP_RESOLUTION - 2;
+function sigmoidIndexLut(): Uint16Array {
   let lut = sigmoidLut;
-  if (lut === null) {
-    lut = new Uint16Array(SIGMOID_LUT_SIZE);
-    const span = SIGMOID_MAX - SIGMOID_MIN;
-    for (let i = 0; i < lut.length; i++) {
-      const x = SIGMOID_MIN + (i / (lut.length - 1)) * span;
-      lut[i] = rampIndex(1 / (1 + Math.exp(x)));
-    }
-    sigmoidLut = lut;
+  if (lut !== null) return lut;
+  lut = new Uint16Array(SIGMOID_LUT_SIZE);
+  const span = SIGMOID_MAX - SIGMOID_MIN;
+  for (let i = 0; i < lut.length; i++) {
+    const x = SIGMOID_MIN + (i / (lut.length - 1)) * span;
+    lut[i] = rampIndex(1 / (1 + Math.exp(x)));
   }
-  const position = ((value - SIGMOID_MIN) / (SIGMOID_MAX - SIGMOID_MIN)) * (SIGMOID_LUT_SIZE - 1);
-  return lut[Math.round(position)]!;
+  sigmoidLut = lut;
+  return lut;
 }
 
 function packedRampLut(): Uint32Array {

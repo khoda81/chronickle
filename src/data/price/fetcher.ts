@@ -31,6 +31,8 @@ export interface Fetcher {
   readonly serializeRequests?: boolean;
   /** A failed request blocks every range until its retry timer expires. */
   readonly sourceWideBackoff?: boolean;
+  /** Poll delay when a live candle boundary has passed but the source still returns the old candle. */
+  readonly liveRetryDelayMs?: number;
 
   fetchRange(opts: FetchRangeOptions): Promise<FetchRangeResult>;
 

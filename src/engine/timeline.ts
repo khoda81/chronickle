@@ -37,9 +37,13 @@ export interface HoverInfo {
   readonly feedId: string;
   readonly summary: string;
   readonly t: number;
-  readonly px: number;
-  readonly py: number;
+  readonly anchorX: number;
+  readonly anchorY: number;
+  readonly viewportWidth: number;
+  readonly viewportHeight: number;
 }
+
+type MutableHoverInfo = { -readonly [Key in keyof HoverInfo]: HoverInfo[Key] };
 
 export interface TimelineCallbacks {
   onHover?: (event: HoverInfo | null) => void;
@@ -102,7 +106,33 @@ export class Timeline {
   private lastX = 0;
   private lastY = 0;
   private evalTime = new Float64Array(0);
+  private readonly nowLine: HTMLDivElement;
   private nowTimer: number | null = null;
+  private pointerInside = false;
+  private pointerPx = 0;
+  private pointerPy = 0;
+  private notifiedHoverIndex: number | null = null;
+  private notifiedHoverT = Number.NaN;
+  private notifiedHoverTitle = "";
+  private notifiedHoverLink = "";
+  private notifiedHoverFeedId = "";
+  private notifiedHoverSummary = "";
+  private notifiedAnchorX = Number.NaN;
+  private notifiedAnchorY = Number.NaN;
+  private notifiedViewportWidth = Number.NaN;
+  private notifiedViewportHeight = Number.NaN;
+  private readonly hoverInfo: MutableHoverInfo = {
+    index: -1,
+    title: "",
+    link: "",
+    feedId: "",
+    summary: "",
+    t: Number.NaN,
+    anchorX: Number.NaN,
+    anchorY: Number.NaN,
+    viewportWidth: Number.NaN,
+    viewportHeight: Number.NaN,
+  };
 
   constructor(opts: TimelineOptions) {
     this.canvas = opts.canvas;
@@ -113,6 +143,13 @@ export class Timeline {
     this.priceRows = opts.priceRows ?? [];
     this.rowHeights = this.priceRows.map(() => MIN_PRICE_ROW_HEIGHT);
     this.plot = new Plot({ canvas: opts.canvas, initialTimeRange: opts.initialTimeRange });
+    const parent = this.canvas.parentElement;
+    if (parent === null) throw new Error("Timeline canvas must have a parent element");
+    this.nowLine = document.createElement("div");
+    this.nowLine.className = "timeline-now-line";
+    this.nowLine.style.width = `${this.config.nowWidth}px`;
+    this.nowLine.style.background = this.config.nowStroke;
+    parent.append(this.nowLine);
     this.state = {
       events: EMPTY_EVENTS,
       timeRange: opts.initialTimeRange,
@@ -203,6 +240,7 @@ export class Timeline {
     if (this.nowTimer !== null) clearTimeout(this.nowTimer);
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
+    this.nowLine.remove();
     this.unbindEvents();
   }
 
@@ -219,6 +257,7 @@ export class Timeline {
     window.addEventListener("pointerup", this.onPointerUp);
     this.canvas.addEventListener("wheel", this.onWheel, { passive: false });
     this.canvas.addEventListener("pointermove", this.onHoverMove);
+    this.canvas.addEventListener("pointerleave", this.onHoverLeave);
     this.canvas.addEventListener("click", this.onClick);
     window.addEventListener("resize", this.onResize);
   }
@@ -229,6 +268,7 @@ export class Timeline {
     window.removeEventListener("pointerup", this.onPointerUp);
     this.canvas.removeEventListener("wheel", this.onWheel);
     this.canvas.removeEventListener("pointermove", this.onHoverMove);
+    this.canvas.removeEventListener("pointerleave", this.onHoverLeave);
     this.canvas.removeEventListener("click", this.onClick);
     window.removeEventListener("resize", this.onResize);
   }
@@ -254,7 +294,7 @@ export class Timeline {
   private draw = (): void => {
     using frame = this.plot.beginFrame();
     const { width, height, dpr } = frame;
-    const { hovered, priceScale, timeRange, waveletMode } = this.state;
+    const { priceScale, timeRange, waveletMode } = this.state;
     frame.fillRectPx(0, 0, width, height, "#05070d");
 
     const numPx = Math.ceil(width * dpr);
@@ -274,8 +314,9 @@ export class Timeline {
     const eventResult = this.eventSource(timeRange);
     this.state.events = { events: eventResult.events };
     const eventY = this.state.newsHeight / 2;
+    this.updateHover(frame.tx, eventY, width, height);
     frame.text("NEWS", 8, 9, "10px ui-monospace, monospace", "#94a3b8", "left", "top");
-    frame.events().drawRow(this.state.events, this.feedColorOf, hovered, eventY);
+    frame.events().drawRow(this.state.events, this.feedColorOf, this.state.hovered, eventY);
 
     let rowY = this.state.newsHeight;
     for (let index = 0; index < this.priceRows.length; index++) {
@@ -321,7 +362,7 @@ export class Timeline {
     frame.fillRectPx(0, this.state.newsHeight, width, 1, "rgba(255,255,255,0.3)");
     frame.drawTimeAxis(this.state.newsHeight, this.config.minTickPx);
     this.drawResizeHandles(frame);
-    this.drawNow(frame, timePerPx);
+    this.updateNowLine(timePerPx);
   };
 
   private drawResizeHandles(frame: Frame): void {
@@ -342,9 +383,12 @@ export class Timeline {
   }
 
   private boundaryAt(y: number): number | null {
-    const ys = this.boundaryYs();
-    for (let index = 0; index < ys.length; index++) {
-      if (Math.abs(y - ys[index]!) <= RESIZE_HANDLE_RADIUS) return index;
+    if (this.priceRows.length === 0) return null;
+    let boundaryY = this.state.newsHeight;
+    if (Math.abs(y - boundaryY) <= RESIZE_HANDLE_RADIUS) return 0;
+    for (let index = 0; index < this.rowHeights.length - 1; index++) {
+      boundaryY += this.rowHeights[index]!;
+      if (Math.abs(y - boundaryY) <= RESIZE_HANDLE_RADIUS) return index + 1;
     }
     return null;
   }
@@ -376,33 +420,42 @@ export class Timeline {
     this.rowHeights[right] = pair - leftHeight;
   }
 
-  private drawNow(frame: Frame, timePerPx: number): void {
+  /** Move the wall-clock marker without invalidating data or the heatmap. */
+  private updateNowLine(timePerPx: number): void {
     if (this.nowTimer !== null) clearTimeout(this.nowTimer);
     this.nowTimer = null;
     const now = Date.now();
     const { timeRange } = this.state;
-    if (now > timeRange.max) return;
-    frame.vline(
-      frame.tx.timeToX(now),
-      0,
-      frame.height,
-      this.config.nowStroke,
-      this.config.nowWidth,
-    );
-    const delayMs = Math.max(timeRange.min - now, timePerPx / 10);
+    if (now > timeRange.max) {
+      this.nowLine.hidden = true;
+      return;
+    }
+    if (now >= timeRange.min) {
+      const x = ((now - timeRange.min) / (timeRange.max - timeRange.min)) * this.plot.cssWidth;
+      this.nowLine.hidden = false;
+      this.nowLine.style.transform = `translate3d(${x - this.config.nowWidth / 2}px, 0, 0)`;
+    } else {
+      this.nowLine.hidden = true;
+    }
+
+    // Ten updates per horizontal pixel matches the old visual motion, but this
+    // timer now changes one compositor transform instead of redrawing/querying
+    // the entire timeline. Cap at 120 Hz on extremely zoomed-in views.
+    const delayMs = Math.max(1000 / 120, timeRange.min - now, timePerPx / 10);
     this.nowTimer = setTimeout(() => {
       this.nowTimer = null;
-      this.reqDraw();
+      this.updateNowLine(timePerPx);
     }, delayMs) as unknown as number;
   }
 
   private onPointerDown = (event: PointerEvent): void => {
-    const boundary = this.boundaryAt(this.pointerY(event));
+    this.updatePointer(event);
+    const boundary = this.boundaryAt(this.pointerPy);
     if (boundary !== null) {
       this.resizingBoundary = boundary;
       this.dragging = false;
-      this.lastY = this.pointerY(event);
-      this.state.hovered = null;
+      this.lastY = this.pointerPy;
+      if (this.clearHover()) this.reqDraw();
       this.canvas.style.cursor = "ns-resize";
       this.canvas.setPointerCapture?.(event.pointerId);
       event.preventDefault();
@@ -415,7 +468,8 @@ export class Timeline {
 
   private onPointerMove = (event: PointerEvent): void => {
     if (this.resizingBoundary !== null) {
-      const y = this.pointerY(event);
+      this.updatePointer(event);
+      const y = this.pointerPy;
       this.moveBoundary(this.resizingBoundary, y - this.lastY);
       this.lastY = y;
       this.reqDraw();
@@ -434,10 +488,12 @@ export class Timeline {
     this.dragging = false;
     this.resizingBoundary = null;
     this.canvas.releasePointerCapture?.(event.pointerId);
+    this.reqDraw();
   };
 
   private onWheel = (event: WheelEvent): void => {
     event.preventDefault();
+    this.updatePointer(event);
     const rect = this.canvas.getBoundingClientRect();
     const cssWidth = this.plot.cssWidth;
     const cssHeight = this.plot.cssHeight;
@@ -463,36 +519,24 @@ export class Timeline {
   };
 
   private onHoverMove = (event: PointerEvent): void => {
+    this.updatePointer(event);
+    this.canvas.style.cursor = this.boundaryAt(this.pointerPy) === null ? "" : "ns-resize";
     if (this.dragging || this.resizingBoundary !== null) return;
-    const rect = this.canvas.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return;
-    const cssWidth = this.plot.cssWidth;
-    const cssHeight = this.plot.cssHeight;
-    const px = (event.clientX - rect.left) * (cssWidth / rect.width);
-    const py = (event.clientY - rect.top) * (cssHeight / rect.height);
-    this.canvas.style.cursor = this.boundaryAt(py) === null ? "" : "ns-resize";
-    const tx = new DataTransform(
-      this.state.timeRange,
-      Range.create(0, cssWidth),
-      Range.create(0, cssHeight),
-    );
-    const index = hitTestEvent(this.state.events, tx, px, py, this.state.newsHeight / 2);
-    if (index !== this.state.hovered) {
-      this.state.hovered = index;
-      this.reqDraw();
-      this.fireHover(index, px, py);
-    }
+    if (this.updateHoverAtCurrentTransform()) this.reqDraw();
   };
 
-  private onClick = (): void => {
+  private onHoverLeave = (): void => {
+    this.pointerInside = false;
+    if (this.dragging || this.resizingBoundary !== null) return;
+    if (this.clearHover()) this.reqDraw();
+  };
+
+  private onClick = (event: PointerEvent): void => {
+    this.updatePointer(event);
+    if (this.updateHoverAtCurrentTransform()) this.reqDraw();
     if (this.state.hovered === null) return;
     window.open(this.eventAt(this.state.hovered).link, "_blank", "noopener,noreferrer");
   };
-
-  private pointerY(event: PointerEvent): number {
-    const rect = this.canvas.getBoundingClientRect();
-    return rect.height <= 0 ? 0 : (event.clientY - rect.top) * (this.plot.cssHeight / rect.height);
-  }
 
   private eventAt(index: number): NewsEvent {
     const event = this.state.events.events[index];
@@ -500,22 +544,103 @@ export class Timeline {
     return event;
   }
 
-  private fireHover(index: number | null, px: number, py: number): void {
-    if (this.callbacks.onHover === undefined) return;
-    if (index === null) {
-      this.callbacks.onHover(null);
+  private updatePointer(event: Pick<PointerEvent, "clientX" | "clientY">): void {
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      this.pointerInside = false;
       return;
     }
+    this.pointerInside =
+      event.clientX >= rect.left &&
+      event.clientX <= rect.right &&
+      event.clientY >= rect.top &&
+      event.clientY <= rect.bottom;
+    this.pointerPx = (event.clientX - rect.left) * (this.plot.cssWidth / rect.width);
+    this.pointerPy = (event.clientY - rect.top) * (this.plot.cssHeight / rect.height);
+  }
+
+  private updateHoverAtCurrentTransform(): boolean {
+    const width = this.plot.cssWidth;
+    const height = this.plot.cssHeight;
+    if (!(width > 0) || !(height > 0)) return this.clearHover();
+    const tx = new DataTransform(
+      this.state.timeRange,
+      Range.create(0, width),
+      Range.create(0, height),
+    );
+    return this.updateHover(tx, this.state.newsHeight / 2, width, height);
+  }
+
+  private updateHover(tx: DataTransform, eventY: number, width: number, height: number): boolean {
+    const previous = this.state.hovered;
+    const index =
+      this.pointerInside &&
+      !this.dragging &&
+      this.resizingBoundary === null &&
+      this.boundaryAt(this.pointerPy) === null
+        ? hitTestEvent(this.state.events, tx, this.pointerPx, this.pointerPy, eventY)
+        : null;
+    this.state.hovered = index;
+    if (index === null) {
+      this.clearHover();
+      return previous !== null;
+    }
+
     const event = this.eventAt(index);
-    this.callbacks.onHover({
-      index,
-      title: event.title,
-      link: event.link,
-      feedId: event.feedId,
-      summary: event.summary,
-      t: event.t,
-      px,
-      py,
-    });
+    const anchorX = tx.timeToX(event.t);
+    const changed =
+      index !== this.notifiedHoverIndex ||
+      event.t !== this.notifiedHoverT ||
+      event.title !== this.notifiedHoverTitle ||
+      event.link !== this.notifiedHoverLink ||
+      event.feedId !== this.notifiedHoverFeedId ||
+      event.summary !== this.notifiedHoverSummary ||
+      anchorX !== this.notifiedAnchorX ||
+      eventY !== this.notifiedAnchorY ||
+      width !== this.notifiedViewportWidth ||
+      height !== this.notifiedViewportHeight;
+    if (!changed || this.callbacks.onHover === undefined) return previous !== index;
+
+    this.notifiedHoverIndex = index;
+    this.notifiedHoverT = event.t;
+    this.notifiedHoverTitle = event.title;
+    this.notifiedHoverLink = event.link;
+    this.notifiedHoverFeedId = event.feedId;
+    this.notifiedHoverSummary = event.summary;
+    this.notifiedAnchorX = anchorX;
+    this.notifiedAnchorY = eventY;
+    this.notifiedViewportWidth = width;
+    this.notifiedViewportHeight = height;
+    const info = this.hoverInfo;
+    info.index = index;
+    info.title = event.title;
+    info.link = event.link;
+    info.feedId = event.feedId;
+    info.summary = event.summary;
+    info.t = event.t;
+    info.anchorX = anchorX;
+    info.anchorY = eventY;
+    info.viewportWidth = width;
+    info.viewportHeight = height;
+    this.callbacks.onHover(info);
+    return previous !== index;
+  }
+
+  private clearHover(): boolean {
+    const visualChanged = this.state.hovered !== null;
+    this.state.hovered = null;
+    if (this.notifiedHoverIndex === null) return visualChanged;
+    this.notifiedHoverIndex = null;
+    this.notifiedHoverT = Number.NaN;
+    this.notifiedHoverTitle = "";
+    this.notifiedHoverLink = "";
+    this.notifiedHoverFeedId = "";
+    this.notifiedHoverSummary = "";
+    this.notifiedAnchorX = Number.NaN;
+    this.notifiedAnchorY = Number.NaN;
+    this.notifiedViewportWidth = Number.NaN;
+    this.notifiedViewportHeight = Number.NaN;
+    this.callbacks.onHover?.(null);
+    return visualChanged;
   }
 }

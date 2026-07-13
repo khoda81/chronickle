@@ -9,8 +9,9 @@ import { filterMarketSymbols, type MarketSymbol } from "./data/price/symbols.ts"
 import type { RssFeed } from "./domain.ts";
 import { PALETTES, rampPaletteName, setRampPalette, type PaletteName } from "./engine/ramp.ts";
 import { Range } from "./engine/range.ts";
-import { Timeline, type HoverInfo, type PriceRow } from "./engine/timeline.ts";
+import { Timeline, type PriceRow } from "./engine/timeline.ts";
 import type { WaveletMode } from "./engine/wavelet.ts";
+import { EventTooltip } from "./ui/tooltip.ts";
 import { flushUiState, loadUiState, saveUiState } from "./uiState.ts";
 
 const DAY_MS = 86_400_000;
@@ -189,31 +190,6 @@ function setStatus(status: HTMLDivElement, message: string, kind: "info" | "erro
   status.className = `status ${kind}`;
 }
 
-function showTooltip(tooltip: HTMLDivElement, event: HoverInfo, feed: RssFeed): void {
-  tooltip.innerHTML = "";
-  const source = el<HTMLSpanElement>("span", "tooltip-source");
-  const swatch = el<HTMLSpanElement>("span", "tooltip-swatch");
-  swatch.style.background = feed.color;
-  source.append(
-    swatch,
-    document.createTextNode(`${feed.source} · ${new Date(event.t).toLocaleString()}`),
-  );
-  const link = el<HTMLAnchorElement>("a", "tooltip-link");
-  link.href = event.link;
-  link.target = "_blank";
-  link.rel = "noopener noreferrer";
-  link.textContent = event.title;
-  tooltip.append(source, link);
-  if (event.summary.length > 0) {
-    const summary = el<HTMLParagraphElement>("p", "tooltip-summary");
-    summary.textContent = event.summary;
-    tooltip.append(summary);
-  }
-  tooltip.style.left = `${event.px}px`;
-  tooltip.style.top = `${event.py}px`;
-  tooltip.classList.remove("hidden");
-}
-
 function main(): void {
   const ui = loadUiState();
   if (ui.palette && ui.palette in PALETTES) setRampPalette(ui.palette as PaletteName);
@@ -228,6 +204,7 @@ function main(): void {
 
   const registry = FeedRegistry.load(DEFAULT_FEEDS);
   const eventBroker = new EventBroker({}, () => registry.active());
+  const eventTooltip = new EventTooltip(app.tooltip);
   const charts: ChartInstance[] = [];
   const timeline = new Timeline({
     canvas: app.canvas,
@@ -237,8 +214,8 @@ function main(): void {
     feedColorOf: (feedId) => registry.colorOf(feedId),
     callbacks: {
       onHover: (event) => {
-        if (event === null) app.tooltip.classList.add("hidden");
-        else showTooltip(app.tooltip, event, registry.get(event.feedId));
+        if (event === null) eventTooltip.hide();
+        else eventTooltip.show(event, registry.get(event.feedId));
       },
       onViewportChange: (viewport) => {
         sharedRange = Range.create(viewport.min, viewport.max);

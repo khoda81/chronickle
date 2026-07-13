@@ -350,18 +350,70 @@ canvas.timeline:active {
   cursor: grabbing;
 }
 
+.timeline-now-line {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.timeline-now-line[hidden] {
+  display: none;
+}
+
 .tooltip {
   position: absolute;
+  top: 0;
+  left: 0;
   pointer-events: none;
-  max-width: 320px;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(320px, calc(100% - 16px));
+  max-height: calc(100% - 16px);
+  overflow: hidden;
   padding: 8px 10px;
   background: rgba(11, 16, 32, 0.95);
   border: 1px solid #2a2f3a;
   border-radius: 6px;
   font-size: 12px;
   line-height: 1.4;
-  transform: translate(12px, -100%);
   z-index: 10;
+  will-change: transform;
+}
+.tooltip::before {
+  content: "";
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  background: rgba(11, 16, 32, 0.95);
+  transform: rotate(45deg);
+}
+.tooltip[data-placement="above-right"]::before {
+  bottom: -5px;
+  left: 8px;
+  border-right: 1px solid #2a2f3a;
+  border-bottom: 1px solid #2a2f3a;
+}
+.tooltip[data-placement="above-left"]::before {
+  right: 8px;
+  bottom: -5px;
+  border-right: 1px solid #2a2f3a;
+  border-bottom: 1px solid #2a2f3a;
+}
+.tooltip[data-placement="below-right"]::before {
+  top: -5px;
+  left: 8px;
+  border-top: 1px solid #2a2f3a;
+  border-left: 1px solid #2a2f3a;
+}
+.tooltip[data-placement="below-left"]::before {
+  top: -5px;
+  right: 8px;
+  border-top: 1px solid #2a2f3a;
+  border-left: 1px solid #2a2f3a;
 }
 .tooltip.hidden {
   display: none;
