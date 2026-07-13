@@ -1,49 +1,50 @@
-/** Shared vertical layout measurements, in CSS pixels. */
+/** Shared stacked-timeline layout measurements, in CSS pixels. */
 
-/** Initial user-resizable heatmap height. */
-export const DEFAULT_HEAT_HEIGHT = 220;
-export const MIN_HEAT_HEIGHT = 96;
-export const MAX_HEAT_HEIGHT = 420;
+export const DEFAULT_NEWS_HEIGHT = 110;
+export const MIN_NEWS_HEIGHT = 64;
+export const MIN_PRICE_ROW_HEIGHT = 130;
 
-/** Coverage/resolution diagnostics below the transform. */
+/** Coverage/resolution diagnostics at the bottom of every price row. */
 export const RESOLUTION_BAR_HEIGHT = 34;
-/** Hit target around the heatmap's upper resize edge. */
+/** Pointer hit target around each draggable horizontal boundary. */
 export const RESIZE_HANDLE_RADIUS = 6;
 
-/** Smallest Gaussian sigma (in horizontal device pixels). */
 export const MIN_SIGMA = 14;
-/** Largest Gaussian sigma, capped to keep context finite. */
 export const MAX_SIGMA_CAP = 128;
 
 export function maxSigmaFor(numPx: number): number {
   return Math.max(MIN_SIGMA, Math.min(MAX_SIGMA_CAP, numPx / 4));
 }
 
-/** Height reserved for the news row above the time axis. */
-export const EVENT_AREA_HEIGHT = 80;
-
-export function clampHeatHeight(height: number, canvasHeight: number): number {
-  // Preserve enough room for the axis and news row even in a short canvas.
-  const available = Math.max(MIN_HEAT_HEIGHT, canvasHeight - RESOLUTION_BAR_HEIGHT - 112);
-  return Math.min(Math.max(height, MIN_HEAT_HEIGHT), Math.min(MAX_HEAT_HEIGHT, available));
+export interface StackLayout {
+  readonly newsHeight: number;
+  readonly rowHeights: readonly number[];
 }
 
-export function resolutionBarY(height: number): number {
-  return height - RESOLUTION_BAR_HEIGHT;
+/** Fit a news row and N price rows exactly into the available canvas height. */
+export function fitStackLayout(
+  newsHeight: number,
+  rowHeights: readonly number[],
+  totalHeight: number,
+): StackLayout {
+  const total = Math.max(0, totalHeight);
+  const count = rowHeights.length;
+  if (count === 0) return { newsHeight: total, rowHeights: [] };
+
+  // Small embeds may not have enough room for the preferred minima. In that
+  // case all rows shrink proportionally while remaining usable.
+  const minNews = Math.min(MIN_NEWS_HEIGHT, total / (count + 1));
+  const minPrice = Math.min(MIN_PRICE_ROW_HEIGHT, (total - minNews) / count);
+  const fittedNews = clamp(newsHeight, minNews, Math.max(minNews, total - minPrice * count));
+  const priceSpace = Math.max(0, total - fittedNews);
+  const extra = Math.max(0, priceSpace - minPrice * count);
+  const weights = rowHeights.map((height) => Math.max(1, height - minPrice));
+  const weightSum = weights.reduce((sum, weight) => sum + weight, 0);
+  const fittedRows = weights.map((weight) => minPrice + (extra * weight) / weightSum);
+
+  return { newsHeight: fittedNews, rowHeights: fittedRows };
 }
 
-export function heatTopY(height: number, heatHeight: number): number {
-  return resolutionBarY(height) - heatHeight;
-}
-
-export function heatBottomY(height: number): number {
-  return resolutionBarY(height);
-}
-
-export function axisY(height: number, heatHeight: number): number {
-  return heatTopY(height, heatHeight) - 6;
-}
-
-export function eventRowY(height: number, heatHeight: number): number {
-  return axisY(height, heatHeight) - EVENT_AREA_HEIGHT / 2;
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, Number.isFinite(value) ? value : min));
 }

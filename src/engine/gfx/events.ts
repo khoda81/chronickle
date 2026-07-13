@@ -8,7 +8,6 @@
 
 import type { EventSet } from "../../domain.ts";
 import type { Frame } from "./context.ts";
-import { eventRowY } from "./layout.ts";
 
 const RADIUS = 5;
 const HOVER_RADIUS = 8;
@@ -24,7 +23,7 @@ export interface EventLayer {
     events: EventSet,
     colorOf: (feedId: string) => string,
     hovered: number | null,
-    heatHeight: number,
+    y: number,
   ): void;
 }
 
@@ -41,14 +40,11 @@ class EventsImpl implements EventLayer {
     events: EventSet,
     colorOf: (feedId: string) => string,
     hovered: number | null,
-    heatHeight: number,
+    y: number,
   ): void {
     const { frame } = this;
     const { tx } = frame;
     if (events.events.length === 0) return;
-
-    const height = tx.yDomain.max - tx.yDomain.min;
-    const y = eventRowY(height, heatHeight);
 
     for (let i = 0; i < events.events.length; i++) {
       const e = events.events[i]!;

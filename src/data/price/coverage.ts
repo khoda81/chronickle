@@ -22,6 +22,11 @@ export class CoverageIndex {
   private readonly ready = new Map<number, RangeSet>();
   private readonly empty = new Map<number, RangeSet>();
 
+  clear(): void {
+    this.ready.clear();
+    this.empty.clear();
+  }
+
   addReady(resolutionMs: number, range: Range): void {
     this.level(this.ready, resolutionMs).add(range);
     // New observations supersede older request-local empty evidence whenever

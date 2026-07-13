@@ -55,6 +55,7 @@ export class Broker {
   private readonly defaultRetryDelayMs: (attempt: number) => number;
   private readonly onError: (message: string, error?: unknown) => void;
   private readonly onWarning: (message: string) => void;
+  private generation = 0;
   private revision = 0;
 
   constructor(
@@ -145,9 +146,24 @@ export class Broker {
   }
 
   dispose(): void {
+    this.generation++;
     for (const failure of this.failures.values()) clearTimeout(failure.timer);
+    this.inFlight.clear();
     this.failures.clear();
     this.subscribers.clear();
+  }
+
+  /** Drop all observations/request state and ignore responses from the old generation. */
+  clearCache(): void {
+    this.generation++;
+    this.stores.clear();
+    this.coverage.clear();
+    this.inFlight.clear();
+    for (const failure of this.failures.values()) clearTimeout(failure.timer);
+    this.failures.clear();
+    this.failureAttempts.clear();
+    this.revision++;
+    this.notify();
   }
 
   cachedRange(): Range | null {
@@ -199,15 +215,18 @@ export class Broker {
     const key = requestKey(range, maxDeltaTMs);
     if (this.inFlight.has(key) || this.failures.has(key)) return;
     const request = { range, maxDeltaTMs };
+    const generation = this.generation;
     this.inFlight.set(key, request);
 
     try {
       const result = await this.fetcher.fetchRange(request);
+      if (generation !== this.generation) return;
       this.ingest(request, result);
       this.failureAttempts.delete(key);
       this.revision++;
       this.notify();
     } catch (error) {
+      if (generation !== this.generation) return;
       this.onError(`[Broker] fetch failed for ${range.min}..${range.max}`, error);
       const attempt = (this.failureAttempts.get(key) ?? 0) + 1;
       this.failureAttempts.set(key, attempt);
@@ -231,7 +250,7 @@ export class Broker {
       this.revision++;
       this.notify();
     } finally {
-      this.inFlight.delete(key);
+      if (this.inFlight.get(key) === request) this.inFlight.delete(key);
     }
   }
 

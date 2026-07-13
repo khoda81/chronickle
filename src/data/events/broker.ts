@@ -31,7 +31,7 @@
 
 import type { NewsEvent, RssFeed } from "../../domain.ts";
 import { Range } from "../../engine/range.ts";
-import { FeedWalker, type FeedWalkerOptions } from "./walker.ts";
+import { FeedWalker, type FeedWalkerOptions, type WalkOutcome } from "./walker.ts";
 
 /** Algebraic query status — mirrors the price broker's contract. */
 export type EventQueryStatus = "complete" | "partial" | "empty";
@@ -69,18 +69,42 @@ type FeedState =
 const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_CAP_MS = 60_000;
 
+export interface EventWalker {
+  readonly failureReason: string | null;
+  walk(targetMin: number, onEvents: (events: readonly NewsEvent[]) => void): Promise<WalkOutcome>;
+}
+
+export type EventWalkerFactory = (feed: RssFeed, opts: FeedWalkerOptions) => EventWalker;
+
+export interface EventBrokerDiagnostics {
+  readonly onDebug?: (message: string) => void;
+  readonly onError?: (message: string, error: unknown) => void;
+}
+
 export class EventBroker {
   private events: NewsEvent[] = [];
   private readonly feedState = new Map<string, FeedState>();
-  private readonly walkers = new Map<string, FeedWalker>();
+  private readonly walkers = new Map<string, EventWalker>();
   private readonly subscribers = new Set<() => void>();
   /** Callback returning the currently enabled feeds — toggles are live. */
   private readonly activeFeeds: () => readonly RssFeed[];
   private readonly walkerOpts: FeedWalkerOptions;
+  private readonly walkerFactory: EventWalkerFactory;
+  private readonly onDebug: (message: string) => void;
+  private readonly onError: (message: string, error: unknown) => void;
+  private generation = 0;
 
-  constructor(walkerOpts: FeedWalkerOptions = {}, activeFeeds: () => readonly RssFeed[]) {
+  constructor(
+    walkerOpts: FeedWalkerOptions = {},
+    activeFeeds: () => readonly RssFeed[],
+    walkerFactory: EventWalkerFactory = (feed, opts) => new FeedWalker(feed, opts),
+    diagnostics: EventBrokerDiagnostics = {},
+  ) {
     this.walkerOpts = walkerOpts;
     this.activeFeeds = activeFeeds;
+    this.walkerFactory = walkerFactory;
+    this.onDebug = diagnostics.onDebug ?? ((message) => console.debug(message));
+    this.onError = diagnostics.onError ?? ((message, error) => console.error(message, error));
   }
 
   /**
@@ -118,6 +142,15 @@ export class EventBroker {
     return () => this.subscribers.delete(fn);
   }
 
+  /** Clear event/page state and ignore callbacks from walks already in flight. */
+  clearCache(): void {
+    this.generation++;
+    this.events = [];
+    this.feedState.clear();
+    this.walkers.clear();
+    this.notify();
+  }
+
   /**
    * Decide whether `feed` is covered for `range.min`, and kick a walk if not.
    * Returns true if the feed is covered (or terminal — nothing more to fetch).
@@ -153,10 +186,10 @@ export class EventBroker {
   }
 
   /** Get or create the walker for a feed. */
-  private walkerOf(feed: RssFeed): FeedWalker {
+  private walkerOf(feed: RssFeed): EventWalker {
     let w = this.walkers.get(feed.id);
     if (w === undefined) {
-      w = new FeedWalker(feed, this.walkerOpts);
+      w = this.walkerFactory(feed, this.walkerOpts);
       this.walkers.set(feed.id, w);
     }
     return w;
@@ -174,29 +207,32 @@ export class EventBroker {
 
     this.feedState.set(feed.id, { kind: "fetching" });
     const walker = this.walkerOf(feed);
+    const generation = this.generation;
 
     try {
       const outcome = await walker.walk(targetMin, (pageEvents) => {
+        if (generation !== this.generation) return;
         this.merge(pageEvents);
         // Update oldestT from the store — the source of truth. We need the
         // current state's oldestT to compare, so recompute from the merged
         // store for this feed.
         this.updateOldestT(feed.id);
       });
+      if (generation !== this.generation) return;
 
       // Transition based on outcome. Read current oldestT from the store.
       const oldestT = this.oldestTForFeed(feed.id);
       switch (outcome) {
         case "exhausted":
           this.feedState.set(feed.id, { kind: "exhausted", oldestT });
-          console.debug(`Feed exhausted: ${feed.source}`);
+          this.onDebug(`Feed exhausted: ${feed.source}`);
           break;
         case "failed":
           this.feedState.set(feed.id, {
             kind: "failed",
             reason: walker.failureReason ?? "unknown",
           });
-          console.debug(`Feed failed: ${feed.source}`);
+          this.onDebug(`Feed failed: ${feed.source}`);
           break;
         case "backoff": {
           const delay = Math.min(BACKOFF_BASE_MS * 2 ** attempt, BACKOFF_CAP_MS);
@@ -206,15 +242,16 @@ export class EventBroker {
             nextAttemptAt: Date.now() + delay,
             attempt: attempt + 1,
           });
-          console.debug(`Backing off for ${feed.source}: delay=${delay}ms`);
+          this.onDebug(`Backing off for ${feed.source}: delay=${delay}ms`);
           break;
         }
       }
       this.notify();
     } catch (err) {
+      if (generation !== this.generation) return;
       // Should not happen — the walker catches and classifies its own errors.
       // If it does, treat as backoff so we retry rather than silently dying.
-      console.error(`[EventBroker] unexpected walk failure for ${feed.source}:`, err);
+      this.onError(`[EventBroker] unexpected walk failure for ${feed.source}`, err);
       const delay = Math.min(BACKOFF_BASE_MS * 2 ** attempt, BACKOFF_CAP_MS);
       this.feedState.set(feed.id, {
         kind: "backoff",

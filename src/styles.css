@@ -36,6 +36,7 @@ body {
 .header {
   display: flex;
   align-items: baseline;
+  flex-wrap: wrap;
   gap: 16px;
 }
 
@@ -57,7 +58,8 @@ body {
 }
 
 .palette,
-.wavelet-mode {
+.wavelet-mode,
+.market-source {
   background: transparent;
   border: 1px solid #2a2f3a;
   color: var(--fg);
@@ -67,12 +69,15 @@ body {
   font-size: 12px;
 }
 .palette:hover,
-.wavelet-mode:hover {
+.wavelet-mode:hover,
+.market-source:hover {
   border-color: var(--accent);
   color: var(--accent);
 }
 
-.reload {
+.reload,
+.chart-add,
+.chart-remove {
   margin-left: 8px;
   background: transparent;
   border: 1px solid #2a2f3a;
@@ -82,13 +87,14 @@ body {
   cursor: pointer;
   font-size: 12px;
 }
-.reload:hover {
+.reload:hover,
+.chart-add:hover,
+.chart-remove:hover {
   border-color: var(--accent);
   color: var(--accent);
 }
 
 .feed-input {
-  margin-left: auto;
   width: 260px;
   background: transparent;
   border: 1px solid #2a2f3a;
@@ -96,6 +102,48 @@ body {
   padding: 6px 10px;
   border-radius: 6px;
   font-size: 12px;
+}
+
+.market-controls,
+.feed-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.market-controls::before {
+  content: "Charts";
+  color: var(--muted);
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.feed-controls::before {
+  content: "News";
+  color: var(--muted);
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.market-symbol {
+  width: 180px;
+  background: transparent;
+  border: 1px solid #2a2f3a;
+  color: var(--fg);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+  text-transform: uppercase;
+}
+
+.market-symbol:focus {
+  outline: none;
+  border-color: var(--accent);
 }
 .feed-input:focus {
   outline: none;
@@ -123,6 +171,40 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.active-charts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 24px;
+}
+
+.chart-chip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 4px 3px 9px;
+  border: 1px solid #252b38;
+  border-radius: 999px;
+  background: rgba(124, 196, 255, 0.06);
+  color: #cbd5e1;
+  font:
+    11px ui-monospace,
+    monospace;
+}
+
+.chart-chip .chart-remove {
+  margin: 0;
+  padding: 0 5px 1px;
+  border: 0;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+}
+
+.chart-chip .chart-remove:hover {
+  color: var(--error);
 }
 .feed-row {
   display: flex;

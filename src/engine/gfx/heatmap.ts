@@ -1,5 +1,5 @@
 import type { Frame } from "./context.ts";
-import { heatTopY, MIN_SIGMA, maxSigmaFor } from "./layout.ts";
+import { MIN_SIGMA, maxSigmaFor } from "./layout.ts";
 import { rampLut, rampIndex, rampPaletteName } from "../ramp.ts";
 import { computeWaveletField, logPriceEdgesToReturns, type WaveletMode } from "../wavelet.ts";
 
@@ -24,9 +24,10 @@ export interface HeatmapLayer {
     padded: PaddedEval,
     priceScale: number,
     mode: WaveletMode,
+    y: number,
     heatHeight: number,
   ): void;
-  drawFadeOverlay(heatHeight: number): void;
+  drawFadeOverlay(y: number, heatHeight: number): void;
 }
 
 interface HeatmapResources {
@@ -40,11 +41,11 @@ interface HeatmapResources {
 
 // Frame/L2 wrappers are short-lived, but the expensive canvas and typed-array
 // resources are persistent per rendering context.
-const RESOURCE_BY_CONTEXT = new WeakMap<CanvasRenderingContext2D, HeatmapResources>();
+const RESOURCE_BY_CONTEXT = new WeakMap<CanvasRenderingContext2D, Map<string, HeatmapResources>>();
 
 export const Heatmap = {
-  create(frame: Frame): HeatmapLayer {
-    return new HeatmapImpl(frame, resourcesFor(frame.ctx));
+  create(frame: Frame, rowId: string): HeatmapLayer {
+    return new HeatmapImpl(frame, resourcesFor(frame.ctx, rowId));
   },
 };
 
@@ -58,11 +59,11 @@ class HeatmapImpl implements HeatmapLayer {
     padded: PaddedEval,
     priceScale: number,
     mode: WaveletMode,
+    y: number,
     heatHeight: number,
   ): void {
     const { tx, ctx, dpr } = this.frame;
     const width = tx.screenDomain.max - tx.screenDomain.min;
-    const height = tx.yDomain.max - tx.yDomain.min;
     const numPx = Math.ceil(width * dpr);
     // One independently evaluated scale per visible CSS row. Using device
     // rows would duplicate work on HiDPI screens without a perceptible gain;
@@ -105,13 +106,7 @@ class HeatmapImpl implements HeatmapLayer {
       bandCount,
     ].join("|");
     if (resources.lastRenderKey === renderKey) {
-      ctx.drawImage(
-        resources.offscreen,
-        tx.screenDomain.min,
-        heatTopY(height, heatHeight),
-        width,
-        heatHeight,
-      );
+      ctx.drawImage(resources.offscreen, tx.screenDomain.min, y, width, heatHeight);
       return;
     }
     resources.returns = logPriceEdgesToReturns(value, resources.returns);
@@ -154,20 +149,12 @@ class HeatmapImpl implements HeatmapLayer {
 
     resources.offCtx.putImageData(image, 0, 0);
     resources.lastRenderKey = renderKey;
-    ctx.drawImage(
-      resources.offscreen,
-      tx.screenDomain.min,
-      heatTopY(height, heatHeight),
-      width,
-      heatHeight,
-    );
+    ctx.drawImage(resources.offscreen, tx.screenDomain.min, y, width, heatHeight);
   }
 
-  drawFadeOverlay(heatHeight: number): void {
+  drawFadeOverlay(y: number, heatHeight: number): void {
     const { tx, ctx } = this.frame;
     const width = tx.screenDomain.max - tx.screenDomain.min;
-    const height = tx.yDomain.max - tx.yDomain.min;
-    const y = heatTopY(height, heatHeight);
     const grad = ctx.createLinearGradient(0, y, 0, y + heatHeight);
     grad.addColorStop(0, "rgba(0, 0, 0, 0)");
     grad.addColorStop(1, "rgba(0, 0, 0, 0.55)");
@@ -176,8 +163,13 @@ class HeatmapImpl implements HeatmapLayer {
   }
 }
 
-function resourcesFor(ctx: CanvasRenderingContext2D): HeatmapResources {
-  let resources = RESOURCE_BY_CONTEXT.get(ctx);
+function resourcesFor(ctx: CanvasRenderingContext2D, rowId: string): HeatmapResources {
+  let byRow = RESOURCE_BY_CONTEXT.get(ctx);
+  if (byRow === undefined) {
+    byRow = new Map();
+    RESOURCE_BY_CONTEXT.set(ctx, byRow);
+  }
+  let resources = byRow.get(rowId);
   if (resources !== undefined) return resources;
   const offscreen = new OffscreenCanvas(1, 1);
   const offCtx = offscreen.getContext("2d", { willReadFrequently: true });
@@ -190,7 +182,7 @@ function resourcesFor(ctx: CanvasRenderingContext2D): HeatmapResources {
     imageData: null,
     lastRenderKey: null,
   };
-  RESOURCE_BY_CONTEXT.set(ctx, resources);
+  byRow.set(rowId, resources);
   return resources;
 }
 

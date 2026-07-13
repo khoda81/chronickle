@@ -146,8 +146,8 @@ export class Frame implements Disposable {
 
   // --- L2: domain layers (constructed per call, stateless) ----------------
 
-  heatmap(): HeatmapLayer {
-    return Heatmap.create(this);
+  heatmap(rowId: string): HeatmapLayer {
+    return Heatmap.create(this, rowId);
   }
 
   events(): EventLayer {
@@ -163,8 +163,8 @@ export class Frame implements Disposable {
   }
 
   /** Draw the time axis with an explicit minimum tick spacing (CSS px). */
-  drawTimeAxis(heatHeight: number, minTickPx?: number): void {
-    this.axis().drawTimeAxis(heatHeight, minTickPx);
+  drawTimeAxis(y: number, minTickPx?: number): void {
+    this.axis().drawTimeAxis(y, minTickPx);
   }
 
   // --- lifecycle ---------------------------------------------------------

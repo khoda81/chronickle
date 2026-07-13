@@ -1,11 +1,14 @@
-import { PriceSeries } from "../src/domain.ts";
+import { PriceSeries, type NewsEvent, type RssFeed } from "../src/domain.ts";
+import { EventBroker } from "../src/data/events/broker.ts";
 import { Broker } from "../src/data/price/broker.ts";
 import { CoverageIndex } from "../src/data/price/coverage.ts";
+import { createBinanceFetcher } from "../src/data/price/exchanges/binanceFetcher.ts";
 import type { Fetcher, FetchRangeResult } from "../src/data/price/fetcher.ts";
 import { ReturnPyramid } from "../src/data/price/returnPyramid.ts";
 import { ChunkedLevelStore } from "../src/data/price/store.ts";
 import { evaluateStaircase } from "../src/data/price/staircase.ts";
 import { Range } from "../src/engine/range.ts";
+import { fitStackLayout } from "../src/engine/gfx/layout.ts";
 import {
   computeCenteredGaussianReference,
   computeWaveletField,
@@ -49,6 +52,21 @@ test("PriceSeries validates and collapses duplicate timestamps", () => {
     threw = true;
   }
   assert(threw, "non-positive price was accepted");
+});
+
+test("stack layout fills the canvas and preserves every resizable row", () => {
+  const layout = fitStackLayout(110, [220, 180, 140], 800);
+  const used = layout.newsHeight + layout.rowHeights.reduce((sum, height) => sum + height, 0);
+  approx(used, 800, 1e-9);
+  assert(layout.rowHeights.length === 3, "a price row disappeared");
+  assert(layout.newsHeight >= 64, "news row fell below its preferred minimum");
+  assert(layout.rowHeights.every((height) => height >= 130), "price row fell below minimum");
+
+  const compact = fitStackLayout(110, [220, 180, 140], 240);
+  const compactUsed =
+    compact.newsHeight + compact.rowHeights.reduce((sum, height) => sum + height, 0);
+  approx(compactUsed, 240, 1e-9);
+  assert(compact.rowHeights.every((height) => height > 0), "compact row collapsed");
 });
 
 test("staircase returns NaN when empty and holds the final observation", () => {
@@ -351,6 +369,115 @@ test("a late coarse response cannot overwrite an earlier fine response", async (
 
   const result = broker.query({ evalTime, maxDeltaTMs: 1_000 });
   approx(Math.exp(result.value[1]!), 101, 1e-10);
+});
+
+test("clearing the price cache ignores stale in-flight responses", async () => {
+  const resolvers: ((result: FetchRangeResult) => void)[] = [];
+  const fetcher: Fetcher = {
+    fetchRange() {
+      return new Promise((resolve) => resolvers.push(resolve));
+    },
+  };
+  const broker = new Broker(fetcher, { now: () => 1_000 });
+  const evalTime = new Float64Array([0, 1_000]);
+  broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  broker.clearCache();
+  broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  assert(resolvers.length === 2, "reload did not start a fresh request generation");
+
+  resolvers[0]!({
+    points: [
+      { t: 0, price: 10 },
+      { t: 1_000, price: 11 },
+    ],
+    searchedRange: Range.create(0, 1_000),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const beforeFresh = broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  assert(beforeFresh.value.every(Number.isNaN), "stale response repopulated the cleared cache");
+
+  resolvers[1]!({
+    points: [
+      { t: 0, price: 100 },
+      { t: 1_000, price: 101 },
+    ],
+    searchedRange: Range.create(0, 1_000),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const fresh = broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  approx(Math.exp(fresh.value[0]!), 100, 1e-10);
+});
+
+test("clearing the event cache ignores stale walker callbacks", async () => {
+  const feed: RssFeed = {
+    id: "test",
+    source: "Test feed",
+    url: "https://example.com/feed.xml",
+    color: "red",
+    enabled: true,
+  };
+  const runs: {
+    readonly emit: (events: readonly NewsEvent[]) => void;
+    readonly resolve: (outcome: "exhausted") => void;
+  }[] = [];
+  const broker = new EventBroker(
+    {},
+    () => [feed],
+    () => ({
+      failureReason: null,
+      walk(_targetMin, onEvents) {
+        return new Promise((resolve) => runs.push({ emit: onEvents, resolve }));
+      },
+    }),
+    { onDebug: () => undefined },
+  );
+  const range = Range.create(0, 1_000);
+  broker.query(range);
+  broker.clearCache();
+  broker.query(range);
+  assert(runs.length === 2, "event reload did not start a fresh walker generation");
+
+  runs[0]!.emit([{ t: 400, title: "stale", link: "old", summary: "", feedId: feed.id }]);
+  runs[0]!.resolve("exhausted");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  runs[1]!.emit([{ t: 500, title: "fresh", link: "new", summary: "", feedId: feed.id }]);
+  runs[1]!.resolve("exhausted");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const result = broker.query(range);
+  assert(
+    result.events.length === 1 && result.events[0]!.title === "fresh",
+    "stale events survived",
+  );
+});
+
+test("Binance adapter maps arbitrary symbols and range resolution", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = "";
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    requestedUrl = input instanceof Request ? input.url : input.toString();
+    return new Response(
+      JSON.stringify([
+        [0, "100"],
+        [3_600_000, "101"],
+      ]),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+  try {
+    const fetcher = createBinanceFetcher({ symbol: "ethusdt" });
+    const result = await fetcher.fetchRange({
+      range: Range.create(0, 7_200_000),
+      maxDeltaTMs: 3_600_000,
+    });
+    const url = new URL(requestedUrl);
+    assert(url.searchParams.get("symbol") === "ETHUSDT", "symbol was not normalized");
+    assert(url.searchParams.get("interval") === "1h", "wrong Binance interval");
+    assert(result.resolutionHintMs === 3_600_000, "wrong returned resolution hint");
+    assert(result.points.length === 2, "Binance rows were not converted");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("broker exposes failures and uses the fetcher's retry policy", async () => {

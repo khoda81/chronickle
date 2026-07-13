@@ -20,8 +20,17 @@
  */
 
 import type { Frame } from "./context.ts";
-import { axisY } from "./layout.ts";
-import { timeTicks, timeTickInterval, type TimeInterval } from "d3-time";
+import {
+  timeTicks,
+  timeTickInterval,
+  timeSecond,
+  timeMinute,
+  timeHour,
+  timeDay,
+  timeMonth,
+  timeYear,
+  type TimeInterval,
+} from "d3-time";
 
 const TICK_COLOR = "#2a2f3a";
 const LABEL_COLOR = "#6b7280";
@@ -78,7 +87,7 @@ function formatTick(t: number, interval: TimeInterval | null): string {
 }
 
 export interface AxisLayer {
-  drawTimeAxis(heatHeight: number, minTickPx?: number): void;
+  drawTimeAxis(y: number, minTickPx?: number): void;
 }
 
 export const Axis = {
@@ -90,14 +99,12 @@ export const Axis = {
 class AxisImpl implements AxisLayer {
   constructor(private readonly frame: Frame) {}
 
-  drawTimeAxis(heatHeight: number, minTickPx: number = DEFAULT_MIN_TICK_PX): void {
+  drawTimeAxis(y: number, minTickPx: number = DEFAULT_MIN_TICK_PX): void {
     if (!(minTickPx > 0)) {
       throw new Error(`minTickPx must be positive, got ${minTickPx}`);
     }
     const { frame } = this;
     const { tx } = frame;
-    const height = tx.yDomain.max - tx.yDomain.min;
-    const y = axisY(height, heatHeight);
     const { min: tLo, max: tHi } = tx.timeDomain;
     const screenSpan = tx.screenDomain.max - tx.screenDomain.min;
     if (!(screenSpan > 0)) return;

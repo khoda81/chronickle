@@ -1,6 +1,6 @@
 import type { ResolutionSegment } from "../../data/price/coverage.ts";
 import type { Frame } from "./context.ts";
-import { RESOLUTION_BAR_HEIGHT, resolutionBarY } from "./layout.ts";
+import { RESOLUTION_BAR_HEIGHT } from "./layout.ts";
 
 const COLORS = {
   ready: "rgba(45, 212, 191, 0.82)",
@@ -17,7 +17,7 @@ const LABEL_COLORS = {
 } as const;
 
 export interface ResolutionLayer {
-  draw(segments: readonly ResolutionSegment[], targetResolutionMs: number): void;
+  draw(segments: readonly ResolutionSegment[], targetResolutionMs: number, y: number): void;
 }
 
 export const Resolution = {
@@ -29,9 +29,8 @@ export const Resolution = {
 class ResolutionImpl implements ResolutionLayer {
   constructor(private readonly frame: Frame) {}
 
-  draw(segments: readonly ResolutionSegment[], targetResolutionMs: number): void {
+  draw(segments: readonly ResolutionSegment[], targetResolutionMs: number, y: number): void {
     const { frame } = this;
-    const y = resolutionBarY(frame.height);
     frame.fillRectPx(0, y, frame.width, RESOLUTION_BAR_HEIGHT, "#0a0e17");
 
     // Finer samples are taller. The broker orders coarse before fine, so finer

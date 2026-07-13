@@ -25,6 +25,11 @@ export interface UiState {
   readonly palette?: string;
   /** Centered historical view or time-causal available-at-time view. */
   readonly waveletMode?: "centered" | "causal";
+  /** Price charts restored on the next visit. */
+  readonly charts?: readonly {
+    readonly sourceId: string;
+    readonly symbol: string;
+  }[];
 }
 
 let saveTimer: number | null = null;
@@ -56,7 +61,7 @@ export function saveUiState(state: UiState): void {
   pending = { ...pending, ...state };
   if (saveTimer !== null) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    localStorage.setItem(KEY, JSON.stringify(pending));
+    localStorage.setItem(KEY, JSON.stringify({ ...loadUiState(), ...pending }));
     pending = {};
     saveTimer = null;
   }, DEBOUNCE_MS) as unknown as number;
@@ -71,7 +76,7 @@ export function flushUiState(state: UiState): void {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
-  const merged = { ...pending, ...state };
+  const merged = { ...loadUiState(), ...pending, ...state };
   pending = {};
   localStorage.setItem(KEY, JSON.stringify(merged));
 }

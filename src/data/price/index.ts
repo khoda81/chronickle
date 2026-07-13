@@ -5,4 +5,5 @@ export * from "./staircase.ts";
 export * from "./resolution.ts";
 export * from "./coverage.ts";
 export * from "./returnPyramid.ts";
+export * from "./markets.ts";
 export * from "./exchanges/index.ts";

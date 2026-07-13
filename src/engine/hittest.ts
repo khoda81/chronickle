@@ -12,7 +12,6 @@
 
 import type { EventSet } from "../domain.ts";
 import type { DataTransform } from "./transform.ts";
-import { eventRowY } from "./gfx/layout.ts";
 
 /**
  * Find the index of the nearest event under pixel (px, py), or null if none
@@ -23,12 +22,10 @@ export function hitTestEvent(
   tx: DataTransform,
   px: number,
   py: number,
-  heatHeight: number,
+  eventY: number,
   radius = 10,
 ): number | null {
-  const height = tx.yDomain.max - tx.yDomain.min;
-  const baseY = eventRowY(height, heatHeight);
-  if (Math.abs(py - baseY) > radius) return null;
+  if (Math.abs(py - eventY) > radius) return null;
 
   const xs = events.events;
   if (xs.length === 0) return null;

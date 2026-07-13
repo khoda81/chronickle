@@ -1,158 +1,76 @@
-/**
- * Timeline controller.
- *
- * Owns the canvas, the render loop (requestAnimationFrame), and the input
- * handlers (pan via drag, zoom via wheel, hover/click on event nodes).
- *
- * State model (minimal mutation):
- *  - `timeRange`: the only mutable view state, replaced wholesale on pan/zoom.
- *  - `hovered`: event index under cursor, or null.
- *  - `series` / `events`: immutable data references, swapped by the app.
- *
- * The render loop runs continuously but only redraws when `dirty` is set,
- * avoiding wasted work when idle. Panning sets dirty every frame. Drawing is
- * driven through the `Plot`'s disposable `Frame` (immediate mode).
- *
- * DPR: the canvas backing store is resized to `cssSize * dpr` on resize, but
- * the DPR-scaled ctx transform is applied per-frame by `Frame` (not here), so
- * it can never be lost across nested save/restore.
- *
- * Wheel: `deltaY` is normalized to pixels across `deltaMode`s (pixels, lines,
- * pages) before being mapped to a zoom factor. Lines use the CSS line height.
- */
+/** One shared, vertically-resizable news and market timeline. */
 
 import type { EventSet, NewsEvent } from "../domain.ts";
+import type { EventQueryResult } from "../data/events/broker.ts";
+import type { QueryResult } from "../data/price/broker.ts";
 import { Range } from "./range.ts";
 import { DataTransform } from "./transform.ts";
 import { Plot } from "./plot.ts";
 import { hitTestEvent } from "./hittest.ts";
 import { setRampPalette, type PaletteName } from "./ramp.ts";
-import {
-  clampHeatHeight,
-  DEFAULT_HEAT_HEIGHT,
-  heatTopY,
-  RESIZE_HANDLE_RADIUS,
-  resolutionBarY,
-  maxSigmaFor,
-} from "./gfx/layout.ts";
 import { kernelContext, type WaveletMode } from "./wavelet.ts";
 import { DEFAULT_MIN_TICK_PX } from "./gfx/axis.ts";
 import type { Frame } from "./gfx/context.ts";
-import type { QueryResult } from "../data/price/broker.ts";
-import type { EventQueryResult } from "../data/events/broker.ts";
+import {
+  DEFAULT_NEWS_HEIGHT,
+  fitStackLayout,
+  MIN_NEWS_HEIGHT,
+  MIN_PRICE_ROW_HEIGHT,
+  RESIZE_HANDLE_RADIUS,
+  RESOLUTION_BAR_HEIGHT,
+  maxSigmaFor,
+} from "./gfx/layout.ts";
 
-/**
- * Synchronous data source the timeline queries every frame.
- *
- * The timeline computes W+1 pixel-boundary timestamps from its current
- * transform and calls `dataSource(evalTime, maxDeltaTMs)`. The source (a
- * `Broker` closure) returns staircase values at those timestamps from its
- * cache, and may trigger an async fetch if coverage is incomplete — which
- * fires the broker's subscribers, which call `timeline.reqDraw()`.
- *
- * The timeline never stores the series; it pulls fresh every frame. There
- * is no draw without querying the source.
- */
 export type DataSource = (evalTime: Float64Array, maxDeltaTMs: number) => QueryResult;
-
-/**
- * Synchronous event source the timeline queries on viewport changes.
- *
- * Returns the cached events in `range` (a snapshot, sorted ascending by t)
- * and a status hint. The source (an `EventBroker` closure) may trigger an
- * async backfill for unfilled sub-ranges; its subscribers should call
- * `timeline.refreshEvents()` when new data lands so the visible slice is
- * re-pulled.
- */
 export type EventSource = (range: Range) => EventQueryResult;
+
+export interface PriceRow {
+  readonly id: string;
+  readonly label: string;
+  readonly dataSource: DataSource;
+}
 
 export interface HoverInfo {
   readonly index: number;
   readonly title: string;
   readonly link: string;
-  /** Stable feed id; the caller resolves it to a display name + color. */
   readonly feedId: string;
-  /** Plain-text summary for tooltip enrichment. May be empty. */
   readonly summary: string;
   readonly t: number;
-  /** Cursor x in canvas-relative CSS pixels. */
   readonly px: number;
-  /** Cursor y in canvas-relative CSS pixels. */
   readonly py: number;
 }
 
 export interface TimelineCallbacks {
-  /** Called when the user hovers an event (or leaves it). */
   onHover?: (event: HoverInfo | null) => void;
-  /**
-   * Called when the viewport (time range) or priceScale changes via user
-   * interaction (pan/zoom/shift+wheel) or programmatic setTimeRange. The
-   * caller uses this to persist UI state. Fired synchronously on change.
-   */
   onViewportChange?: (viewport: { min: number; max: number }, priceScale: number) => void;
 }
 
 export interface TimelineOptions {
   readonly canvas: HTMLCanvasElement;
   readonly initialTimeRange: Range;
-  readonly callbacks?: TimelineCallbacks;
-  /**
-   /** Synchronous data source queried every frame. Required — the timeline
-    * no longer stores a series; it pulls from this callback each draw.
-    */
-  readonly dataSource: DataSource;
-  /**
-   * Synchronous event source queried on viewport changes. Returns the
-   * cached events in the visible range and may trigger async backfill.
-   * Required — the timeline no longer stores events directly; it pulls
-   * them from this callback whenever the viewport moves.
-   */
+  readonly priceRows?: readonly PriceRow[];
   readonly eventSource: EventSource;
-  /**
-   * Resolves a feed id to its color string (oklch or otherwise) for the
-   * event renderer. Required — the renderer is pure and does not own the
-   * FeedRegistry, so the caller injects the lookup.
-   */
   readonly feedColorOf: (feedId: string) => string;
-  /** Tunable parameters. Defaults to `DEFAULT_TIMELINE_CONFIG`. */
+  readonly callbacks?: TimelineCallbacks;
   readonly config?: Partial<TimelineConfig>;
 }
 
-/**
- * Render-only parameters that are not view state: they don't change with
- * pan/zoom/hover, so they live on the Timeline rather than TimelineState.
- * `priceScale` is the one exception — it's user-adjustable (shift+wheel) and
- * read in the draw path, so it stays on TimelineState as a render parameter.
- */
 interface TimelineState {
   events: EventSet;
   timeRange: Range;
-  /** Heatmap vertical scale; adjusted via shift+wheel. Render parameter. */
   priceScale: number;
   waveletMode: WaveletMode;
-  /** User-resizable wavelet height in CSS pixels. */
-  heatHeight: number;
   hovered: number | null;
+  newsHeight: number;
 }
 
-const EMPTY_EVENTS: EventSet = { events: [] };
-
-/**
- * Tunable timeline parameters. Grouped so they're passed as one value and
- * overridable per-instance instead of scattered as module globals.
- */
 export interface TimelineConfig {
-  /** CSS line height used to normalize wheel `deltaMode: 1` (lines). */
   readonly wheelLineHeight: number;
-  /** Zoom sensitivity per normalized pixel of wheel delta. */
   readonly wheelSensitivity: number;
-  /** Time scroll sensitivity per normalized pixel of horizontal wheel delta. */
   readonly timeScrollSensitivity: number;
-  /** "Now" marker line width (CSS px). */
   readonly nowWidth: number;
-  /** "Now" marker stroke color. */
   readonly nowStroke: string;
-  /** Minimum on-screen spacing between axis ticks (CSS px). */
   readonly minTickPx: number;
 }
 
@@ -161,73 +79,58 @@ export const DEFAULT_TIMELINE_CONFIG: TimelineConfig = {
   wheelSensitivity: 0.003,
   timeScrollSensitivity: 3,
   nowWidth: 2,
-  // TODO: This should go to a theme object
   nowStroke: "rgba(255, 255, 255, 0.55)",
   minTickPx: DEFAULT_MIN_TICK_PX,
 };
+
+const EMPTY_EVENTS: EventSet = { events: [] };
 
 export class Timeline {
   private readonly canvas: HTMLCanvasElement;
   private readonly plot: Plot;
   private readonly callbacks: TimelineCallbacks;
-  private readonly dataSource: DataSource;
   private readonly eventSource: EventSource;
   private readonly feedColorOf: (feedId: string) => string;
   private readonly config: TimelineConfig;
+  private priceRows: readonly PriceRow[];
+  private rowHeights: number[];
   private rafId: number | null = null;
+  private resizeObserver: ResizeObserver | null = null;
   private state: TimelineState;
-
-  // Pan scratch (no allocation in handlers).
   private dragging = false;
-  private resizingHeat = false;
+  private resizingBoundary: number | null = null;
   private lastX = 0;
-
-  // Reusable eval-time buffer, grown as needed. Avoids per-frame allocation
-  // in the render loop (AGENTS.md §5). Covers the visible width plus padding
-  // on both sides so off-screen jumps near the edges still contribute to the
-  // wavelet response on screen.
-  private evalTime: Float64Array = new Float64Array(0);
-
-  // "Now" marker timer. Armed by `drawNow` to fire at a fixed cadence
-  // (timePerPx / SMOOTHING_FACTOR) so the line appears to move smoothly
-  // without a 60fps timer. The line is recomputed from Date.now() on each
-  // tick, so no phase-locking is needed. Cleared on dispose and re-armed
-  // every draw.
+  private lastY = 0;
+  private evalTime = new Float64Array(0);
   private nowTimer: number | null = null;
 
   constructor(opts: TimelineOptions) {
     this.canvas = opts.canvas;
-    this.dataSource = opts.dataSource;
     this.eventSource = opts.eventSource;
     this.feedColorOf = opts.feedColorOf;
-    this.config = { ...DEFAULT_TIMELINE_CONFIG, ...opts.config };
-    this.plot = new Plot({
-      canvas: opts.canvas,
-      initialTimeRange: opts.initialTimeRange,
-    });
     this.callbacks = opts.callbacks ?? {};
+    this.config = { ...DEFAULT_TIMELINE_CONFIG, ...opts.config };
+    this.priceRows = opts.priceRows ?? [];
+    this.rowHeights = this.priceRows.map(() => MIN_PRICE_ROW_HEIGHT);
+    this.plot = new Plot({ canvas: opts.canvas, initialTimeRange: opts.initialTimeRange });
     this.state = {
       events: EMPTY_EVENTS,
       timeRange: opts.initialTimeRange,
       priceScale: 22,
       waveletMode: "centered",
-      heatHeight: DEFAULT_HEAT_HEIGHT,
       hovered: null,
+      newsHeight: DEFAULT_NEWS_HEIGHT,
     };
 
     this.bindEvents();
+    if (typeof ResizeObserver !== "undefined") {
+      this.resizeObserver = new ResizeObserver(() => this.resize());
+      this.resizeObserver.observe(this.canvas);
+    }
     this.resize();
-    // Kick the first frame; the draw path queries eventSource and populates
-    // state.events. Subsequent draws are on-demand via reqDraw.
     this.reqDraw();
   }
 
-  /**
-   * Request a redraw on the next animation frame. Coalesces multiple calls
-   * within the same frame into one rAF: state mutations happen synchronously,
-   * and the callback reads the latest state at draw time, so ignored calls
-   * still get their mutations painted by the one scheduled frame.
-   */
   reqDraw(): void {
     if (this.rafId !== null) return;
     this.rafId = requestAnimationFrame(() => {
@@ -236,48 +139,51 @@ export class Timeline {
     });
   }
 
-  /**
-   * Re-pull the visible event slice from the event source for the current
-   * viewport. Called by the EventBroker subscriber when new events land, so
-   * the next frame reflects the updated cache. The per-frame `draw` also
-   * queries eventSource directly, so this is only needed to force an
-   * immediate redraw outside the normal rAF cadence (e.g. after a feed
-   * toggle).
-   */
+  setPriceRows(rows: readonly PriceRow[]): void {
+    const hadPriceRows = this.priceRows.length > 0;
+    const oldHeight = new Map(
+      this.priceRows.map((row, index) => [row.id, this.rowHeights[index]!]),
+    );
+    const fallback =
+      this.rowHeights.length > 0
+        ? this.rowHeights.reduce((sum, height) => sum + height, 0) / this.rowHeights.length
+        : MIN_PRICE_ROW_HEIGHT;
+    this.priceRows = [...rows];
+    this.rowHeights = rows.map((row) => oldHeight.get(row.id) ?? fallback);
+    if (!hadPriceRows && rows.length > 0) this.state.newsHeight = DEFAULT_NEWS_HEIGHT;
+    this.fitLayout();
+    this.state.hovered = null;
+    this.reqDraw();
+  }
+
   refreshEvents(): void {
     const { events } = this.eventSource(this.state.timeRange);
     this.state.events = { events };
-    // Hovered index may now be stale (the slice changed); clear it so we
-    // don't highlight a wrong index. The next pointermove re-hit-tests.
     this.state.hovered = null;
+    this.reqDraw();
   }
 
-  /** Replace the visible time range (e.g. fit-to-data). Triggers a redraw. */
-  setTimeRange(r: Range): void {
-    this.state.timeRange = r;
-    this.plot.setTimeRange(r);
+  setTimeRange(range: Range): void {
+    this.state.timeRange = range;
+    this.plot.setTimeRange(range);
     this.notifyViewportChange();
     this.reqDraw();
   }
 
-  /** Current visible time range. */
   getTimeRange(): Range {
     return this.state.timeRange;
   }
 
-  /** Set the heatmap vertical scale (shift+wheel). Triggers a redraw. */
   setPriceScale(scale: number): void {
     this.state.priceScale = scale;
     this.notifyViewportChange();
     this.reqDraw();
   }
 
-  /** Current priceScale (heatmap vertical zoom). */
   getPriceScale(): number {
     return this.state.priceScale;
   }
 
-  /** Switch between the centered historical and time-causal growth views. */
   setWaveletMode(mode: WaveletMode): void {
     this.state.waveletMode = mode;
     this.reqDraw();
@@ -287,28 +193,25 @@ export class Timeline {
     return this.state.waveletMode;
   }
 
-  /** Switch the heatmap color palette by name. Triggers a redraw. */
   setPalette(name: PaletteName): void {
     setRampPalette(name);
     this.reqDraw();
   }
 
-  /** Stop the render loop and detach listeners. */
   dispose(): void {
     if (this.rafId !== null) cancelAnimationFrame(this.rafId);
     if (this.nowTimer !== null) clearTimeout(this.nowTimer);
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
     this.unbindEvents();
   }
 
-  /** Fire onViewportChange if subscribed. Called after any viewport/priceScale mutation. */
   private notifyViewportChange(): void {
     this.callbacks.onViewportChange?.(
       { min: this.state.timeRange.min, max: this.state.timeRange.max },
       this.state.priceScale,
     );
   }
-
-  // --- internals ---
 
   private bindEvents(): void {
     this.canvas.addEventListener("pointerdown", this.onPointerDown);
@@ -336,222 +239,218 @@ export class Timeline {
     const rect = this.canvas.getBoundingClientRect();
     this.canvas.width = Math.floor(rect.width * dpr);
     this.canvas.height = Math.floor(rect.height * dpr);
-    this.state = {
-      ...this.state,
-      heatHeight: clampHeatHeight(this.state.heatHeight, this.plot.cssHeight),
-    };
-    // Note: no setTransform here — the Frame applies the DPR transform per
-    // draw, so it can never be lost across save/restore.
+    this.fitLayout();
     this.reqDraw();
+  }
+
+  private fitLayout(): void {
+    const fitted = fitStackLayout(this.state.newsHeight, this.rowHeights, this.plot.cssHeight);
+    this.state.newsHeight = fitted.newsHeight;
+    this.rowHeights = [...fitted.rowHeights];
   }
 
   private onResize = (): void => this.resize();
 
-  /**
-   * One-shot draw. Reads the current state and paints a single frame. Called
-   * only via `requestRender`, which coalesces multiple requests into one rAF.
-   * The loop does not self-reschedule; the "now" marker timer and input
-   * handlers re-arm it on demand.
-   */
   private draw = (): void => {
     using frame = this.plot.beginFrame();
-    const { hovered, priceScale, timeRange, waveletMode, heatHeight } = this.state;
     const { width, height, dpr } = frame;
-
-    // Background.
+    const { hovered, priceScale, timeRange, waveletMode } = this.state;
     frame.fillRectPx(0, 0, width, height, "#05070d");
 
-    // Number of device pixels
     const numPx = Math.ceil(width * dpr);
+    if (numPx <= 0) return;
     const maxSigma = maxSigmaFor(numPx);
-    // timePerPx in *device* pixels (maxSigma is in device pixels).
     const timePerPx = (timeRange.max - timeRange.min) / numPx;
-
-    // The transform consumes N cells and therefore N+1 ZOH evaluation edges.
-    // Padding is derived from actual kernel support. Centered Gaussian mode
-    // needs both sides; causal mode needs historical context only.
     const context = kernelContext(waveletMode, maxSigma);
     const padLeft = context.leftCells;
     const padRight = context.rightCells;
-    const cellCount = padLeft + numPx + padRight;
-    const edgeCount = cellCount + 1;
-
-    if (this.evalTime.length < edgeCount) {
-      this.evalTime = new Float64Array(edgeCount);
-    }
-    for (let i = 0; i < edgeCount; i++) {
-      this.evalTime[i] = timeRange.min + (i - padLeft) * timePerPx;
+    const edgeCount = padLeft + numPx + padRight + 1;
+    if (this.evalTime.length < edgeCount) this.evalTime = new Float64Array(edgeCount);
+    for (let index = 0; index < edgeCount; index++) {
+      this.evalTime[index] = timeRange.min + (index - padLeft) * timePerPx;
     }
     const evalView = this.evalTime.subarray(0, edgeCount) as Float64Array;
-    // maxDeltaTMs for the fetch: one sample per visible device pixel is the
-    // floor. The off-screen padding could be coarser (the kernel there is
-    // wide and smooth), but the broker dedups by range and the staircase
-    // evaluator handles any spacing, so using the visible step everywhere is
-    // correct and simple. A future optimization could query the off-screen
-    // region at a coarser maxDeltaTMs to reduce fetch/eval cost.
-    const result = this.dataSource(evalView, timePerPx);
 
-    // Layers.
-    const heat = frame.heatmap();
-    heat.drawWaveletField(
-      {
-        evalTime: evalView,
-        value: result.value,
-        padLeft,
-        padRight,
-        revision: result.revision,
-      },
-      priceScale,
-      waveletMode,
-      heatHeight,
-    );
-    // heat.drawFadeOverlay();
-    // Query the event source every frame, mirroring the price dataSource.
-    // The broker returns cached events synchronously and kicks async
-    // backfill per feed; its subscriber calls reqDraw() when data lands.
-    const eventResult = this.eventSource(this.state.timeRange);
+    const eventResult = this.eventSource(timeRange);
     this.state.events = { events: eventResult.events };
-    frame.events().drawRow(this.state.events, this.feedColorOf, hovered, heatHeight);
-    frame.drawTimeAxis(heatHeight, this.config.minTickPx);
-    frame.resolution().draw(result.resolution, result.targetResolutionMs);
+    const eventY = this.state.newsHeight / 2;
+    frame.text("NEWS", 8, 9, "10px ui-monospace, monospace", "#94a3b8", "left", "top");
+    frame.events().drawRow(this.state.events, this.feedColorOf, hovered, eventY);
 
-    // Visible resize affordance at the transform's upper edge.
-    const resizeY = heatTopY(height, heatHeight);
-    frame.fillRectPx(0, resizeY, width, 1, "rgba(255,255,255,0.18)");
-    frame.fillRectPx(width / 2 - 22, resizeY - 2, 44, 4, "rgba(203,213,225,0.7)");
+    let rowY = this.state.newsHeight;
+    for (let index = 0; index < this.priceRows.length; index++) {
+      const row = this.priceRows[index]!;
+      const rowHeight = this.rowHeights[index]!;
+      const heatHeight = Math.max(2, rowHeight - RESOLUTION_BAR_HEIGHT);
+      const result = row.dataSource(evalView, timePerPx);
+      frame.heatmap(row.id).drawWaveletField(
+        {
+          evalTime: evalView,
+          value: result.value,
+          padLeft,
+          padRight,
+          revision: result.revision,
+        },
+        priceScale,
+        waveletMode,
+        rowY,
+        heatHeight,
+      );
+      frame.resolution().draw(result.resolution, result.targetResolutionMs, rowY + heatHeight);
+      frame.fillRectPx(
+        5,
+        rowY + 5,
+        Math.min(width - 10, 12 + row.label.length * 7),
+        20,
+        "rgba(5,7,13,0.78)",
+      );
+      frame.text(
+        row.label,
+        11,
+        rowY + 15,
+        "11px ui-monospace, monospace",
+        "#f8fafc",
+        "left",
+        "middle",
+      );
+      rowY += rowHeight;
+      frame.fillRectPx(0, rowY - 1, width, 1, "rgba(255,255,255,0.18)");
+    }
 
-    // "Now" marker: a vertical line at the current wall-clock time. `drawNow`
-    // arms a timer at a fixed cadence (timePerPx / SMOOTHING_FACTOR) instead of
-    // running a 60fps timer. When zoomed out far enough that a pixel spans
-    // minutes or hours, the timer fires only every few minutes/hours. When
-    // `now` is off-screen, no timer is needed — panning/zooming back into view
-    // re-arms it via the redraw path.
+    // The only time axis lives on the news/price boundary.
+    frame.fillRectPx(0, this.state.newsHeight, width, 1, "rgba(255,255,255,0.3)");
+    frame.drawTimeAxis(this.state.newsHeight, this.config.minTickPx);
+    this.drawResizeHandles(frame);
     this.drawNow(frame, timePerPx);
   };
 
-  /**
-   * Draw the "now" vertical line and arm a timer for the next redraw.
-   *
-   * The line is drawn at `Date.now()` if it falls within the visible time
-   * range. We then schedule a `reqDraw` at a fixed cadence so the line appears
-   * to move smoothly without burning a per-frame timer. The timer is cleared
-   * and re-armed on every draw, so panning/zooming (which changes the
-   * time-per-pixel or moves `now` on/off screen) is handled naturally by the
-   * next frame.
-   *
-   * Cadence: `timePerPx` is the time span per device pixel (the draw loop
-   * computes it as span / ceil(width * dpr)). Visibility is defined in device
-   * pixels — the canvas rasterizes at device-px resolution, so the line's
-   * anti-aliasing changes when its device-px position crosses an integer. On
-   * a dpr=2 display, moving 1 CSS px moves the line 2 device px (clearly
-   * visible), so CSS px would skip real visible changes. We step
-   * SMOOTHING_FACTOR times per device pixel so the line glides instead of
-   * jumping (worst-case on 1x displays where 1 device px == 1 CSS px; harmless
-   * overkill on high-DPI). This is a taste/battery tradeoff, orthogonal to
-   * the device-px unit choice.
-   *
-   * No phase-locking is needed: the line is recomputed from `Date.now()` on
-   * every tick, so its position is always the true wall-clock position — there
-   * is no accumulated increment to drift. The timer just needs to fire often
-   * enough that the recomputed position doesn't jump more than
-   * 1/SMOOTHING_FACTOR of a device pixel between frames.
-   */
+  private drawResizeHandles(frame: Frame): void {
+    for (const y of this.boundaryYs()) {
+      frame.fillRectPx(frame.width / 2 - 20, y - 2, 40, 4, "rgba(203,213,225,0.62)");
+    }
+  }
+
+  private boundaryYs(): number[] {
+    if (this.priceRows.length === 0) return [];
+    const ys = [this.state.newsHeight];
+    let y = this.state.newsHeight;
+    for (let index = 0; index < this.rowHeights.length - 1; index++) {
+      y += this.rowHeights[index]!;
+      ys.push(y);
+    }
+    return ys;
+  }
+
+  private boundaryAt(y: number): number | null {
+    const ys = this.boundaryYs();
+    for (let index = 0; index < ys.length; index++) {
+      if (Math.abs(y - ys[index]!) <= RESIZE_HANDLE_RADIUS) return index;
+    }
+    return null;
+  }
+
+  private moveBoundary(boundary: number, delta: number): void {
+    if (this.rowHeights.length === 0 || delta === 0) return;
+    const total = this.plot.cssHeight;
+    const count = this.rowHeights.length;
+    const minNews = Math.min(MIN_NEWS_HEIGHT, total / (count + 1));
+    const minPrice = Math.min(MIN_PRICE_ROW_HEIGHT, (total - minNews) / count);
+    if (boundary === 0) {
+      const pair = this.state.newsHeight + this.rowHeights[0]!;
+      const newsHeight = Math.max(
+        minNews,
+        Math.min(pair - minPrice, this.state.newsHeight + delta),
+      );
+      this.rowHeights[0] = pair - newsHeight;
+      this.state.newsHeight = newsHeight;
+      return;
+    }
+    const left = boundary - 1;
+    const right = boundary;
+    const pair = this.rowHeights[left]! + this.rowHeights[right]!;
+    const leftHeight = Math.max(
+      minPrice,
+      Math.min(pair - minPrice, this.rowHeights[left]! + delta),
+    );
+    this.rowHeights[left] = leftHeight;
+    this.rowHeights[right] = pair - leftHeight;
+  }
+
   private drawNow(frame: Frame, timePerPx: number): void {
     if (this.nowTimer !== null) clearTimeout(this.nowTimer);
-
     this.nowTimer = null;
     const now = Date.now();
     const { timeRange } = this.state;
     if (now > timeRange.max) return;
-
-    // Position of now, in CSS pixels (timeToX maps to screenDomain = {0, width}).
-    const x = frame.tx.timeToX(now);
-    frame.vline(x, 0, frame.height, this.config.nowStroke, this.config.nowWidth);
-
-    const SMOOTHING_FACTOR = 10;
-    const tillNextChange = timePerPx / SMOOTHING_FACTOR;
-    // If `now` is before the visible window, wait for it to enter instead of
-    // firing immediately — panning/zooming will re-arm via the redraw path.
-    const timeToMin = timeRange.min - now;
-    const delayMs = Math.max(timeToMin, tillNextChange);
+    frame.vline(
+      frame.tx.timeToX(now),
+      0,
+      frame.height,
+      this.config.nowStroke,
+      this.config.nowWidth,
+    );
+    const delayMs = Math.max(timeRange.min - now, timePerPx / 10);
     this.nowTimer = setTimeout(() => {
       this.nowTimer = null;
       this.reqDraw();
     }, delayMs) as unknown as number;
   }
 
-  private onPointerDown = (e: PointerEvent): void => {
-    const localY = this.pointerY(e);
-    const resizeY = heatTopY(this.plot.cssHeight, this.state.heatHeight);
-    if (Math.abs(localY - resizeY) <= RESIZE_HANDLE_RADIUS) {
-      this.resizingHeat = true;
+  private onPointerDown = (event: PointerEvent): void => {
+    const boundary = this.boundaryAt(this.pointerY(event));
+    if (boundary !== null) {
+      this.resizingBoundary = boundary;
       this.dragging = false;
-      this.state = { ...this.state, hovered: null };
+      this.lastY = this.pointerY(event);
+      this.state.hovered = null;
       this.canvas.style.cursor = "ns-resize";
-      this.canvas.setPointerCapture?.(e.pointerId);
-      e.preventDefault();
+      this.canvas.setPointerCapture?.(event.pointerId);
+      event.preventDefault();
       return;
     }
     this.dragging = true;
-    this.lastX = e.clientX;
-    this.canvas.setPointerCapture?.(e.pointerId);
+    this.lastX = event.clientX;
+    this.canvas.setPointerCapture?.(event.pointerId);
   };
 
-  private onPointerMove = (e: PointerEvent): void => {
-    if (this.resizingHeat) {
-      const desired = resolutionBarY(this.plot.cssHeight) - this.pointerY(e);
-      const heatHeight = clampHeatHeight(desired, this.plot.cssHeight);
-      if (heatHeight !== this.state.heatHeight) {
-        this.state = { ...this.state, heatHeight };
-        this.reqDraw();
-      }
+  private onPointerMove = (event: PointerEvent): void => {
+    if (this.resizingBoundary !== null) {
+      const y = this.pointerY(event);
+      this.moveBoundary(this.resizingBoundary, y - this.lastY);
+      this.lastY = y;
+      this.reqDraw();
       return;
     }
     if (!this.dragging) return;
-    const dx = e.clientX - this.lastX;
-    this.lastX = e.clientX;
+    const dx = event.clientX - this.lastX;
+    this.lastX = event.clientX;
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width <= 0) return;
     const span = this.state.timeRange.max - this.state.timeRange.min;
-    // dx is in layout-rect space; use rect.width (not cssWidth) for the ratio
-    // so the pan speed matches the visible canvas exactly.
-    const dtMs = (dx / rect.width) * span;
-    this.setTimeRange(Range.pan(this.state.timeRange, -dtMs));
+    this.setTimeRange(Range.pan(this.state.timeRange, -(dx / rect.width) * span));
   };
 
-  private onPointerUp = (e: PointerEvent): void => {
+  private onPointerUp = (event: PointerEvent): void => {
     this.dragging = false;
-    this.resizingHeat = false;
-    this.canvas.releasePointerCapture?.(e.pointerId);
+    this.resizingBoundary = null;
+    this.canvas.releasePointerCapture?.(event.pointerId);
   };
 
-  private onWheel = (e: WheelEvent): void => {
-    e.preventDefault();
+  private onWheel = (event: WheelEvent): void => {
+    event.preventDefault();
     const rect = this.canvas.getBoundingClientRect();
     const cssWidth = this.plot.cssWidth;
     const cssHeight = this.plot.cssHeight;
     if (cssWidth <= 0 || rect.width <= 0) return;
-    // Scale pointer x into cssWidth space (see onHoverMove for the rationale:
-    // canvas backing store is floored to integer device pixels, so cssWidth
-    // can be slightly smaller than rect.width).
-    const px = (e.clientX - rect.left) * (cssWidth / rect.width);
-
-    const cfg = this.config;
-    // Normalize deltaY to pixels across deltaModes.
-    let dy = e.deltaY;
-    if (e.deltaMode === WheelEvent.DOM_DELTA_LINE) dy *= cfg.wheelLineHeight;
-    else if (e.deltaMode === WheelEvent.DOM_DELTA_PAGE) dy *= cssHeight;
-    else if (e.deltaMode === WheelEvent.DOM_DELTA_PIXEL) dy *= 1;
-
-    // Apply horizontal scrolling
-    if (cssWidth > 0) {
-      const span = this.state.timeRange.max - this.state.timeRange.min;
-      const dt = (cfg.timeScrollSensitivity * (span * e.deltaX)) / cssWidth;
-      this.setTimeRange(Range.pan(this.state.timeRange, dt));
-    }
-
-    if (e.shiftKey) {
-      this.setPriceScale(this.state.priceScale - dy * cfg.wheelSensitivity);
+    const px = (event.clientX - rect.left) * (cssWidth / rect.width);
+    let dy = event.deltaY;
+    if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) dy *= this.config.wheelLineHeight;
+    else if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) dy *= cssHeight;
+    const span = this.state.timeRange.max - this.state.timeRange.min;
+    const dt = (this.config.timeScrollSensitivity * span * event.deltaX) / cssWidth;
+    if (dt !== 0) this.setTimeRange(Range.pan(this.state.timeRange, dt));
+    if (event.shiftKey) {
+      this.setPriceScale(this.state.priceScale - dy * this.config.wheelSensitivity);
       return;
     }
     const tx = new DataTransform(
@@ -559,79 +458,62 @@ export class Timeline {
       Range.create(0, cssWidth),
       Range.create(0, cssHeight),
     );
-    const tFocus = tx.xToTime(px);
-    const factor = Math.exp(-dy * cfg.wheelSensitivity);
-    this.setTimeRange(Range.zoom(this.state.timeRange, tFocus, factor));
+    const factor = Math.exp(-dy * this.config.wheelSensitivity);
+    this.setTimeRange(Range.zoom(this.state.timeRange, tx.xToTime(px), factor));
   };
 
-  private onHoverMove = (e: PointerEvent): void => {
-    if (this.dragging || this.resizingHeat) return;
+  private onHoverMove = (event: PointerEvent): void => {
+    if (this.dragging || this.resizingBoundary !== null) return;
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
-
-    // The canvas backing store is floored to integer device pixels in resize(),
-    // so cssWidth/cssHeight (= canvas.width / dpr) can be slightly smaller than
-    // the layout rect. Pointer events are in rect space, so scale them into
-    // the cssWidth/cssHeight space the render transform uses — otherwise the
-    // hit-test y drifts from the drawn y by up to 1/dpr CSS px.
     const cssWidth = this.plot.cssWidth;
     const cssHeight = this.plot.cssHeight;
-    const sx = cssWidth / rect.width;
-    const sy = cssHeight / rect.height;
-    const px = (e.clientX - rect.left) * sx;
-    const py = (e.clientY - rect.top) * sy;
-    if (cssWidth <= 0 || cssHeight <= 0) return;
-
+    const px = (event.clientX - rect.left) * (cssWidth / rect.width);
+    const py = (event.clientY - rect.top) * (cssHeight / rect.height);
+    this.canvas.style.cursor = this.boundaryAt(py) === null ? "" : "ns-resize";
     const tx = new DataTransform(
       this.state.timeRange,
       Range.create(0, cssWidth),
       Range.create(0, cssHeight),
     );
-    const resizeY = heatTopY(cssHeight, this.state.heatHeight);
-    this.canvas.style.cursor = Math.abs(py - resizeY) <= RESIZE_HANDLE_RADIUS ? "ns-resize" : "";
-
-    const idx = hitTestEvent(this.state.events, tx, px, py, this.state.heatHeight);
-    if (idx !== this.state.hovered) {
-      this.state = { ...this.state, hovered: idx };
+    const index = hitTestEvent(this.state.events, tx, px, py, this.state.newsHeight / 2);
+    if (index !== this.state.hovered) {
+      this.state.hovered = index;
       this.reqDraw();
-      this.fireHover(idx, px, py);
+      this.fireHover(index, px, py);
     }
   };
 
-  private onClick = (_e: PointerEvent): void => {
+  private onClick = (): void => {
     if (this.state.hovered === null) return;
-    const ev = this.eventAt(this.state.hovered);
-    window.open(ev.link, "_blank", "noopener,noreferrer");
+    window.open(this.eventAt(this.state.hovered).link, "_blank", "noopener,noreferrer");
   };
 
-  private pointerY(e: PointerEvent): number {
+  private pointerY(event: PointerEvent): number {
     const rect = this.canvas.getBoundingClientRect();
-    if (rect.height <= 0) return 0;
-    return (e.clientY - rect.top) * (this.plot.cssHeight / rect.height);
+    return rect.height <= 0 ? 0 : (event.clientY - rect.top) * (this.plot.cssHeight / rect.height);
   }
 
-  private eventAt(i: number): NewsEvent {
-    const e = this.state.events.events[i];
-    if (e === undefined) {
-      throw new Error(`Event index out of range: ${i}`);
-    }
-    return e;
+  private eventAt(index: number): NewsEvent {
+    const event = this.state.events.events[index];
+    if (event === undefined) throw new Error(`Event index out of range: ${index}`);
+    return event;
   }
 
-  private fireHover(idx: number | null, px: number, py: number): void {
-    if (!this.callbacks.onHover) return;
-    if (idx === null) {
+  private fireHover(index: number | null, px: number, py: number): void {
+    if (this.callbacks.onHover === undefined) return;
+    if (index === null) {
       this.callbacks.onHover(null);
       return;
     }
-    const ev = this.eventAt(idx);
+    const event = this.eventAt(index);
     this.callbacks.onHover({
-      index: idx,
-      title: ev.title,
-      link: ev.link,
-      feedId: ev.feedId,
-      summary: ev.summary,
-      t: ev.t,
+      index,
+      title: event.title,
+      link: event.link,
+      feedId: event.feedId,
+      summary: event.summary,
+      t: event.t,
       px,
       py,
     });
