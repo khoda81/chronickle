@@ -27,10 +27,18 @@ export interface FetchRangeResult {
 }
 
 export interface Fetcher {
+  /** Run at most one request at a time for this source instance. */
+  readonly serializeRequests?: boolean;
+  /** A failed request blocks every range until its retry timer expires. */
+  readonly sourceWideBackoff?: boolean;
+
   fetchRange(opts: FetchRangeOptions): Promise<FetchRangeResult>;
 
   /** Exchange-specific retry/rate-limit policy. Defaults to bounded exponential backoff. */
   retryDelayMs?(error: unknown, attempt: number): number;
+
+  /** Clear adapter-owned response/request caches during an explicit reload. */
+  clearCache?(): void;
 
   streamTick?(onPoint: (p: PricePoint) => void): () => void;
 }

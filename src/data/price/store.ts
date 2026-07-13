@@ -117,7 +117,7 @@ export class ChunkedLevelStore {
     if (this._chunks.length === 0) return null;
     const first = this._chunks[0]!;
     const last = this._chunks[this._chunks.length - 1]!;
-    return Range.create(first.startTime, last.endTime);
+    return first.startTime < last.endTime ? Range.create(first.startTime, last.endTime) : null;
   }
 
   /**

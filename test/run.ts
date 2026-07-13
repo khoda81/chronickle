@@ -90,6 +90,12 @@ test("staircase returns NaN when empty and holds the final observation", () => {
   assert(sampled[1] === 1 && sampled[2] === 2, "ZOH evaluation is incorrect");
 });
 
+test("a singleton price store has no invalid zero-width cached range", () => {
+  const store = new ChunkedLevelStore();
+  store.insertBatch(new Float64Array([1_000]), new Float64Array([Math.log(100)]));
+  assert(store.timeRange() === null, "singleton store exposed an invalid min=max range");
+});
+
 test("return pyramid preserves signed mass and absolute activity", () => {
   const pyramid = ReturnPyramid.from(
     [
@@ -339,6 +345,77 @@ test("finer pending work suppresses only coarser duplicate requests", () => {
   assert(count(requests) === 2, "coarse pending request suppressed a finer request");
 });
 
+test("serialized sources do not start disjoint requests concurrently", async () => {
+  let calls = 0;
+  let finish!: (result: FetchRangeResult) => void;
+  const fetcher: Fetcher = {
+    serializeRequests: true,
+    fetchRange() {
+      calls++;
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    },
+  };
+  const broker = new Broker(fetcher, { now: () => 3_000 });
+  broker.query({ evalTime: new Float64Array([0, 1_000]), maxDeltaTMs: 1_000 });
+  broker.query({ evalTime: new Float64Array([2_000, 3_000]), maxDeltaTMs: 1_000 });
+  assert(calls === 1, "serialized source started a second concurrent request");
+  finish({ points: [], searchedRange: Range.create(0, 1_000) });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  broker.dispose();
+});
+
+test("source-wide backoff suppresses new moving-tail ranges", async () => {
+  let calls = 0;
+  const fetcher: Fetcher = {
+    sourceWideBackoff: true,
+    retryDelayMs: () => 1_000,
+    async fetchRange() {
+      calls++;
+      throw new Error("rate limited");
+    },
+  };
+  const broker = new Broker(fetcher, { now: () => 3_000, onError: () => undefined });
+  broker.query({ evalTime: new Float64Array([0, 1_000]), maxDeltaTMs: 1_000 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  broker.query({ evalTime: new Float64Array([2_000, 3_000]), maxDeltaTMs: 1_000 });
+  assert(calls === 1, "a disjoint moving-tail range bypassed source-wide backoff");
+  broker.dispose();
+});
+
+test("subscriber failures are not reclassified as fetch failures", async () => {
+  const errors: string[] = [];
+  const fetcher: Fetcher = {
+    async fetchRange({ range }) {
+      return {
+        points: [{ t: 500, price: 100 }],
+        resolutionHintMs: 1_000,
+        searchedRange: range,
+      };
+    },
+  };
+  const broker = new Broker(fetcher, {
+    now: () => 1_000,
+    onError: (message) => errors.push(message),
+  });
+  broker.subscribe(() => {
+    throw new Error("UI failed");
+  });
+  const query = { evalTime: new Float64Array([0, 1_000]), maxDeltaTMs: 1_000 };
+  broker.query(query);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const result = broker.query(query);
+  assert(
+    result.resolution.every((segment) => segment.state !== "failed"),
+    "subscriber exception became a failed exchange range",
+  );
+  assert(errors.includes("[Broker] subscriber failed"), "subscriber exception was hidden");
+  assert(!errors.some((message) => message.includes("fetch failed")), "fetch was blamed for UI");
+  assert(broker.cachedRange() === null, "singleton response recreated an invalid cached range");
+  broker.dispose();
+});
+
 test("a late coarse response cannot overwrite an earlier fine response", async () => {
   let resolveCoarse!: (result: FetchRangeResult) => void;
   let resolveFine!: (result: FetchRangeResult) => void;
@@ -492,7 +569,9 @@ test("Binance adapter maps arbitrary symbols and range resolution", async () => 
 test("Yahoo adapter supports WTI and Brent futures with range-aware intervals", async () => {
   const originalFetch = globalThis.fetch;
   let requestedUrl = "";
+  let calls = 0;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
+    calls++;
     requestedUrl = input instanceof Request ? input.url : input.toString();
     return new Response(
       JSON.stringify({
@@ -520,6 +599,18 @@ test("Yahoo adapter supports WTI and Brent futures with range-aware intervals", 
     assert(target.includes("interval=60m"), "wrong Yahoo interval");
     assert(result.points.length === 2 && result.points[1]!.t === 3_600_000, "bad Yahoo rows");
     assert(result.resolutionHintMs === 3_600_000, "wrong Yahoo resolution hint");
+
+    const secondRange = Range.create(1_000, 7_200_000);
+    const cached = await fetcher.fetchRange({
+      range: secondRange,
+      maxDeltaTMs: 3_600_000,
+    });
+    assert(calls === 1, "same Yahoo candle window caused another HTTP request");
+    assert(cached.searchedRange === secondRange, "cached response leaked an older searched range");
+
+    fetcher.clearCache?.();
+    await fetcher.fetchRange({ range: secondRange, maxDeltaTMs: 3_600_000 });
+    assert(Number(calls) === 2, "explicit reload did not clear Yahoo's response cache");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -529,6 +620,31 @@ test("Yahoo adapter supports WTI and Brent futures with range-aware intervals", 
     "Yahoo lookback limit did not select the finest available fallback",
   );
   assert(marketSource("yahoo")?.normalizeSymbol(" cl=f ") === "CL=F", "WTI was rejected");
+});
+
+test("Yahoo honors Retry-After on HTTP 429", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response("rate limited", {
+      status: 429,
+      headers: { "retry-after": "7" },
+    })) as typeof fetch;
+  try {
+    const fetcher = createYahooFetcher({ symbol: "CL=F", now: () => 120_000 });
+    let caught: unknown;
+    try {
+      await fetcher.fetchRange({
+        range: Range.create(60_000, 120_000),
+        maxDeltaTMs: 60_000,
+      });
+    } catch (error) {
+      caught = error;
+    }
+    assert(caught instanceof Error, "Yahoo 429 did not reject");
+    assert(fetcher.retryDelayMs?.(caught, 1) === 7_000, "Retry-After was ignored");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("market symbol discovery normalizes Nobitex pairs and filters without forcing a match", () => {

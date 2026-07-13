@@ -156,6 +156,7 @@ export class Broker {
   /** Drop all observations/request state and ignore responses from the old generation. */
   clearCache(): void {
     this.generation++;
+    this.fetcher.clearCache?.();
     this.stores.clear();
     this.coverage.clear();
     this.inFlight.clear();
@@ -190,16 +191,24 @@ export class Broker {
 
     // Finer ready/pending work satisfies a coarser query. A coarser request
     // deliberately does not suppress a new finer request.
-    for (const request of this.inFlight.values()) {
-      if (request.maxDeltaTMs > maxDeltaTMs) continue;
-      const overlap = intersect(request.range, range);
-      if (overlap !== null) blocked.add(overlap);
+    if (this.fetcher.serializeRequests === true && this.inFlight.size > 0) {
+      blocked.add(range);
+    } else {
+      for (const request of this.inFlight.values()) {
+        if (request.maxDeltaTMs > maxDeltaTMs) continue;
+        const overlap = intersect(request.range, range);
+        if (overlap !== null) blocked.add(overlap);
+      }
     }
     // A failed exchange call suppresses all qualities briefly; the adapter
     // controls how long through retryDelayMs().
-    for (const failure of this.failures.values()) {
-      const overlap = intersect(failure.range, range);
-      if (overlap !== null) blocked.add(overlap);
+    if (this.fetcher.sourceWideBackoff === true && this.failures.size > 0) {
+      blocked.add(range);
+    } else {
+      for (const failure of this.failures.values()) {
+        const overlap = intersect(failure.range, range);
+        if (overlap !== null) blocked.add(overlap);
+      }
     }
     return blocked;
   }
@@ -212,11 +221,14 @@ export class Broker {
   }
 
   private async requestFetch(range: Range, maxDeltaTMs: number): Promise<void> {
+    if (this.fetcher.serializeRequests === true && this.inFlight.size > 0) return;
+    if (this.fetcher.sourceWideBackoff === true && this.failures.size > 0) return;
     const key = requestKey(range, maxDeltaTMs);
     if (this.inFlight.has(key) || this.failures.has(key)) return;
     const request = { range, maxDeltaTMs };
     const generation = this.generation;
     this.inFlight.set(key, request);
+    let notifyAfterRequest = false;
 
     try {
       const result = await this.fetcher.fetchRange(request);
@@ -224,7 +236,7 @@ export class Broker {
       this.ingest(request, result);
       this.failureAttempts.delete(key);
       this.revision++;
-      this.notify();
+      notifyAfterRequest = true;
     } catch (error) {
       if (generation !== this.generation) return;
       this.onError(`[Broker] fetch failed for ${range.min}..${range.max}`, error);
@@ -248,9 +260,12 @@ export class Broker {
       }, delay) as unknown as number;
       this.failures.set(key, { ...request, message, retryAt, timer });
       this.revision++;
-      this.notify();
+      notifyAfterRequest = true;
     } finally {
       if (this.inFlight.get(key) === request) this.inFlight.delete(key);
+      // A subscriber-triggered redraw must see the request as settled. This
+      // matters for serialized sources: it lets the next uncovered range run.
+      if (notifyAfterRequest) this.notify();
     }
   }
 
@@ -360,7 +375,15 @@ export class Broker {
   }
 
   private notify(): void {
-    for (const fn of this.subscribers) fn();
+    for (const fn of this.subscribers) {
+      try {
+        fn();
+      } catch (error) {
+        // Subscriber/UI failures must never be reclassified as exchange
+        // failures by requestFetch's network error path.
+        this.onError("[Broker] subscriber failed", error);
+      }
+    }
   }
 }
 
