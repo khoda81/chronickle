@@ -28,6 +28,33 @@ export class RangeSet {
     return false;
   }
 
+  /** True when `t` belongs to one of the covered intervals. */
+  contains(t: number): boolean {
+    let lo = 0;
+    let hi = this.intervals.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      const iv = this.intervals[mid]!;
+      if (t < iv.min) hi = mid - 1;
+      else if (t > iv.max) lo = mid + 1;
+      else return true;
+    }
+    return false;
+  }
+
+  /** Covered portions of `r`, clipped to `r`, in ascending order. */
+  intersections(r: Range): readonly Range[] {
+    const out: Range[] = [];
+    for (const iv of this.intervals) {
+      if (iv.max <= r.min) continue;
+      if (iv.min >= r.max) break;
+      const min = Math.max(iv.min, r.min);
+      const max = Math.min(iv.max, r.max);
+      if (min < max) out.push(Range.create(min, max));
+    }
+    return out;
+  }
+
   /**
    * Add a covered range, merging overlaps/adjacencies.
    * Mutates this set in place; the set is internal to the broker and not

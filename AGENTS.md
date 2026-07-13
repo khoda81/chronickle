@@ -14,11 +14,12 @@ Browser-based SPA that correlates market volatility (Nobitex USD/IRT trades) wit
 ```sh
 bun install          # install deps
 bun run dev          # vite dev server (HMR)
+bun run test         # numerical and data-structure invariants
 bun run build        # tsc -b && vite build -> dist/
 bun run typecheck    # tsc --noEmit  (run after edits)
 ```
 
-Always run `bun run typecheck` after non-trivial edits. The project must stay type-clean.
+Always run `bun run test` and `bun run typecheck` after non-trivial edits. The project must stay type-clean.
 
 ## Architecture
 

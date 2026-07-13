@@ -54,6 +54,10 @@ body {
 
 .palette {
   margin-left: auto;
+}
+
+.palette,
+.wavelet-mode {
   background: transparent;
   border: 1px solid #2a2f3a;
   color: var(--fg);
@@ -62,7 +66,8 @@ body {
   cursor: pointer;
   font-size: 12px;
 }
-.palette:hover {
+.palette:hover,
+.wavelet-mode:hover {
   border-color: var(--accent);
   color: var(--accent);
 }

@@ -16,6 +16,7 @@ import { FeedRegistry } from "./data/events/feeds.ts";
 import { idToColor } from "./data/events/color.ts";
 import type { RssFeed } from "./domain.ts";
 import { loadUiState, saveUiState, flushUiState } from "./uiState.ts";
+import type { WaveletMode } from "./engine/wavelet.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -75,6 +76,7 @@ function buildApp(): {
   status: HTMLDivElement;
   reload: HTMLButtonElement;
   palette: HTMLSelectElement;
+  wavelet: HTMLSelectElement;
   feedInput: HTMLInputElement;
   feedAdd: HTMLButtonElement;
   feedList: HTMLDivElement;
@@ -100,6 +102,18 @@ function buildApp(): {
     palette.append(opt);
   }
 
+  const wavelet = el<HTMLSelectElement>("select", "wavelet-mode");
+  const waveletOptions: readonly { readonly value: WaveletMode; readonly label: string }[] = [
+    { value: "centered", label: "Centered growth" },
+    { value: "causal", label: "Causal growth" },
+  ];
+  for (const entry of waveletOptions) {
+    const opt = el<HTMLOptionElement>("option");
+    opt.value = entry.value;
+    opt.textContent = entry.label;
+    wavelet.append(opt);
+  }
+
   // Add-feed control: a URL input + Add button. On submit, main.ts validates
   // the URL, adds it to the FeedRegistry, fetches it once to verify and to
   // extract the real <title>, and persists.
@@ -110,7 +124,7 @@ function buildApp(): {
   const feedAdd = el<HTMLButtonElement>("button", "feed-add");
   feedAdd.textContent = "Add feed";
 
-  header.append(title, subtitle, palette, feedInput, feedAdd, reload);
+  header.append(title, subtitle, palette, wavelet, feedInput, feedAdd, reload);
 
   const canvasWrap = el<HTMLDivElement>("div", "canvas-wrap");
   const canvas = el<HTMLCanvasElement>("canvas", "timeline");
@@ -127,7 +141,7 @@ function buildApp(): {
   status.textContent = "Initializing…";
 
   app.append(header, feedList, canvasWrap, status);
-  return { canvas, tooltip, status, reload, palette, feedInput, feedAdd, feedList };
+  return { canvas, tooltip, status, reload, palette, wavelet, feedInput, feedAdd, feedList };
 }
 
 function setStatus(status: HTMLDivElement, msg: string, kind: "info" | "error" = "info"): void {
@@ -205,7 +219,8 @@ function main(): void {
     setRampPalette(ui.palette as PaletteName);
   }
 
-  const { canvas, tooltip, status, reload, palette, feedInput, feedAdd, feedList } = buildApp();
+  const { canvas, tooltip, status, reload, palette, wavelet, feedInput, feedAdd, feedList } =
+    buildApp();
 
   // Initial time range: saved viewport if present, else last 24h. The broker
   // will fetch this on the first query. If there's a saved viewport we skip
@@ -246,10 +261,18 @@ function main(): void {
         });
       },
       onViewportChange: (viewport, priceScale) => {
-        saveUiState({ viewport, palette: rampPaletteName() });
+        saveUiState({
+          viewport,
+          palette: rampPaletteName(),
+          waveletMode: timeline.getWaveletMode(),
+        });
       },
     },
   });
+  if (ui.waveletMode === "centered" || ui.waveletMode === "causal") {
+    timeline.setWaveletMode(ui.waveletMode);
+    wavelet.value = ui.waveletMode;
+  }
 
   // When the price broker inserts new data, request a redraw. If there's no
   // saved viewport, re-fit the time range once on the first non-empty cache
@@ -393,6 +416,12 @@ function main(): void {
     saveUiState({ palette: name });
   });
 
+  wavelet.addEventListener("change", () => {
+    const mode = wavelet.value as WaveletMode;
+    timeline.setWaveletMode(mode);
+    saveUiState({ waveletMode: mode });
+  });
+
   // Flush any debounced UI state on tab close/navigation so the last viewport
   // and palette aren't lost. Without this, a close mid-debounce would revert
   // to the previous save.
@@ -400,6 +429,7 @@ function main(): void {
     flushUiState({
       viewport: { min: timeline.getTimeRange().min, max: timeline.getTimeRange().max },
       palette: rampPaletteName(),
+      waveletMode: timeline.getWaveletMode(),
     }),
   );
 }

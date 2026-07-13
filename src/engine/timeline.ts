@@ -28,6 +28,7 @@ import { Plot } from "./plot.ts";
 import { hitTestEvent } from "./hittest.ts";
 import { setRampPalette, type PaletteName } from "./ramp.ts";
 import { maxSigmaFor } from "./gfx/layout.ts";
+import { kernelContext, type WaveletMode } from "./wavelet.ts";
 import { DEFAULT_MIN_TICK_PX } from "./gfx/axis.ts";
 import type { Frame } from "./gfx/context.ts";
 import type { QueryResult } from "../data/price/broker.ts";
@@ -121,6 +122,7 @@ interface TimelineState {
   timeRange: Range;
   /** Heatmap vertical scale; adjusted via shift+wheel. Render parameter. */
   priceScale: number;
+  waveletMode: WaveletMode;
   hovered: number | null;
 }
 
@@ -198,6 +200,7 @@ export class Timeline {
       events: EMPTY_EVENTS,
       timeRange: opts.initialTimeRange,
       priceScale: 22,
+      waveletMode: "centered",
       hovered: null,
     };
 
@@ -261,6 +264,16 @@ export class Timeline {
   /** Current priceScale (heatmap vertical zoom). */
   getPriceScale(): number {
     return this.state.priceScale;
+  }
+
+  /** Switch between the centered historical and time-causal growth views. */
+  setWaveletMode(mode: WaveletMode): void {
+    this.state.waveletMode = mode;
+    this.reqDraw();
+  }
+
+  getWaveletMode(): WaveletMode {
+    return this.state.waveletMode;
   }
 
   /** Switch the heatmap color palette by name. Triggers a redraw. */
@@ -327,36 +340,34 @@ export class Timeline {
    */
   private draw = (): void => {
     using frame = this.plot.beginFrame();
-    const { events, hovered, priceScale, timeRange } = this.state;
+    const { hovered, priceScale, timeRange, waveletMode } = this.state;
     const { width, height, dpr } = frame;
 
     // Background.
     frame.fillRectPx(0, 0, width, height, "#05070d");
 
     // Number of device pixels
-    const numPx = width * dpr;
+    const numPx = Math.ceil(width * dpr);
     const maxSigma = maxSigmaFor(numPx);
     // timePerPx in *device* pixels (maxSigma is in device pixels).
     const timePerPx = (timeRange.max - timeRange.min) / numPx;
 
-    // Pad by exactly kernelReach on each side: one maxSigma-width of samples
-    // at the per-device-pixel spacing. The padded grid is uniform so the box
-    // filter (whose sigma is in device pixels) operates correctly.
-    const padLeft = maxSigma;
-    const padRight = maxSigma;
-    const paddedN = padLeft + numPx + padRight;
-    const paddedMin = timeRange.min - padLeft * timePerPx;
-    const paddedMax = timeRange.max + padRight * timePerPx;
-    const paddedSpan = paddedMax - paddedMin;
+    // The transform consumes N cells and therefore N+1 ZOH evaluation edges.
+    // Padding is derived from actual kernel support. Centered Gaussian mode
+    // needs both sides; causal mode needs historical context only.
+    const context = kernelContext(waveletMode, maxSigma);
+    const padLeft = context.leftCells;
+    const padRight = context.rightCells;
+    const cellCount = padLeft + numPx + padRight;
+    const edgeCount = cellCount + 1;
 
-    if (this.evalTime.length < paddedN) {
-      this.evalTime = new Float64Array(paddedN);
+    if (this.evalTime.length < edgeCount) {
+      this.evalTime = new Float64Array(edgeCount);
     }
-    const step = paddedSpan / (paddedN - 1);
-    for (let i = 0; i < paddedN; i++) {
-      this.evalTime[i] = paddedMin + i * step;
+    for (let i = 0; i < edgeCount; i++) {
+      this.evalTime[i] = timeRange.min + (i - padLeft) * timePerPx;
     }
-    const evalView = this.evalTime.subarray(0, paddedN) as Float64Array;
+    const evalView = this.evalTime.subarray(0, edgeCount) as Float64Array;
     // maxDeltaTMs for the fetch: one sample per visible device pixel is the
     // floor. The off-screen padding could be coarser (the kernel there is
     // wide and smooth), but the broker dedups by range and the staircase
@@ -368,8 +379,15 @@ export class Timeline {
     // Layers.
     const heat = frame.heatmap();
     heat.drawWaveletField(
-      { evalTime: evalView, value: result.value, padLeft, padRight },
+      {
+        evalTime: evalView,
+        value: result.value,
+        padLeft,
+        padRight,
+        revision: result.revision,
+      },
       priceScale,
+      waveletMode,
     );
     // heat.drawFadeOverlay();
     // Query the event source every frame, mirroring the price dataSource.

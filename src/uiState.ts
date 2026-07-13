@@ -23,6 +23,8 @@ export interface UiState {
   readonly viewport?: { readonly min: number; readonly max: number };
   /** Active heatmap palette name. */
   readonly palette?: string;
+  /** Centered historical view or time-causal available-at-time view. */
+  readonly waveletMode?: "centered" | "causal";
 }
 
 let saveTimer: number | null = null;

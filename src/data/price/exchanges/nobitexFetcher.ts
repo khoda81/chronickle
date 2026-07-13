@@ -61,10 +61,12 @@ export function createNobitexFetcher(opts: NobitexFetcherOptions = {}): Fetcher 
         throw new Error(`nobitex fetcher: no resolution for period ${periodMs}ms`);
       }
 
+      // Include one predecessor candle so zero-order hold is defined at the
+      // requested left boundary even when it falls between candle opens.
       const res = await fetchOhlc({
         symbol,
         resolution: entry.resolution,
-        fromMs: req.range.min,
+        fromMs: req.range.min - periodMs,
         toMs: req.range.max,
         timeoutMs,
       });
@@ -72,17 +74,23 @@ export function createNobitexFetcher(opts: NobitexFetcherOptions = {}): Fetcher 
       // "no_data" means no candles exist for this range at all — the request
       // is exhausted and the broker should not retry it.
       if (res === null) {
-        return { points: [], coveredRange: null };
+        return {
+          points: [],
+          resolutionMs: periodMs,
+          coverage: { kind: "empty", range: req.range },
+        };
       }
 
       const points = ohlcToPriceSeries(res).observations as PricePoint[];
       if (points.length === 0) {
-        return { points: [], coveredRange: null };
+        return {
+          points: [],
+          resolutionMs: periodMs,
+          coverage: { kind: "empty", range: req.range },
+        };
       }
 
       const firstT = points[0]!.t;
-      const lastT = points[points.length - 1]!.t;
-
       // Nobitex caps OHLC responses at 1000 candles anchored at `to`. If the
       // first returned candle is strictly after `from`, the prefix
       // [from, firstT) was truncated and still needs to be fetched. We report
@@ -91,10 +99,28 @@ export function createNobitexFetcher(opts: NobitexFetcherOptions = {}): Fetcher 
       //
       // If the first candle is at or before `from`, the response was not
       // truncated on the left, so the whole request is exhausted.
-      const covered: Range | null =
-        firstT <= req.range.min ? null : Range.create(firstT, Math.max(lastT, firstT + 1));
-
-      return { points, coveredRange: covered };
+      if (firstT <= req.range.min) {
+        return {
+          points,
+          resolutionMs: periodMs,
+          coverage: { kind: "complete", range: req.range },
+        };
+      }
+      if (firstT < req.range.max) {
+        return {
+          points,
+          resolutionMs: periodMs,
+          coverage: {
+            kind: "partial",
+            range: Range.create(firstT, req.range.max),
+          },
+        };
+      }
+      return {
+        points,
+        resolutionMs: periodMs,
+        coverage: { kind: "empty", range: req.range },
+      };
     },
   };
 }

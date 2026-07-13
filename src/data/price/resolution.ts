@@ -4,7 +4,7 @@
  * Each fetcher advertises its native sample periods (in ms), finest→coarsest.
  * Given a requested `maxDeltaTMs` ("give me points spaced at most this far
  * apart"), `pickResolution` returns the **finest** native period that is
- * `<= maxDeltaTMs` — i.e. the one that satisfies the constraint while
+ * `<= maxDeltaTMs` — i.e. the coarsest one that satisfies the constraint while
  * minimizing over-fetching. If even the finest native period exceeds
  * `maxDeltaTMs`, that finest period is returned (the request cannot be met
  * exactly; the fetcher does the best it can and the staircase evaluator
@@ -22,7 +22,7 @@
  */
 
 /**
- * Pick the finest native period `<= maxDeltaTMs`, or the finest available
+ * Pick the coarsest native period `<= maxDeltaTMs`, or the finest available
  * if none satisfy the constraint.
  *
  * @param nativePeriodsMs  Ascending (finest→coarsest) sample periods in ms.
@@ -42,7 +42,9 @@ export function pickResolution(nativePeriodsMs: readonly number[], maxDeltaTMs: 
   let prev = 0;
   for (const p of nativePeriodsMs) {
     if (!(p > prev)) {
-      throw new Error(`pickResolution: nativePeriodsMs must be strictly ascending; got ${p} after ${prev}`);
+      throw new Error(
+        `pickResolution: nativePeriodsMs must be strictly ascending; got ${p} after ${prev}`,
+      );
     }
     prev = p;
   }

@@ -15,6 +15,7 @@ Live: **https://khoda81.github.io/chronickle/**
 ```sh
 bun install
 bun run dev        # vite dev server (HMR)
+bun run test       # numerical and data-structure invariants
 bun run build      # tsc -b && vite build -> dist/
 bun run typecheck  # tsc --noEmit
 bun run preview    # serve dist/ locally

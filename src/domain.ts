@@ -3,7 +3,7 @@
  *
  * Invariants are encoded structurally:
  *  - All timestamps are epoch milliseconds (number).
- *  - PriceSeries observations are sorted ascending by `t` (duplicates allowed).
+ *  - PriceSeries observations are sorted strictly ascending by `t`.
  *  - All prices are finite and positive (validated at construction).
  *  - Events are pre-sorted ascending by `t`.
  */
@@ -16,10 +16,9 @@ export interface PricePoint {
 }
 
 /**
- * A sorted price time-series. Observations are stored as-received (never
- * compressed or resampled). The series exposes `maxRate` — the maximum
- * per-observation log-return rate — as a zoom-invariant normalization bound
- * for the renderer.
+ * A validated, sorted price time-series. Duplicate timestamps are collapsed
+ * with the last observation winning. This matches the price-store overwrite
+ * rule and makes the strictly-ascending invariant explicit at the boundary.
  */
 export class PriceSeries {
   static readonly EMPTY: PriceSeries = new PriceSeries([]);
@@ -27,17 +26,44 @@ export class PriceSeries {
   private constructor(readonly observations: readonly PricePoint[]) {}
 
   /**
-   * Build a PriceSeries from unsorted points. Sorts ascending by `t`
-   * (duplicates kept), validates prices, and precomputes `maxRate`.
-   * @throws if any price is non-finite or non-positive.
+   * Build a PriceSeries from unsorted points. Sorts ascending by `t`, validates
+   * timestamps and prices, and collapses duplicates with the last value winning.
+   * @throws if a timestamp is non-finite or a price is non-finite/non-positive.
    */
   static from(points: readonly PricePoint[]): PriceSeries {
     if (points.length === 0) return PriceSeries.EMPTY;
 
-    const sorted = [...points].sort((a, b) => a.t - b.t);
+    const sorted = [...points];
+    for (let i = 0; i < sorted.length; i++) {
+      const p = sorted[i]!;
+      if (!Number.isFinite(p.t)) {
+        throw new Error(`PriceSeries.from: non-finite timestamp at index ${i}: ${p.t}`);
+      }
+      if (!Number.isFinite(p.price) || !(p.price > 0)) {
+        throw new Error(
+          `PriceSeries.from: price must be finite and positive at index ${i}: ${p.price}`,
+        );
+      }
+    }
+    sorted.sort((a, b) => a.t - b.t);
 
-    return new PriceSeries(sorted);
+    const deduped: PricePoint[] = [];
+    for (const p of sorted) {
+      const last = deduped[deduped.length - 1];
+      if (last?.t === p.t) deduped[deduped.length - 1] = p;
+      else deduped.push(p);
+    }
+
+    return new PriceSeries(deduped);
   }
+}
+
+/** A validated observation in logarithmic price space. */
+export interface LogPricePoint {
+  /** Epoch milliseconds. */
+  readonly t: number;
+  /** Natural logarithm of price. Always finite. */
+  readonly logPrice: number;
 }
 
 /**

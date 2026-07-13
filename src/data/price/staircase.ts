@@ -17,7 +17,7 @@ import { Chunk } from "./store.ts";
 
 export interface StaircaseResult {
   /** Values aligned with the input `evalTime`. Length === evalTime.length. */
-  readonly value: Float32Array;
+  readonly value: Float64Array;
   /**
    * Number of leading/trailing eval points that fell outside the store's
    * covered range. Those entries in `value` are `NaN` and must be handled
@@ -31,25 +31,27 @@ export interface StaircaseResult {
  * Evaluate the staircase at `evalTime` (ascending) against `chunks`.
  *
  * `evalTime` must be ascending; this is not re-checked (the viewport
- * produces it monotonically). Values before the first sample and after the
- * last sample are `NaN` — the caller decides how to render the gap.
+ * produces it monotonically). Values before the first sample are `NaN`.
+ * After the last observation, zero-order hold
+ * continues indefinitely; callers must mask values against known source
+ * coverage so an unfetched future is not mistaken for valid data.
  *
- * Allocation: one `Float32Array(evalTime.length)`. No per-sample buffers.
+ * Allocation: one `Float64Array(evalTime.length)`. No per-sample buffers.
  */
 export function evaluateStaircase(
   chunks: readonly Chunk[],
   evalTime: Float64Array,
 ): StaircaseResult {
   const n = evalTime.length;
-  const out = new Float32Array(n);
+  const out = new Float64Array(n);
 
   if (n === 0 || chunks.length === 0) {
-    return { value: out, leadingNaN: 0, trailingNaN: 0 };
+    out.fill(NaN);
+    return { value: out, leadingNaN: n, trailingNaN: 0 };
   }
 
   // First/last sample timestamps across the whole store.
   const storeStart = chunks[0]!.startTime;
-  const storeEnd = chunks[chunks.length - 1]!.endTime;
 
   // Walk eval points and chunks together. Both are ascending.
   let chunkIdx = 0;
@@ -64,25 +66,12 @@ export function evaluateStaircase(
     leadingNaN++;
   }
 
-  let trailingStart = n;
-  // Find the first eval point strictly after storeEnd (trailing NaNs begin there).
-  // Binary search for the leftmost index with evalTime > storeEnd.
-  {
-    let lo = leadingNaN;
-    let hi = n;
-    while (lo < hi) {
-      const m = (lo + hi) >> 1;
-      if (evalTime[m]! <= storeEnd) lo = m + 1;
-      else hi = m;
-    }
-    trailingStart = lo;
-  }
-
-  // Fill leading NaNs explicitly (Float32Array is zeroed, but NaN is clearer).
+  // Fill leading NaNs explicitly (typed arrays are zeroed, but NaN is correct).
   for (let i = 0; i < leadingNaN; i++) out[i] = NaN;
 
-  // Sweep the in-range eval points [leadingNaN, trailingStart).
-  for (let i = leadingNaN; i < trailingStart; i++) {
+  // Sweep all eval points at or after the first observation. The last value is
+  // held after the store ends; the broker masks it using source coverage.
+  for (let i = leadingNaN; i < n; i++) {
     const t = evalTime[i]!;
 
     // Advance through samples whose timestamp is <= t.
@@ -113,9 +102,5 @@ export function evaluateStaircase(
     out[i] = lastValue;
   }
 
-  // Trailing NaNs (eval points past storeEnd).
-  const trailingNaN = n - trailingStart;
-  for (let i = trailingStart; i < n; i++) out[i] = NaN;
-
-  return { value: out, leadingNaN, trailingNaN };
+  return { value: out, leadingNaN, trailingNaN: 0 };
 }

@@ -17,7 +17,7 @@ const CHUNK_CAPACITY = 1024;
  */
 export interface Chunk {
   readonly time: Float64Array;
-  readonly value: Float32Array;
+  readonly value: Float64Array;
   readonly length: number;
   readonly startTime: number;
   readonly endTime: number;
@@ -43,7 +43,7 @@ export const Chunk = {
     }
 
     const time = new Float64Array(CHUNK_CAPACITY);
-    const value = new Float32Array(CHUNK_CAPACITY);
+    const value = new Float64Array(CHUNK_CAPACITY);
 
     let prev = -Infinity;
     for (let i = 0; i < length; i++) {
@@ -124,7 +124,7 @@ export class ChunkedLevelStore {
    * Insert a sorted batch. Overwrites existing samples on exact-timestamp
    * match (newer data wins). Re-chunks affected region to fixed capacity.
    */
-  insertBatch(incomingTime: Float64Array, incomingValue: Float32Array): void {
+  insertBatch(incomingTime: Float64Array, incomingValue: Float64Array): void {
     if (incomingTime.length === 0) return;
     if (incomingTime.length !== incomingValue.length) {
       throw new Error(
@@ -166,13 +166,13 @@ export class ChunkedLevelStore {
   private mergeAndRechunk(
     existing: Chunk[],
     newTime: Float64Array,
-    newValue: Float32Array,
+    newValue: Float64Array,
   ): Chunk[] {
     const existingLength = existing.reduce((sum, c) => sum + c.length, 0);
     const totalLength = existingLength + newTime.length;
 
     const tempTime = new Float64Array(totalLength);
-    const tempValue = new Float32Array(totalLength);
+    const tempValue = new Float64Array(totalLength);
 
     let eIdx = 0;
     let eInnerIdx = 0;
