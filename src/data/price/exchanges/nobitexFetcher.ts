@@ -17,7 +17,6 @@ import { Fetcher, FetchRangeOptions, FetchRangeResult } from "../fetcher.ts";
 import { pickResolution } from "../resolution.ts";
 import { fetchOhlc, NobitexOhlcResponse, ohlcToPriceSeries } from "./nobitex.ts";
 import { PricePoint } from "../../../domain.ts";
-import { Range } from "../../../engine/range.ts";
 
 const MS = 1000;
 
@@ -51,7 +50,11 @@ export function createNobitexFetcher(opts: NobitexFetcherOptions = {}): Fetcher 
   const timeoutMs = opts.timeoutMs;
 
   return {
-    nativePeriodsMs: NOBITEX_PERIODS_MS,
+    // Nobitex applies endpoint-wide throttling. The broker owns transient
+    // failure state but asks the adapter how long to suppress retries.
+    retryDelayMs(_error, attempt) {
+      return Math.min(60_000, 2_000 * 2 ** (attempt - 1));
+    },
 
     async fetchRange(req: FetchRangeOptions): Promise<FetchRangeResult> {
       const periodMs = pickResolution(NOBITEX_PERIODS_MS, req.maxDeltaTMs);
@@ -76,8 +79,8 @@ export function createNobitexFetcher(opts: NobitexFetcherOptions = {}): Fetcher 
       if (res === null) {
         return {
           points: [],
-          resolutionMs: periodMs,
-          coverage: { kind: "empty", range: req.range },
+          resolutionHintMs: periodMs,
+          searchedRange: req.range,
         };
       }
 
@@ -85,8 +88,8 @@ export function createNobitexFetcher(opts: NobitexFetcherOptions = {}): Fetcher 
       if (points.length === 0) {
         return {
           points: [],
-          resolutionMs: periodMs,
-          coverage: { kind: "empty", range: req.range },
+          resolutionHintMs: periodMs,
+          searchedRange: req.range,
         };
       }
 
@@ -102,24 +105,21 @@ export function createNobitexFetcher(opts: NobitexFetcherOptions = {}): Fetcher 
       if (firstT <= req.range.min) {
         return {
           points,
-          resolutionMs: periodMs,
-          coverage: { kind: "complete", range: req.range },
+          resolutionHintMs: periodMs,
+          searchedRange: req.range,
         };
       }
       if (firstT < req.range.max) {
         return {
           points,
-          resolutionMs: periodMs,
-          coverage: {
-            kind: "partial",
-            range: Range.create(firstT, req.range.max),
-          },
+          resolutionHintMs: periodMs,
+          searchedRange: { min: firstT, max: req.range.max },
         };
       }
       return {
         points,
-        resolutionMs: periodMs,
-        coverage: { kind: "empty", range: req.range },
+        resolutionHintMs: periodMs,
+        searchedRange: req.range,
       };
     },
   };

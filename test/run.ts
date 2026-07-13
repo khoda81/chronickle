@@ -1,7 +1,7 @@
 import { PriceSeries } from "../src/domain.ts";
 import { Broker } from "../src/data/price/broker.ts";
-import type { Fetcher } from "../src/data/price/fetcher.ts";
-import { pickResolution } from "../src/data/price/resolution.ts";
+import { CoverageIndex } from "../src/data/price/coverage.ts";
+import type { Fetcher, FetchRangeResult } from "../src/data/price/fetcher.ts";
 import { ReturnPyramid } from "../src/data/price/returnPyramid.ts";
 import { ChunkedLevelStore } from "../src/data/price/store.ts";
 import { evaluateStaircase } from "../src/data/price/staircase.ts";
@@ -28,6 +28,10 @@ function approx(actual: number, expected: number, tolerance = 1e-12): void {
   if (!(Math.abs(actual - expected) <= tolerance)) {
     throw new Error(`expected ${expected} ± ${tolerance}, got ${actual}`);
   }
+}
+
+function count(items: readonly unknown[]): number {
+  return items.length;
 }
 
 test("PriceSeries validates and collapses duplicate timestamps", () => {
@@ -132,13 +136,11 @@ test("ZOH returns are timestamp-aligned, causal, and zero-fill unknown data", ()
   assert(field.values[2]! > 0, "causal response was drawn before the price-change timestamp");
 });
 
-test("broker fetches a finer level after a coarse range is cached", async () => {
+test("broker fetches finer data after coarse observations are cached", async () => {
   const requests: number[] = [];
-  const native = [1_000, 5_000] as const;
   const fetcher: Fetcher = {
-    nativePeriodsMs: native,
     async fetchRange({ range, maxDeltaTMs }) {
-      const resolutionMs = pickResolution(native, maxDeltaTMs);
+      const resolutionMs = maxDeltaTMs >= 5_000 ? 5_000 : 1_000;
       requests.push(resolutionMs);
       const points = [];
       for (let t = range.min - resolutionMs; t <= range.max; t += resolutionMs) {
@@ -146,8 +148,8 @@ test("broker fetches a finer level after a coarse range is cached", async () => 
       }
       return {
         points,
-        resolutionMs,
-        coverage: { kind: "complete", range },
+        resolutionHintMs: resolutionMs,
+        searchedRange: range,
       };
     },
   };
@@ -161,40 +163,206 @@ test("broker fetches a finer level after a coarse range is cached", async () => 
   assert(requests.includes(1_000), "fine level was suppressed by coarse coverage");
 });
 
-test("broker exposes pending spans and scrolling requests uncovered ranges", () => {
+test("broker clamps fetches to now and later renders fetch elapsed time", async () => {
+  let now = 10_000;
   const requests: Range[] = [];
   const fetcher: Fetcher = {
-    nativePeriodsMs: [1_000],
+    async fetchRange({ range }) {
+      requests.push(range);
+      return { points: [], searchedRange: range };
+    },
+  };
+  const broker = new Broker(fetcher, { now: () => now });
+  broker.query({
+    evalTime: new Float64Array([0, 10_000, 20_000]),
+    maxDeltaTMs: 1_000,
+  });
+  assert(requests[0]!.max === 10_000, "future time leaked into the fetch range");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  now = 12_000;
+  broker.query({
+    evalTime: new Float64Array([0, 10_000, 20_000]),
+    maxDeltaTMs: 1_000,
+  });
+  assert(requests.length === 2, "elapsed wall-clock range was not fetched");
+  assert(requests[1]!.min === 10_000 && requests[1]!.max === 12_000, "wrong live gap");
+});
+
+test("last-point coverage and returned future points never extend past now", async () => {
+  const warnings: string[] = [];
+  const fetcher: Fetcher = {
+    async fetchRange({ range }) {
+      return {
+        points: [
+          { t: 0, price: 10 },
+          { t: 5_000, price: 11 },
+          { t: 10_000, price: 12 }, // invalid future timestamp for this request
+        ],
+        searchedRange: range,
+      };
+    },
+  };
+  const broker = new Broker(fetcher, {
+    now: () => 7_500,
+    onWarning: (message) => warnings.push(message),
+  });
+  const evalTime = new Float64Array([0, 5_000, 10_000]);
+  broker.query({ evalTime, maxDeltaTMs: 5_000 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const result = broker.query({ evalTime, maxDeltaTMs: 5_000 });
+  const ready = result.resolution.filter((segment) => segment.state === "ready");
+  assert(
+    ready.every((segment) => segment.range.max <= 7_500),
+    "ready coverage entered future",
+  );
+  assert(
+    warnings.some((message) => message.includes("10000")),
+    "future API point was silent",
+  );
+});
+
+test("finer ready evidence removes overlapping coarser empty evidence", () => {
+  const coverage = new CoverageIndex();
+  coverage.addEmpty(5_000, Range.create(0, 10_000));
+  coverage.addReady(1_000, Range.create(2_000, 8_000));
+  const segments = coverage.segments(Range.create(0, 10_000), 5_000);
+  const ready = segments.filter((segment) => segment.state === "ready");
+  const empty = segments.filter((segment) => segment.state === "empty");
+  for (const r of ready) {
+    for (const e of empty) {
+      assert(r.range.max <= e.range.min || r.range.min >= e.range.max, "ready/empty overlap");
+    }
+  }
+});
+
+test("broker trusts the returned searched range, not the requested range", async () => {
+  const requests: Range[] = [];
+  const fetcher: Fetcher = {
     fetchRange({ range }) {
       requests.push(range);
+      if (requests.length > 1) return new Promise(() => undefined);
+      return Promise.resolve({
+        points: [
+          { t: 5_000, price: 10 },
+          { t: 6_000, price: 11 },
+          { t: 7_000, price: 12 },
+        ],
+        resolutionHintMs: 60_000, // deliberately wrong: timestamps win
+        searchedRange: Range.create(5_000, 7_000),
+      });
+    },
+  };
+  const broker = new Broker(fetcher, { now: () => 10_000 });
+  const evalTime = new Float64Array([0, 5_000, 10_000]);
+  broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  assert(requests.length === 3, `unsearched prefix/suffix were hidden (${requests.length} calls)`);
+  assert(requests[1]!.min === 0 && requests[1]!.max === 5_000, "prefix was marked covered");
+  assert(requests[2]!.min === 7_000 && requests[2]!.max === 10_000, "suffix was marked covered");
+});
+
+test("empty and coarse evidence never suppress a finer request", async () => {
+  const requests: number[] = [];
+  const fetcher: Fetcher = {
+    fetchRange({ range, maxDeltaTMs }) {
+      requests.push(maxDeltaTMs);
+      if (requests.length > 1) return new Promise(() => undefined);
+      return Promise.resolve({
+        points: [
+          { t: 0, price: 10 },
+          { t: 5_000, price: 11 },
+          { t: 10_000, price: 12 },
+        ],
+        resolutionHintMs: 1_000,
+        searchedRange: range,
+      });
+    },
+  };
+  const broker = new Broker(fetcher, { now: () => 10_000 });
+  const evalTime = new Float64Array([0, 5_000, 10_000]);
+  broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  broker.query({ evalTime, maxDeltaTMs: 5_000 });
+  assert(count(requests) === 1, "observed finer/equal data did not satisfy coarse query");
+  broker.query({ evalTime, maxDeltaTMs: 500 });
+  assert(count(requests) === 2 && requests[1] === 500, "finer request was suppressed");
+});
+
+test("finer pending work suppresses only coarser duplicate requests", () => {
+  const requests: number[] = [];
+  const fetcher: Fetcher = {
+    fetchRange({ maxDeltaTMs }) {
+      requests.push(maxDeltaTMs);
       return new Promise(() => undefined);
     },
   };
-  const broker = new Broker(fetcher);
-  const first = broker.query({
-    evalTime: new Float64Array([0, 1_000, 2_000]),
-    maxDeltaTMs: 1_000,
-  });
+  const broker = new Broker(fetcher, { now: () => 10_000 });
+  const evalTime = new Float64Array([0, 5_000, 10_000]);
+  const first = broker.query({ evalTime, maxDeltaTMs: 1_000 });
   assert(
     first.resolution.some((segment) => segment.state === "pending"),
-    "pending gap hidden",
+    "pending hidden",
   );
-  broker.query({
-    evalTime: new Float64Array([2_000, 3_000, 4_000]),
-    maxDeltaTMs: 1_000,
-  });
-  assert(requests.length === 2, `scroll did not request the new gap (requests=${requests.length})`);
-  assert(requests[1]!.min === 2_000 && requests[1]!.max === 4_000, "wrong scrolled gap");
+  broker.query({ evalTime, maxDeltaTMs: 5_000 });
+  assert(count(requests) === 1, "fine pending request did not suppress coarse duplicate");
+  broker.query({ evalTime, maxDeltaTMs: 500 });
+  assert(count(requests) === 2, "coarse pending request suppressed a finer request");
 });
 
-test("broker exposes failed spans with the API error", async () => {
+test("a late coarse response cannot overwrite an earlier fine response", async () => {
+  let resolveCoarse!: (result: FetchRangeResult) => void;
+  let resolveFine!: (result: FetchRangeResult) => void;
   const fetcher: Fetcher = {
-    nativePeriodsMs: [1_000],
+    fetchRange({ maxDeltaTMs }) {
+      return new Promise((resolve) => {
+        if (maxDeltaTMs === 5_000) resolveCoarse = resolve;
+        else resolveFine = resolve;
+      });
+    },
+  };
+  const broker = new Broker(fetcher, { now: () => 5_000 });
+  const evalTime = new Float64Array([0, 1_000, 2_000, 3_000, 4_000, 5_000]);
+  broker.query({ evalTime, maxDeltaTMs: 5_000 });
+  broker.query({ evalTime, maxDeltaTMs: 1_000 });
+
+  resolveFine({
+    points: [
+      { t: 0, price: 100 },
+      { t: 1_000, price: 101 },
+      { t: 2_000, price: 102 },
+      { t: 3_000, price: 103 },
+      { t: 4_000, price: 104 },
+      { t: 5_000, price: 105 },
+    ],
+    searchedRange: Range.create(0, 5_000),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  resolveCoarse({
+    points: [
+      { t: 0, price: 10 },
+      { t: 5_000, price: 15 },
+    ],
+    searchedRange: Range.create(0, 5_000),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const result = broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  approx(Math.exp(result.value[1]!), 101, 1e-10);
+});
+
+test("broker exposes failures and uses the fetcher's retry policy", async () => {
+  let calls = 0;
+  const fetcher: Fetcher = {
+    retryDelayMs: () => 100,
     async fetchRange() {
+      calls++;
       throw new Error("upstream unavailable");
     },
   };
-  const broker = new Broker(fetcher);
+  const broker = new Broker(fetcher, { onError: () => undefined });
   const evalTime = new Float64Array([0, 1_000]);
   broker.query({ evalTime, maxDeltaTMs: 1_000 });
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -202,6 +370,11 @@ test("broker exposes failed spans with the API error", async () => {
   const failed = result.resolution.find((segment) => segment.state === "failed");
   assert(failed !== undefined, "failed request was still presented as pending");
   assert(failed.message === "upstream unavailable", "failure detail was lost");
+  broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  assert(Number(calls) === 1, "failure backoff did not suppress a retry");
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  assert(Number(calls) === 2, "request did not retry after adapter backoff elapsed");
   broker.dispose();
 });
 

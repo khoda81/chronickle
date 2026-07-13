@@ -79,6 +79,20 @@ export class RangeSet {
     this.intervals.splice(0, this.intervals.length, ...kept);
   }
 
+  /** Remove `r`, splitting existing intervals when necessary. */
+  remove(r: Range): void {
+    const kept: Range[] = [];
+    for (const iv of this.intervals) {
+      if (iv.max <= r.min || iv.min >= r.max) {
+        kept.push(iv);
+        continue;
+      }
+      if (iv.min < r.min) kept.push(Range.create(iv.min, r.min));
+      if (iv.max > r.max) kept.push(Range.create(r.max, iv.max));
+    }
+    this.intervals.splice(0, this.intervals.length, ...kept);
+  }
+
   /**
    * Return the sub-ranges of `r` that are NOT covered, ascending.
    * Empty array means `r` is fully covered.

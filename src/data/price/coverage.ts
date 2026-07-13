@@ -1,6 +1,5 @@
 import { Range } from "../../engine/range.ts";
 import { RangeSet } from "../rangeSet.ts";
-import type { FetchCoverage } from "./fetcher.ts";
 
 export type CoverageState = "ready" | "empty" | "pending" | "failed";
 
@@ -8,68 +7,96 @@ export interface ResolutionSegment {
   readonly range: Range;
   readonly resolutionMs: number;
   readonly state: CoverageState;
-  /** Populated for failed spans; intended for diagnostics/tooltips. */
   readonly message?: string;
 }
 
-interface CoverageLevel {
-  readonly known: RangeSet;
-  readonly data: RangeSet;
-  readonly empty: RangeSet;
-}
-
 /**
- * Resolution-aware source coverage.
+ * Evidence-backed coverage indexed by observed spacing.
  *
- * Coverage is deliberately kept separate from observations: a last price can
- * be held only where the source has answered the request, while a known-empty
- * market interval must not be retried indefinitely.
+ * Ready ranges come only from adjacent stored observations (plus the expected
+ * lifetime of the last observation). Empty ranges are request-quality-local:
+ * an empty 5-minute lookup does not say anything about a 1-minute lookup and
+ * never dominates another resolution.
  */
 export class CoverageIndex {
-  private readonly levels = new Map<number, CoverageLevel>();
+  private readonly ready = new Map<number, RangeSet>();
+  private readonly empty = new Map<number, RangeSet>();
 
-  add(resolutionMs: number, coverage: FetchCoverage): void {
-    const level = this.level(resolutionMs);
-    level.known.add(coverage.range);
-    if (coverage.kind === "empty") level.empty.add(coverage.range);
-    else level.data.add(coverage.range);
+  addReady(resolutionMs: number, range: Range): void {
+    this.level(this.ready, resolutionMs).add(range);
+    // New observations supersede older request-local empty evidence whenever
+    // they are at least as fine as that request required.
+    for (const [requestResolutionMs, empty] of this.empty) {
+      if (resolutionMs <= requestResolutionMs) empty.remove(range);
+    }
   }
 
-  gaps(resolutionMs: number, range: Range): readonly Range[] {
-    return this.level(resolutionMs).known.gaps(range);
+  addEmpty(requestResolutionMs: number, range: Range): void {
+    this.level(this.empty, requestResolutionMs).add(range);
   }
 
-  hasDataAt(resolutionMs: number, t: number): boolean {
-    return this.levels.get(resolutionMs)?.data.contains(t) ?? false;
+  /** Add every ready interval acceptable for `maxResolutionMs` to `out`. */
+  addReadyBlockers(out: RangeSet, maxResolutionMs: number, range: Range): void {
+    for (const [resolutionMs, ranges] of this.ready) {
+      if (resolutionMs > maxResolutionMs) continue;
+      for (const overlap of ranges.intersections(range)) out.add(overlap);
+    }
   }
 
-  dataRanges(resolutionMs: number): readonly Range[] {
-    return this.levels.get(resolutionMs)?.data.ranges() ?? [];
+  /** Empty evidence blocks only an equivalent request quality. */
+  addEmptyBlockers(out: RangeSet, requestResolutionMs: number, range: Range): void {
+    const ranges = this.empty.get(requestResolutionMs);
+    if (ranges === undefined) return;
+    for (const overlap of ranges.intersections(range)) out.add(overlap);
   }
 
-  segments(resolutionMs: number, range: Range): readonly ResolutionSegment[] {
-    const level = this.levels.get(resolutionMs);
-    if (level === undefined) return [];
+  /** Finest observed ready resolution at `t`, optionally bounded by quality. */
+  finestReadyAt(t: number, maxResolutionMs = Infinity): number | null {
+    let best = Infinity;
+    for (const [resolutionMs, ranges] of this.ready) {
+      if (resolutionMs <= maxResolutionMs && resolutionMs < best && ranges.contains(t)) {
+        best = resolutionMs;
+      }
+    }
+    return Number.isFinite(best) ? best : null;
+  }
+
+  /** Closest coarser fallback when the requested quality is not ready. */
+  closestCoarserAt(t: number, minResolutionMs: number): number | null {
+    let best = Infinity;
+    for (const [resolutionMs, ranges] of this.ready) {
+      if (resolutionMs > minResolutionMs && resolutionMs < best && ranges.contains(t)) {
+        best = resolutionMs;
+      }
+    }
+    return Number.isFinite(best) ? best : null;
+  }
+
+  segments(range: Range, requestResolutionMs: number): ResolutionSegment[] {
     const out: ResolutionSegment[] = [];
-    for (const r of level.data.intersections(range)) {
-      out.push({ range: r, resolutionMs, state: "ready" });
+    for (const [resolutionMs, ranges] of this.ready) {
+      for (const overlap of ranges.intersections(range)) {
+        out.push({ range: overlap, resolutionMs, state: "ready" });
+      }
     }
-    for (const r of level.empty.intersections(range)) {
-      out.push({ range: r, resolutionMs, state: "empty" });
+    const empty = this.empty.get(requestResolutionMs);
+    if (empty !== undefined) {
+      for (const overlap of empty.intersections(range)) {
+        out.push({ range: overlap, resolutionMs: requestResolutionMs, state: "empty" });
+      }
     }
-    out.sort((a, b) => a.range.min - b.range.min);
     return out;
   }
 
-  private level(resolutionMs: number): CoverageLevel {
+  private level(levels: Map<number, RangeSet>, resolutionMs: number): RangeSet {
     if (!(resolutionMs > 0) || !Number.isFinite(resolutionMs)) {
       throw new Error(`CoverageIndex: invalid resolution ${resolutionMs}`);
     }
-    let level = this.levels.get(resolutionMs);
-    if (level === undefined) {
-      level = { known: new RangeSet(), data: new RangeSet(), empty: new RangeSet() };
-      this.levels.set(resolutionMs, level);
+    let ranges = levels.get(resolutionMs);
+    if (ranges === undefined) {
+      ranges = new RangeSet();
+      levels.set(resolutionMs, ranges);
     }
-    return level;
+    return ranges;
   }
 }

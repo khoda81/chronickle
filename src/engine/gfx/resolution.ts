@@ -3,10 +3,17 @@ import type { Frame } from "./context.ts";
 import { RESOLUTION_BAR_HEIGHT, resolutionBarY } from "./layout.ts";
 
 const COLORS = {
-  ready: "rgba(35, 163, 146, 0.82)",
+  ready: "rgba(45, 212, 191, 0.82)",
   pending: "rgba(250, 204, 21, 0.88)",
   failed: "rgba(248, 113, 113, 0.92)",
   empty: "rgba(107, 114, 128, 0.70)",
+} as const;
+
+const LABEL_COLORS = {
+  ready: "#052e2b",
+  pending: "#302600",
+  failed: "#3f0909",
+  empty: "#f8fafc",
 } as const;
 
 export interface ResolutionLayer {
@@ -20,15 +27,16 @@ export const Resolution = {
 };
 
 class ResolutionImpl implements ResolutionLayer {
-  constructor(private readonly frame: Frame) { }
+  constructor(private readonly frame: Frame) {}
 
   draw(segments: readonly ResolutionSegment[], targetResolutionMs: number): void {
     const { frame } = this;
     const y = resolutionBarY(frame.height);
     frame.fillRectPx(0, y, frame.width, RESOLUTION_BAR_HEIGHT, "#0a0e17");
 
-    // Taller bars mean coarser native samples. Draw ready fallback first so a
-    // pending/failed target request remains visible on top of it.
+    // Finer samples are taller. The broker orders coarse before fine, so finer
+    // evidence covers coarser evidence while pending/failed state remains
+    // visibly layered above ready/empty state.
     for (let rank = 0; rank < 3; rank++) {
       for (const segment of segments) {
         if (stateRank(segment.state) !== rank) continue;
@@ -53,7 +61,7 @@ class ResolutionImpl implements ResolutionLayer {
             x0 + 4,
             y + RESOLUTION_BAR_HEIGHT - 5,
             "10px ui-monospace, monospace",
-            "rgba(255,255,255,0.9)",
+            LABEL_COLORS[segment.state],
           );
         }
       }
@@ -77,8 +85,8 @@ function stateRank(state: ResolutionSegment["state"]): number {
 }
 
 function resolutionHeight(resolutionMs: number): number {
-  const seconds = Math.max(1, resolutionMs / 1_000);
-  return Math.max(0, 13 + RESOLUTION_BAR_HEIGHT - Math.log2(seconds) * 3.2);
+  const minutes = Math.max(1, resolutionMs / 1_000 / 60);
+  return Math.max(10, RESOLUTION_BAR_HEIGHT - Math.log2(minutes) * 2.2);
 }
 
 function formatResolution(ms: number): string {
