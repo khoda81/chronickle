@@ -21,6 +21,7 @@ body {
   margin: 0;
   padding: 0;
   height: 100%;
+  overscroll-behavior: none;
   background: var(--bg);
   color: var(--fg);
 }
@@ -29,6 +30,7 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  height: 100dvh;
   padding: 16px;
   gap: 12px;
 }
@@ -325,6 +327,8 @@ canvas.timeline {
   height: 100%;
   cursor: crosshair;
   touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 canvas.timeline:active {
   cursor: grabbing;
@@ -542,5 +546,75 @@ select {
       background: var(--accent);
       color: var(--bg);
     }
+  }
+}
+
+@media (max-width: 640px) {
+  #app {
+    padding: 8px;
+    gap: 8px;
+  }
+
+  .header,
+  .data-controls {
+    gap: 8px;
+  }
+
+  .subtitle {
+    flex: 1 1 calc(100% - 120px);
+  }
+
+  .palette {
+    margin-left: 0;
+  }
+
+  .market-controls,
+  .feed-controls {
+    width: 100%;
+  }
+
+  .symbol-picker,
+  .feed-input {
+    min-width: 0;
+  }
+
+  .symbol-picker {
+    flex: 1;
+  }
+
+  .feed-list {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+
+  .feed-row {
+    flex: 0 0 auto;
+  }
+}
+
+@media (pointer: coarse) {
+  .palette,
+  .wavelet-mode,
+  .market-source,
+  .reload,
+  .chart-add,
+  .feed-add,
+  .symbol-picker {
+    min-height: 40px;
+  }
+
+  .feed-row {
+    min-height: 34px;
+    padding-inline: 9px;
+  }
+
+  .timeline-price-header {
+    height: 32px;
+  }
+
+  .timeline-price-remove {
+    width: 28px;
+    height: 28px;
   }
 }

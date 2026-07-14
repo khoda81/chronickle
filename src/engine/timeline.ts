@@ -10,6 +10,7 @@ import type {
 } from "../data/price/broker.ts";
 import { Range } from "./range.ts";
 import { DataTransform } from "./transform.ts";
+import { transformTouchRange } from "./gesture.ts";
 import { Plot } from "./plot.ts";
 import { hitTestEvent } from "./hittest.ts";
 import { setRampPalette, type PaletteName } from "./ramp.ts";
@@ -124,8 +125,18 @@ export class Timeline {
   private state: TimelineState;
   private dragging = false;
   private resizingBoundary: number | null = null;
+  private dragPointerId: number | null = null;
   private lastX = 0;
   private lastY = 0;
+  private gestureStartX = 0;
+  private gestureStartY = 0;
+  private gestureMoved = false;
+  private touchAId: number | null = null;
+  private touchAX = 0;
+  private touchAY = 0;
+  private touchBId: number | null = null;
+  private touchBX = 0;
+  private touchBY = 0;
   private evalTime = new Float64Array(0);
   private readonly nowLine: HTMLDivElement;
   private readonly hoverLine: HTMLDivElement;
@@ -291,6 +302,7 @@ export class Timeline {
     this.canvas.addEventListener("pointerdown", this.onPointerDown);
     window.addEventListener("pointermove", this.onPointerMove);
     window.addEventListener("pointerup", this.onPointerUp);
+    window.addEventListener("pointercancel", this.onPointerCancel);
     this.canvas.addEventListener("wheel", this.onWheel, { passive: false });
     this.canvas.addEventListener("pointermove", this.onHoverMove);
     this.canvas.addEventListener("pointerleave", this.onHoverLeave);
@@ -302,6 +314,7 @@ export class Timeline {
     this.canvas.removeEventListener("pointerdown", this.onPointerDown);
     window.removeEventListener("pointermove", this.onPointerMove);
     window.removeEventListener("pointerup", this.onPointerUp);
+    window.removeEventListener("pointercancel", this.onPointerCancel);
     this.canvas.removeEventListener("wheel", this.onWheel);
     this.canvas.removeEventListener("pointermove", this.onHoverMove);
     this.canvas.removeEventListener("pointerleave", this.onHoverLeave);
@@ -615,6 +628,15 @@ export class Timeline {
   private onPointerDown = (event: PointerEvent): void => {
     this.updatePointer(event);
     this.hidePriceHover();
+    if (event.pointerType === "touch") {
+      this.onTouchDown(event);
+      return;
+    }
+
+    this.gestureStartX = event.clientX;
+    this.gestureStartY = event.clientY;
+    this.gestureMoved = false;
+    this.dragPointerId = event.pointerId;
     const boundary = this.boundaryAt(this.pointerPy);
     if (boundary !== null) {
       this.resizingBoundary = boundary;
@@ -632,17 +654,24 @@ export class Timeline {
   };
 
   private onPointerMove = (event: PointerEvent): void => {
+    if (event.pointerType === "touch") {
+      this.onTouchMove(event);
+      return;
+    }
+    if (event.pointerId !== this.dragPointerId) return;
     if (this.resizingBoundary !== null) {
       this.updatePointer(event);
       const y = this.pointerPy;
       this.moveBoundary(this.resizingBoundary, y - this.lastY);
       this.lastY = y;
+      this.markGestureMoved(event.clientX, event.clientY);
       this.reqDraw();
       return;
     }
     if (!this.dragging) return;
     const dx = event.clientX - this.lastX;
     this.lastX = event.clientX;
+    this.markGestureMoved(event.clientX, event.clientY);
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width <= 0) return;
     const span = this.state.timeRange.max - this.state.timeRange.min;
@@ -650,11 +679,32 @@ export class Timeline {
   };
 
   private onPointerUp = (event: PointerEvent): void => {
+    if (event.pointerType === "touch") {
+      this.onTouchEnd(event);
+      return;
+    }
+    if (event.pointerId !== this.dragPointerId) return;
     this.dragging = false;
     this.resizingBoundary = null;
-    this.canvas.releasePointerCapture?.(event.pointerId);
+    this.dragPointerId = null;
+    if (this.canvas.hasPointerCapture?.(event.pointerId)) {
+      this.canvas.releasePointerCapture(event.pointerId);
+    }
     this.updatePointer(event);
     this.updatePriceHoverOverlay();
+    this.reqDraw();
+  };
+
+  private onPointerCancel = (event: PointerEvent): void => {
+    if (event.pointerType === "touch") {
+      this.onTouchEnd(event);
+      return;
+    }
+    if (event.pointerId !== this.dragPointerId) return;
+    this.dragPointerId = null;
+    this.dragging = false;
+    this.resizingBoundary = null;
+    this.hidePriceHover();
     this.reqDraw();
   };
 
@@ -701,11 +751,149 @@ export class Timeline {
   };
 
   private onClick = (event: PointerEvent): void => {
+    if (this.gestureMoved) {
+      this.gestureMoved = false;
+      return;
+    }
     this.updatePointer(event);
     if (this.updateHoverAtCurrentTransform()) this.reqDraw();
     if (this.state.hovered === null) return;
     window.open(this.eventAt(this.state.hovered).link, "_blank", "noopener,noreferrer");
   };
+
+  private onTouchDown(event: PointerEvent): void {
+    if (this.touchAId === null) {
+      this.touchAId = event.pointerId;
+      this.touchAX = event.clientX;
+      this.touchAY = event.clientY;
+      this.gestureStartX = event.clientX;
+      this.gestureStartY = event.clientY;
+      this.gestureMoved = false;
+      const boundary = this.boundaryAt(this.pointerPy);
+      if (boundary !== null) {
+        this.resizingBoundary = boundary;
+        this.lastY = this.pointerPy;
+        this.canvas.style.cursor = "ns-resize";
+      } else {
+        this.resizingBoundary = null;
+      }
+      this.dragging = true;
+    } else if (this.touchBId === null && event.pointerId !== this.touchAId) {
+      this.touchBId = event.pointerId;
+      this.touchBX = event.clientX;
+      this.touchBY = event.clientY;
+      this.resizingBoundary = null;
+      this.gestureMoved = true;
+      if (this.clearHover()) this.reqDraw();
+    }
+    this.canvas.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  }
+
+  private onTouchMove(event: PointerEvent): void {
+    const movingA = event.pointerId === this.touchAId;
+    const movingB = event.pointerId === this.touchBId;
+    if (!movingA && !movingB) return;
+
+    const previousAX = this.touchAX;
+    const previousAY = this.touchAY;
+    const previousBX = this.touchBX;
+    const previousBY = this.touchBY;
+    if (movingA) {
+      this.touchAX = event.clientX;
+      this.touchAY = event.clientY;
+    } else {
+      this.touchBX = event.clientX;
+      this.touchBY = event.clientY;
+    }
+
+    this.updatePointer(event);
+    if (this.touchBId !== null) {
+      const rect = this.canvas.getBoundingClientRect();
+      if (rect.width > 0) {
+        const previousCenterX = (previousAX + previousBX) / 2 - rect.left;
+        const currentCenterX = (this.touchAX + this.touchBX) / 2 - rect.left;
+        const previousDistance = Math.hypot(previousBX - previousAX, previousBY - previousAY);
+        const currentDistance = Math.hypot(
+          this.touchBX - this.touchAX,
+          this.touchBY - this.touchAY,
+        );
+        this.setTimeRange(
+          transformTouchRange(
+            this.state.timeRange,
+            rect.width,
+            previousCenterX,
+            currentCenterX,
+            previousDistance,
+            currentDistance,
+          ),
+        );
+      }
+      event.preventDefault();
+      return;
+    }
+
+    if (this.resizingBoundary !== null) {
+      const y = this.pointerPy;
+      this.moveBoundary(this.resizingBoundary, y - this.lastY);
+      this.lastY = y;
+      this.markGestureMoved(event.clientX, event.clientY);
+      this.reqDraw();
+      event.preventDefault();
+      return;
+    }
+
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width > 0) {
+      const dx = this.touchAX - previousAX;
+      const span = this.state.timeRange.max - this.state.timeRange.min;
+      this.setTimeRange(Range.pan(this.state.timeRange, -(dx / rect.width) * span));
+    }
+    this.markGestureMoved(event.clientX, event.clientY);
+    event.preventDefault();
+  }
+
+  private onTouchEnd(event: PointerEvent): void {
+    if (event.pointerId === this.touchAId) {
+      if (this.touchBId !== null) {
+        this.touchAId = this.touchBId;
+        this.touchAX = this.touchBX;
+        this.touchAY = this.touchBY;
+        this.touchBId = null;
+      } else {
+        this.touchAId = null;
+      }
+    } else if (event.pointerId === this.touchBId) {
+      this.touchBId = null;
+    } else {
+      return;
+    }
+
+    if (this.canvas.hasPointerCapture?.(event.pointerId)) {
+      this.canvas.releasePointerCapture(event.pointerId);
+    }
+    this.resizingBoundary = null;
+    if (this.touchAId === null) {
+      this.dragging = false;
+      this.pointerInside = false;
+      this.canvas.style.cursor = "";
+    } else {
+      this.dragging = true;
+      this.gestureStartX = this.touchAX;
+      this.gestureStartY = this.touchAY;
+    }
+    this.hidePriceHover();
+    this.reqDraw();
+  }
+
+  private markGestureMoved(clientX: number, clientY: number): void {
+    if (
+      !this.gestureMoved &&
+      Math.hypot(clientX - this.gestureStartX, clientY - this.gestureStartY) >= 5
+    ) {
+      this.gestureMoved = true;
+    }
+  }
 
   private eventAt(index: number): NewsEvent {
     const event = this.state.events.events[index];
