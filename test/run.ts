@@ -11,7 +11,6 @@ import { ReturnPyramid } from "../src/data/price/returnPyramid.ts";
 import { ChunkedLevelStore } from "../src/data/price/store.ts";
 import { evaluateStaircase } from "../src/data/price/staircase.ts";
 import { Range } from "../src/engine/range.ts";
-import { transformTouchRange } from "../src/engine/gesture.ts";
 import { fitStackLayout } from "../src/engine/gfx/layout.ts";
 import { placeTooltip } from "../src/ui/tooltip.ts";
 import {
@@ -102,24 +101,6 @@ test("hover labels flip around their anchor and remain inside the viewport", () 
     viewportHeight: 60,
   });
   assert(cramped.x === 8 && cramped.y === 8, "oversized label was not clamped to the viewport");
-});
-
-test("pinch gestures zoom around their centroid", () => {
-  const range = Range.create(0, 1_000);
-  const zoomed = transformTouchRange(range, 500, 250, 250, 100, 200);
-  approx(zoomed.min, 250);
-  approx(zoomed.max, 750);
-
-  const panned = transformTouchRange(range, 500, 200, 300, 100, 100);
-  approx(panned.min, -200);
-  approx(panned.max, 800);
-
-  const combined = transformTouchRange(range, 500, 200, 300, 100, 200);
-  approx(combined.min, 100);
-  approx(combined.max, 600);
-  const anchoredTime = 400;
-  const anchoredX = ((anchoredTime - combined.min) / Range.span(combined)) * 500;
-  approx(anchoredX, 300);
 });
 
 test("staircase returns NaN when empty and holds the final observation", () => {

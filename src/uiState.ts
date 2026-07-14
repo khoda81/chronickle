@@ -29,6 +29,8 @@ export interface UiState {
   readonly charts?: readonly {
     readonly sourceId: string;
     readonly symbol: string;
+    readonly palette?: string;
+    readonly verticalOffset?: number;
   }[];
 }
 
@@ -36,7 +38,12 @@ interface MutableUiState {
   viewport?: { readonly min: number; readonly max: number };
   palette?: string;
   waveletMode?: "centered" | "causal";
-  charts?: readonly { readonly sourceId: string; readonly symbol: string }[];
+  charts?: readonly {
+    readonly sourceId: string;
+    readonly symbol: string;
+    readonly palette?: string;
+    readonly verticalOffset?: number;
+  }[];
 }
 
 let saveTimer: number | null = null;

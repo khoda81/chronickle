@@ -7,7 +7,7 @@ import { Broker } from "./data/price/broker.ts";
 import { MARKET_SOURCES, marketSource, type MarketSourceId } from "./data/price/markets.ts";
 import { filterMarketSymbols, type MarketSymbol } from "./data/price/symbols.ts";
 import type { RssFeed } from "./domain.ts";
-import { PALETTES, rampPaletteName, setRampPalette, type PaletteName } from "./engine/ramp.ts";
+import { DEFAULT_PALETTE, PALETTES, type PaletteName } from "./engine/ramp.ts";
 import { Range } from "./engine/range.ts";
 import { Timeline, type PriceRow } from "./engine/timeline.ts";
 import type { WaveletMode } from "./engine/wavelet.ts";
@@ -57,7 +57,6 @@ const DEFAULT_FEEDS: readonly RssFeed[] = [
 interface AppElements {
   readonly status: HTMLDivElement;
   readonly reload: HTMLButtonElement;
-  readonly palette: HTMLSelectElement;
   readonly wavelet: HTMLSelectElement;
   readonly source: HTMLSelectElement;
   readonly symbolPicker: HTMLDivElement;
@@ -78,6 +77,8 @@ interface ChartInstance {
   readonly sourceLabel: string;
   readonly symbol: string;
   readonly broker: Broker;
+  palette: PaletteName;
+  verticalOffset: number;
 }
 
 function el<T extends HTMLElement>(tag: string, cls?: string): T {
@@ -92,16 +93,13 @@ function buildApp(): AppElements {
   const header = el<HTMLDivElement>("div", "header");
   const title = el<HTMLHeadingElement>("h1");
   title.textContent = "Chronickle";
-  const subtitle = el<HTMLParagraphElement>("p", "subtitle");
-  subtitle.textContent = "Market volatility × news events";
-  const palette = el<HTMLSelectElement>("select", "palette");
-  for (const name of Object.keys(PALETTES) as PaletteName[]) {
-    const option = el<HTMLOptionElement>("option");
-    option.value = name;
-    option.textContent = name;
-    option.selected = name === rampPaletteName();
-    palette.append(option);
-  }
+  const github = el<HTMLAnchorElement>("a", "github-link");
+  github.href = "https://github.com/khoda81/chronickle";
+  github.target = "_blank";
+  github.rel = "noopener noreferrer";
+  github.setAttribute("aria-label", "Open the Chronickle repository on GitHub");
+  github.innerHTML =
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.64 0 8.13c0 3.59 2.29 6.64 5.47 7.71.4.08.55-.18.55-.39 0-.19-.01-.83-.01-1.5-2.01.38-2.53-.5-2.69-.96-.09-.23-.48-.96-.82-1.15-.28-.15-.68-.53-.01-.54.63-.01 1.08.59 1.23.83.72 1.23 1.87.88 2.33.67.07-.53.28-.88.51-1.08-1.78-.21-3.64-.91-3.64-4.02 0-.89.31-1.62.82-2.19-.08-.21-.36-1.04.08-2.16 0 0 .67-.22 2.2.84A7.5 7.5 0 0 1 8 3.91c.68 0 1.36.09 2 .28 1.53-1.06 2.2-.84 2.2-.84.44 1.12.16 1.95.08 2.16.51.57.82 1.3.82 2.19 0 3.12-1.87 3.81-3.65 4.02.29.25.54.74.54 1.5 0 1.08-.01 1.95-.01 2.22 0 .21.15.47.55.39A8.14 8.14 0 0 0 16 8.13C16 3.64 12.42 0 8 0Z"/></svg><span class="github-tooltip" role="tooltip">View on GitHub</span>';
   const wavelet = el<HTMLSelectElement>("select", "wavelet-mode");
   for (const entry of [
     { value: "centered", label: "Centered growth" },
@@ -114,7 +112,7 @@ function buildApp(): AppElements {
   }
   const reload = el<HTMLButtonElement>("button", "reload");
   reload.textContent = "Reload data";
-  header.append(title, subtitle, palette, wavelet, reload);
+  header.append(title, github, wavelet, reload);
 
   const marketControls = el<HTMLDivElement>("div", "market-controls");
   const source = el<HTMLSelectElement>("select", "market-source");
@@ -167,7 +165,6 @@ function buildApp(): AppElements {
   return {
     status,
     reload,
-    palette,
     wavelet,
     source,
     symbolPicker,
@@ -190,7 +187,8 @@ function setStatus(status: HTMLDivElement, message: string, kind: "info" | "erro
 
 function main(): void {
   const ui = loadUiState();
-  if (ui.palette && ui.palette in PALETTES) setRampPalette(ui.palette as PaletteName);
+  const legacyPalette =
+    ui.palette && ui.palette in PALETTES ? (ui.palette as PaletteName) : DEFAULT_PALETTE;
   const app = buildApp();
   const now = Date.now();
   let sharedRange =
@@ -217,14 +215,20 @@ function main(): void {
       },
       onViewportChange: (viewport) => {
         sharedRange = Range.create(viewport.min, viewport.max);
-        saveUiState({ viewport, palette: rampPaletteName(), waveletMode });
+        saveUiState({ viewport, waveletMode });
       },
     },
   });
   timeline.setWaveletMode(waveletMode);
   eventBroker.subscribe(() => timeline.reqDraw());
 
-  const chartSpecs = () => charts.map(({ sourceId, symbol }) => ({ sourceId, symbol }));
+  const chartSpecs = () =>
+    charts.map(({ sourceId, symbol, palette, verticalOffset }) => ({
+      sourceId,
+      symbol,
+      palette,
+      verticalOffset,
+    }));
   const persistCharts = () => saveUiState({ charts: chartSpecs() });
 
   function updatePriceRows(): void {
@@ -233,7 +237,17 @@ function main(): void {
       label: `${chart.sourceLabel} · ${chart.symbol}`,
       read: (request) => chart.broker.read(request),
       subscribe: (demand, onChange) => chart.broker.subscribe(demand, onChange),
+      palette: chart.palette,
+      verticalOffset: chart.verticalOffset,
       onRemove: () => removeChart(chart.key),
+      onPaletteChange: (palette) => {
+        chart.palette = palette;
+        persistCharts();
+      },
+      onVerticalOffsetChange: (offset) => {
+        chart.verticalOffset = offset;
+        persistCharts();
+      },
       onDataChange: () => {
         const cached = chart.broker.cachedRange();
         if (cached !== null) {
@@ -259,7 +273,12 @@ function main(): void {
     setStatus(app.status, `Removed ${chart!.sourceLabel} ${chart!.symbol}`);
   }
 
-  function addChart(sourceId: string, rawSymbol: string, persist = true): boolean {
+  function addChart(
+    sourceId: string,
+    rawSymbol: string,
+    persist = true,
+    initial?: { readonly palette?: string; readonly verticalOffset?: number },
+  ): boolean {
     const source = marketSource(sourceId);
     if (source === null) {
       setStatus(app.status, `Unknown market source: ${sourceId}`, "error");
@@ -287,12 +306,23 @@ function main(): void {
         );
       },
     });
+    const paletteNames = Object.keys(PALETTES) as PaletteName[];
+    const basePaletteIndex = Math.max(0, paletteNames.indexOf(legacyPalette));
+    const palette =
+      initial?.palette && initial.palette in PALETTES
+        ? (initial.palette as PaletteName)
+        : paletteNames[(basePaletteIndex + charts.length) % paletteNames.length]!;
     charts.push({
       key,
       sourceId: source.id,
       sourceLabel: source.label,
       symbol,
       broker,
+      palette,
+      verticalOffset:
+        typeof initial?.verticalOffset === "number" && Number.isFinite(initial.verticalOffset)
+          ? initial.verticalOffset
+          : 0,
     });
     updatePriceRows();
     if (persist) persistCharts();
@@ -449,7 +479,7 @@ function main(): void {
       typeof saved.sourceId === "string" &&
       typeof saved.symbol === "string"
     ) {
-      addChart(saved.sourceId, saved.symbol, false);
+      addChart(saved.sourceId, saved.symbol, false, saved);
     }
   }
   if (charts.length === 0) addChart("nobitex", "USDTIRT", false);
@@ -537,11 +567,6 @@ function main(): void {
       `Cleared price and event caches; reloading ${charts.length} market row(s)…`,
     );
   });
-  app.palette.addEventListener("change", () => {
-    const palette = app.palette.value as PaletteName;
-    timeline.setPalette(palette);
-    saveUiState({ palette });
-  });
   app.wavelet.addEventListener("change", () => {
     waveletMode = app.wavelet.value as WaveletMode;
     timeline.setWaveletMode(waveletMode);
@@ -550,7 +575,6 @@ function main(): void {
   window.addEventListener("pagehide", () => {
     flushUiState({
       viewport: { min: sharedRange.min, max: sharedRange.max },
-      palette: rampPaletteName(),
       waveletMode,
       charts: chartSpecs(),
     });

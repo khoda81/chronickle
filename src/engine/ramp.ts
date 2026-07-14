@@ -93,10 +93,12 @@ export const PALETTES = {
 /** Valid palette names. */
 export type PaletteName = keyof typeof PALETTES;
 
+export const DEFAULT_PALETTE: PaletteName = "blue-orange";
+
 export const RAMP_RESOLUTION = 4096;
 
-let activePalette: RampPalette = PALETTES["blue-orange"];
-let lut: Uint8ClampedArray | null = null;
+let activePalette: RampPalette = PALETTES[DEFAULT_PALETTE];
+const lutByPalette = new Map<PaletteName, Uint8ClampedArray>();
 
 /**
  * Switch the active palette by name. Invalidates the cached LUT so the next
@@ -107,7 +109,6 @@ export function setRampPalette(name: PaletteName): void {
   const p = PALETTES[name];
   if (p === activePalette) return;
   activePalette = p;
-  lut = null;
 }
 
 /** Current palette name. */
@@ -122,10 +123,22 @@ export function rampPaletteName(): PaletteName {
  *
  * @throws if stops are malformed.
  */
-export function rampLut(): Uint8ClampedArray {
-  if (lut !== null) return lut;
-  lut = buildLut(activePalette);
+export function rampLut(name: PaletteName = rampPaletteName()): Uint8ClampedArray {
+  const cached = lutByPalette.get(name);
+  if (cached !== undefined) return cached;
+  const lut = buildLut(PALETTES[name]);
+  lutByPalette.set(name, lut);
   return lut;
+}
+
+/** CSS preview of the same perceptual stops used by a heatmap row. */
+export function paletteCssGradient(name: PaletteName): string {
+  return `linear-gradient(90deg, ${PALETTES[name].stops
+    .map(
+      ([position, lightness, chroma, hue]) =>
+        `oklch(${lightness * 100}% ${chroma} ${hue}) ${position * 100}%`,
+    )
+    .join(", ")})`;
 }
 
 /**

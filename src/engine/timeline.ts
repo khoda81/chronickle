@@ -12,8 +12,8 @@ import { Range } from "./range.ts";
 import { DataTransform } from "./transform.ts";
 import { transformTouchRange } from "./gesture.ts";
 import { Plot } from "./plot.ts";
-import { hitTestEvent } from "./hittest.ts";
-import { setRampPalette, type PaletteName } from "./ramp.ts";
+import { nearestEventIndex } from "./hittest.ts";
+import { PALETTES, paletteCssGradient, type PaletteName } from "./ramp.ts";
 import { kernelContext, type WaveletMode } from "./wavelet.ts";
 import { DEFAULT_MIN_TICK_PX } from "./gfx/axis.ts";
 import type { Frame } from "./gfx/context.ts";
@@ -24,6 +24,7 @@ import {
   MIN_PRICE_ROW_HEIGHT,
   RESIZE_HANDLE_RADIUS,
   RESOLUTION_BAR_HEIGHT,
+  clampHeatmapOffset,
   maxSigmaFor,
 } from "./gfx/layout.ts";
 
@@ -36,13 +37,19 @@ export interface PriceRow {
   readonly label: string;
   readonly read: DataReader;
   readonly subscribe: DataSubscriber;
+  readonly palette: PaletteName;
+  readonly verticalOffset: number;
   readonly onRemove?: () => void;
   readonly onDataChange?: () => void;
+  readonly onPaletteChange?: (palette: PaletteName) => void;
+  readonly onVerticalOffsetChange?: (offset: number) => void;
 }
 
 interface PriceRowChrome {
   readonly root: HTMLDivElement;
-  readonly hover: HTMLDivElement;
+  readonly palette: HTMLButtonElement;
+  readonly paletteBar: HTMLSpanElement;
+  readonly paletteMenu: HTMLDivElement;
 }
 
 export interface HoverInfo {
@@ -113,6 +120,8 @@ export class Timeline {
   private readonly config: TimelineConfig;
   private priceRows: readonly PriceRow[];
   private rowHeights: number[];
+  private rowPalettes: PaletteName[];
+  private rowVerticalOffsets: number[];
   private priceSubscriptions: BrokerSubscription[] = [];
   private subscribedDemand: BrokerDemand | null = null;
   private latestPriceValues: Float64Array[] = [];
@@ -125,6 +134,7 @@ export class Timeline {
   private state: TimelineState;
   private dragging = false;
   private resizingBoundary: number | null = null;
+  private verticalPanRow: number | null = null;
   private dragPointerId: number | null = null;
   private lastX = 0;
   private lastY = 0;
@@ -140,10 +150,12 @@ export class Timeline {
   private evalTime = new Float64Array(0);
   private readonly nowLine: HTMLDivElement;
   private readonly hoverLine: HTMLDivElement;
+  private readonly timeHover: HTMLDivElement;
   private nowTimer: number | null = null;
   private pointerInside = false;
   private pointerPx = 0;
   private pointerPy = 0;
+  private crosshairPinned = false;
   private notifiedHoverIndex: number | null = null;
   private notifiedHoverT = Number.NaN;
   private notifiedHoverTitle = "";
@@ -175,6 +187,8 @@ export class Timeline {
     this.config = { ...DEFAULT_TIMELINE_CONFIG, ...opts.config };
     this.priceRows = opts.priceRows ?? [];
     this.rowHeights = this.priceRows.map(() => MIN_PRICE_ROW_HEIGHT);
+    this.rowPalettes = this.priceRows.map((row) => row.palette);
+    this.rowVerticalOffsets = this.priceRows.map((row) => row.verticalOffset);
     this.plot = new Plot({ canvas: opts.canvas, initialTimeRange: opts.initialTimeRange });
     const parent = this.canvas.parentElement;
     if (parent === null) throw new Error("Timeline canvas must have a parent element");
@@ -185,7 +199,10 @@ export class Timeline {
     this.hoverLine = document.createElement("div");
     this.hoverLine.className = "timeline-hover-line";
     this.hoverLine.hidden = true;
-    parent.append(this.nowLine, this.hoverLine);
+    this.timeHover = document.createElement("div");
+    this.timeHover.className = "timeline-time-hover";
+    this.timeHover.hidden = true;
+    parent.append(this.nowLine, this.hoverLine, this.timeHover);
     this.state = {
       events: EMPTY_EVENTS,
       timeRange: opts.initialTimeRange,
@@ -225,6 +242,8 @@ export class Timeline {
         : MIN_PRICE_ROW_HEIGHT;
     this.priceRows = [...rows];
     this.rowHeights = rows.map((row) => oldHeight.get(row.id) ?? fallback);
+    this.rowPalettes = rows.map((row) => row.palette);
+    this.rowVerticalOffsets = rows.map((row) => row.verticalOffset);
     if (!hadPriceRows && rows.length > 0) this.state.newsHeight = DEFAULT_NEWS_HEIGHT;
     this.fitLayout();
     this.latestPriceValues = rows.map(() => new Float64Array(0));
@@ -270,11 +289,6 @@ export class Timeline {
     return this.state.waveletMode;
   }
 
-  setPalette(name: PaletteName): void {
-    setRampPalette(name);
-    this.reqDraw();
-  }
-
   dispose(): void {
     if (this.rafId !== null) cancelAnimationFrame(this.rafId);
     if (this.nowTimer !== null) clearTimeout(this.nowTimer);
@@ -283,9 +297,9 @@ export class Timeline {
     this.disposePriceSubscriptions();
     this.nowLine.remove();
     this.hoverLine.remove();
+    this.timeHover.remove();
     for (const chrome of this.rowChrome.values()) {
       chrome.root.remove();
-      chrome.hover.remove();
     }
     this.rowChrome.clear();
     this.unbindEvents();
@@ -307,6 +321,7 @@ export class Timeline {
     this.canvas.addEventListener("pointermove", this.onHoverMove);
     this.canvas.addEventListener("pointerleave", this.onHoverLeave);
     this.canvas.addEventListener("click", this.onClick);
+    document.addEventListener("pointerdown", this.onDocumentPointerDown);
     window.addEventListener("resize", this.onResize);
   }
 
@@ -319,6 +334,7 @@ export class Timeline {
     this.canvas.removeEventListener("pointermove", this.onHoverMove);
     this.canvas.removeEventListener("pointerleave", this.onHoverLeave);
     this.canvas.removeEventListener("click", this.onClick);
+    document.removeEventListener("pointerdown", this.onDocumentPointerDown);
     window.removeEventListener("resize", this.onResize);
   }
 
@@ -328,7 +344,7 @@ export class Timeline {
     const rect = this.canvas.getBoundingClientRect();
     this.canvas.width = Math.floor(rect.width * dpr);
     this.canvas.height = Math.floor(rect.height * dpr);
-    this.hidePriceHover();
+    this.hideCrosshair();
     this.fitLayout();
     this.reqDraw();
   }
@@ -344,17 +360,70 @@ export class Timeline {
   private rebuildRowChrome(): void {
     for (const chrome of this.rowChrome.values()) {
       chrome.root.remove();
-      chrome.hover.remove();
     }
     this.rowChrome.clear();
     const parent = this.canvas.parentElement;
     if (parent === null) throw new Error("Timeline canvas must have a parent element");
-    for (const row of this.priceRows) {
+    for (let index = 0; index < this.priceRows.length; index++) {
+      const row = this.priceRows[index]!;
       const root = document.createElement("div");
       root.className = "timeline-price-header";
+      root.title = "Drag this heatmap vertically to move through its fixed scale field";
       const label = document.createElement("span");
       label.textContent = row.label;
       root.append(label);
+      const palette = document.createElement("button");
+      palette.type = "button";
+      palette.className = "timeline-price-palette";
+      palette.title = `Change ${row.label} color map`;
+      palette.setAttribute("aria-label", `Change ${row.label} color map`);
+      palette.setAttribute("aria-haspopup", "listbox");
+      palette.setAttribute("aria-expanded", "false");
+      const paletteBar = document.createElement("span");
+      paletteBar.className = "timeline-price-palette-bar";
+      paletteBar.style.backgroundImage = paletteCssGradient(this.rowPalettes[index]!);
+      const caret = document.createElement("span");
+      caret.className = "timeline-price-palette-caret";
+      caret.textContent = "▾";
+      caret.setAttribute("aria-hidden", "true");
+      palette.append(paletteBar, caret);
+      const paletteMenu = document.createElement("div");
+      paletteMenu.className = "timeline-price-palette-menu";
+      paletteMenu.setAttribute("role", "listbox");
+      paletteMenu.setAttribute("aria-label", `${row.label} color maps`);
+      paletteMenu.hidden = true;
+      for (const name of Object.keys(PALETTES) as PaletteName[]) {
+        const option = document.createElement("button");
+        option.type = "button";
+        option.className = "timeline-price-palette-option";
+        option.setAttribute("role", "option");
+        option.setAttribute("aria-label", name);
+        option.setAttribute("aria-selected", String(name === this.rowPalettes[index]));
+        const optionBar = document.createElement("span");
+        optionBar.className = "timeline-price-palette-option-bar";
+        optionBar.style.backgroundImage = paletteCssGradient(name);
+        option.append(optionBar);
+        option.addEventListener("click", (event) => {
+          event.stopPropagation();
+          this.setRowPalette(index, name);
+          this.closePaletteMenus();
+        });
+        paletteMenu.append(option);
+      }
+      palette.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const willOpen = paletteMenu.hidden;
+        this.closePaletteMenus();
+        paletteMenu.hidden = !willOpen;
+        palette.setAttribute("aria-expanded", String(willOpen));
+        root.classList.toggle("palette-open", willOpen);
+      });
+      palette.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") return;
+        this.closePaletteMenus();
+        palette.focus();
+      });
+      root.append(palette, paletteMenu);
       if (row.onRemove !== undefined) {
         const remove = document.createElement("button");
         remove.type = "button";
@@ -368,18 +437,17 @@ export class Timeline {
         });
         root.append(remove);
       }
-      const hover = document.createElement("div");
-      hover.className = "timeline-price-hover";
-      hover.hidden = true;
-      parent.append(root, hover);
-      this.rowChrome.set(row.id, { root, hover });
+      parent.append(root);
+      this.rowChrome.set(row.id, { root, palette, paletteBar, paletteMenu });
     }
   }
 
-  private positionRowChrome(row: PriceRow, rowY: number, _heatHeight: number): void {
+  private positionRowChrome(row: PriceRow, rowY: number): void {
     const chrome = this.rowChrome.get(row.id);
     if (chrome === undefined) return;
     chrome.root.style.transform = `translate3d(5px, ${rowY + 5}px, 0)`;
+    const index = this.priceRows.indexOf(row);
+    if (index >= 0) chrome.root.dataset.verticalOffset = String(this.rowVerticalOffsets[index]);
   }
 
   private syncPriceSubscriptions(demand: BrokerDemand): void {
@@ -412,6 +480,7 @@ export class Timeline {
   }
 
   private draw = (): void => {
+    if (!(this.plot.cssWidth > 0) || !(this.plot.cssHeight > 0)) return;
     using frame = this.plot.beginFrame();
     const { width, height, dpr } = frame;
     const { priceScale, timeRange, waveletMode } = this.state;
@@ -451,6 +520,11 @@ export class Timeline {
       const row = this.priceRows[index]!;
       const rowHeight = this.rowHeights[index]!;
       const heatHeight = Math.max(2, rowHeight - RESOLUTION_BAR_HEIGHT);
+      const verticalOffset = clampHeatmapOffset(this.rowVerticalOffsets[index]!, heatHeight);
+      if (verticalOffset !== this.rowVerticalOffsets[index]) {
+        this.rowVerticalOffsets[index] = verticalOffset;
+        row.onVerticalOffsetChange?.(verticalOffset);
+      }
       const result = row.read({ evalTime: evalView, maxDeltaTMs: timePerPx });
       this.latestPriceValues[index] = result.value;
       frame.heatmap(row.id).drawWaveletField(
@@ -465,13 +539,16 @@ export class Timeline {
         waveletMode,
         rowY,
         heatHeight,
+        verticalOffset,
+        this.rowPalettes[index]!,
       );
       frame.resolution().draw(result.resolution, result.targetResolutionMs, rowY + heatHeight);
-      this.positionRowChrome(row, rowY, heatHeight);
+      this.positionRowChrome(row, rowY);
       rowY += rowHeight;
       frame.fillRectPx(0, rowY - 1, width, 1, "rgba(255,255,255,0.18)");
     }
-    this.updatePriceHoverOverlay();
+    this.updateCrosshairOverlay();
+    this.drawPriceHoverTooltips(frame);
 
     // The only time axis lives on the news/price boundary.
     frame.fillRectPx(0, this.state.newsHeight, width, 1, "rgba(255,255,255,0.3)");
@@ -480,66 +557,96 @@ export class Timeline {
     this.updateNowLine(timePerPx);
   };
 
-  private updatePriceHoverOverlay(): void {
+  private updateCrosshairOverlay(): void {
     if (
       !this.pointerInside ||
       this.dragging ||
       this.resizingBoundary !== null ||
-      this.priceRows.length === 0 ||
       this.latestNumPx <= 0 ||
       this.boundaryAt(this.pointerPy) !== null
     ) {
-      this.hidePriceHover();
+      this.hideCrosshair();
       return;
     }
 
     const width = this.plot.cssWidth;
     if (!(width > 0)) {
-      this.hidePriceHover();
+      this.hideCrosshair();
       return;
     }
     const x = Math.max(0, Math.min(width, this.pointerPx));
     this.hoverLine.hidden = false;
     this.hoverLine.style.transform = `translate3d(${x - 0.5}px, 0, 0)`;
+    const hoverTime =
+      this.state.timeRange.min +
+      (x / width) * (this.state.timeRange.max - this.state.timeRange.min);
+    this.timeHover.textContent = formatHoverTime(hoverTime);
+    this.timeHover.hidden = false;
+    const timeWidth = this.timeHover.offsetWidth;
+    const timeX = x + timeWidth + 18 <= width ? x + 9 : Math.max(5, x - timeWidth - 9);
+    this.timeHover.style.transform = `translate3d(${timeX}px, 10px, 0)`;
+  }
+
+  private drawPriceHoverTooltips(frame: Frame): void {
+    if (
+      !this.pointerInside ||
+      this.dragging ||
+      this.resizingBoundary !== null ||
+      this.latestNumPx <= 0 ||
+      this.boundaryAt(this.pointerPy) !== null
+    ) {
+      return;
+    }
+
+    const x = Math.max(0, Math.min(frame.width, this.pointerPx));
     const deviceX = Math.max(0, Math.min(this.latestNumPx, Math.floor(x * this.latestDpr)));
     const sampleIndex = this.latestPadLeft + deviceX;
-
     let rowY = this.state.newsHeight;
-    const viewportHeight = this.plot.cssHeight;
     for (let index = 0; index < this.priceRows.length; index++) {
-      const row = this.priceRows[index]!;
       const rowHeight = this.rowHeights[index]!;
       const heatHeight = Math.max(2, rowHeight - RESOLUTION_BAR_HEIGHT);
-      const chrome = this.rowChrome.get(row.id);
-      if (chrome === undefined) {
-        rowY += rowHeight;
-        continue;
-      }
       const logPrice = this.latestPriceValues[index]?.[sampleIndex];
-      if (logPrice === undefined || !Number.isFinite(logPrice)) {
-        chrome.hover.hidden = true;
-        rowY += rowHeight;
-        continue;
-      }
-      const text = formatPrice(Math.exp(logPrice));
-      if (chrome.hover.textContent !== text) chrome.hover.textContent = text;
-      chrome.hover.hidden = false;
-      const labelWidth = chrome.hover.offsetWidth;
-      const labelHeight = chrome.hover.offsetHeight;
-      const margin = 7;
-      const preferred = x + 9;
-      const labelX =
-        preferred + labelWidth <= width - margin ? preferred : Math.max(margin, x - 9 - labelWidth);
-      const centeredY = rowY + (heatHeight - labelHeight) / 2;
-      const labelY = Math.max(4, Math.min(viewportHeight - labelHeight - 4, centeredY));
-      chrome.hover.style.transform = `translate3d(${labelX}px, ${labelY}px, 0)`;
+      const text =
+        logPrice !== undefined && Number.isFinite(logPrice)
+          ? formatPrice(Math.exp(logPrice))
+          : "loading…";
+      drawPriceTooltip(frame, x, rowY + heatHeight / 2, text);
       rowY += rowHeight;
     }
   }
 
-  private hidePriceHover(): void {
+  private hideCrosshair(): void {
     this.hoverLine.hidden = true;
-    for (const chrome of this.rowChrome.values()) chrome.hover.hidden = true;
+    this.timeHover.hidden = true;
+  }
+
+  private setRowPalette(index: number, palette: PaletteName): void {
+    this.rowPalettes[index] = palette;
+    const row = this.priceRows[index];
+    if (row !== undefined) {
+      const chrome = this.rowChrome.get(row.id);
+      if (chrome !== undefined) {
+        chrome.paletteBar.style.backgroundImage = paletteCssGradient(palette);
+        for (const option of chrome.paletteMenu.querySelectorAll<HTMLElement>(
+          ".timeline-price-palette-option",
+        )) {
+          option.setAttribute(
+            "aria-selected",
+            String(option.getAttribute("aria-label") === palette),
+          );
+        }
+      }
+      row.onPaletteChange?.(palette);
+    }
+    this.reqDraw();
+  }
+
+  private closePaletteMenus(): void {
+    for (const chrome of this.rowChrome.values()) {
+      chrome.paletteMenu.hidden = true;
+      chrome.palette.setAttribute("aria-expanded", "false");
+      chrome.root.classList.remove("palette-open");
+    }
   }
 
   private drawResizeHandles(frame: Frame): void {
@@ -597,6 +704,26 @@ export class Timeline {
     this.rowHeights[right] = pair - leftHeight;
   }
 
+  private rowAt(y: number): number | null {
+    let rowY = this.state.newsHeight;
+    for (let index = 0; index < this.rowHeights.length; index++) {
+      const nextY = rowY + this.rowHeights[index]!;
+      if (y >= rowY && y < nextY - RESOLUTION_BAR_HEIGHT) return index;
+      rowY = nextY;
+    }
+    return null;
+  }
+
+  private panRowVertically(index: number | null, delta: number): void {
+    if (index === null || delta === 0) return;
+    const viewportHeight = Math.max(2, this.rowHeights[index]! - RESOLUTION_BAR_HEIGHT);
+    const next = clampHeatmapOffset(this.rowVerticalOffsets[index]! + delta, viewportHeight);
+    if (next === this.rowVerticalOffsets[index]) return;
+    this.rowVerticalOffsets[index] = next;
+    this.priceRows[index]?.onVerticalOffsetChange?.(next);
+    this.reqDraw();
+  }
+
   /** Move the wall-clock marker without invalidating data or the heatmap. */
   private updateNowLine(timePerPx: number): void {
     if (this.nowTimer !== null) clearTimeout(this.nowTimer);
@@ -627,7 +754,9 @@ export class Timeline {
 
   private onPointerDown = (event: PointerEvent): void => {
     this.updatePointer(event);
-    this.hidePriceHover();
+    this.crosshairPinned = false;
+    this.hideCrosshair();
+    this.reqDraw();
     if (event.pointerType === "touch") {
       this.onTouchDown(event);
       return;
@@ -640,6 +769,7 @@ export class Timeline {
     const boundary = this.boundaryAt(this.pointerPy);
     if (boundary !== null) {
       this.resizingBoundary = boundary;
+      this.verticalPanRow = null;
       this.dragging = false;
       this.lastY = this.pointerPy;
       if (this.clearHover()) this.reqDraw();
@@ -650,6 +780,8 @@ export class Timeline {
     }
     this.dragging = true;
     this.lastX = event.clientX;
+    this.lastY = this.pointerPy;
+    this.verticalPanRow = this.rowAt(this.pointerPy);
     this.canvas.setPointerCapture?.(event.pointerId);
   };
 
@@ -669,13 +801,17 @@ export class Timeline {
       return;
     }
     if (!this.dragging) return;
+    this.updatePointer(event);
     const dx = event.clientX - this.lastX;
+    const dy = this.pointerPy - this.lastY;
     this.lastX = event.clientX;
+    this.lastY = this.pointerPy;
     this.markGestureMoved(event.clientX, event.clientY);
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width <= 0) return;
     const span = this.state.timeRange.max - this.state.timeRange.min;
-    this.setTimeRange(Range.pan(this.state.timeRange, -(dx / rect.width) * span));
+    if (dx !== 0) this.setTimeRange(Range.pan(this.state.timeRange, -(dx / rect.width) * span));
+    this.panRowVertically(this.verticalPanRow, dy);
   };
 
   private onPointerUp = (event: PointerEvent): void => {
@@ -686,25 +822,27 @@ export class Timeline {
     if (event.pointerId !== this.dragPointerId) return;
     this.dragging = false;
     this.resizingBoundary = null;
+    this.verticalPanRow = null;
     this.dragPointerId = null;
     if (this.canvas.hasPointerCapture?.(event.pointerId)) {
       this.canvas.releasePointerCapture(event.pointerId);
     }
     this.updatePointer(event);
-    this.updatePriceHoverOverlay();
+    this.updateCrosshairOverlay();
     this.reqDraw();
   };
 
   private onPointerCancel = (event: PointerEvent): void => {
     if (event.pointerType === "touch") {
-      this.onTouchEnd(event);
+      this.onTouchEnd(event, true);
       return;
     }
     if (event.pointerId !== this.dragPointerId) return;
     this.dragPointerId = null;
     this.dragging = false;
     this.resizingBoundary = null;
-    this.hidePriceHover();
+    this.verticalPanRow = null;
+    this.hideCrosshair();
     this.reqDraw();
   };
 
@@ -738,16 +876,29 @@ export class Timeline {
   private onHoverMove = (event: PointerEvent): void => {
     this.updatePointer(event);
     this.canvas.style.cursor = this.boundaryAt(this.pointerPy) === null ? "" : "ns-resize";
-    this.updatePriceHoverOverlay();
+    this.updateCrosshairOverlay();
     if (this.dragging || this.resizingBoundary !== null) return;
-    if (this.updateHoverAtCurrentTransform()) this.reqDraw();
+    this.updateHoverAtCurrentTransform();
+    this.reqDraw();
   };
 
   private onHoverLeave = (): void => {
+    if (this.crosshairPinned) return;
     this.pointerInside = false;
-    this.hidePriceHover();
-    if (this.dragging || this.resizingBoundary !== null) return;
-    if (this.clearHover()) this.reqDraw();
+    this.hideCrosshair();
+    if (!this.dragging && this.resizingBoundary === null) this.clearHover();
+    this.reqDraw();
+  };
+
+  private onDocumentPointerDown = (event: PointerEvent): void => {
+    const target = event.target;
+    if (
+      target instanceof Element &&
+      target.closest(".timeline-price-palette, .timeline-price-palette-menu") !== null
+    ) {
+      return;
+    }
+    this.closePaletteMenus();
   };
 
   private onClick = (event: PointerEvent): void => {
@@ -756,9 +907,10 @@ export class Timeline {
       return;
     }
     this.updatePointer(event);
+    this.crosshairPinned = true;
     if (this.updateHoverAtCurrentTransform()) this.reqDraw();
-    if (this.state.hovered === null) return;
-    window.open(this.eventAt(this.state.hovered).link, "_blank", "noopener,noreferrer");
+    this.updateCrosshairOverlay();
+    this.reqDraw();
   };
 
   private onTouchDown(event: PointerEvent): void {
@@ -772,10 +924,13 @@ export class Timeline {
       const boundary = this.boundaryAt(this.pointerPy);
       if (boundary !== null) {
         this.resizingBoundary = boundary;
+        this.verticalPanRow = null;
         this.lastY = this.pointerPy;
         this.canvas.style.cursor = "ns-resize";
       } else {
         this.resizingBoundary = null;
+        this.verticalPanRow = this.rowAt(this.pointerPy);
+        this.lastY = this.pointerPy;
       }
       this.dragging = true;
     } else if (this.touchBId === null && event.pointerId !== this.touchAId) {
@@ -813,6 +968,8 @@ export class Timeline {
       if (rect.width > 0) {
         const previousCenterX = (previousAX + previousBX) / 2 - rect.left;
         const currentCenterX = (this.touchAX + this.touchBX) / 2 - rect.left;
+        const previousCenterY = (previousAY + previousBY) / 2;
+        const currentCenterY = (this.touchAY + this.touchBY) / 2;
         const previousDistance = Math.hypot(previousBX - previousAX, previousBY - previousAY);
         const currentDistance = Math.hypot(
           this.touchBX - this.touchAX,
@@ -828,6 +985,12 @@ export class Timeline {
             currentDistance,
           ),
         );
+        if (rect.height > 0) {
+          this.panRowVertically(
+            this.verticalPanRow,
+            (currentCenterY - previousCenterY) * (this.plot.cssHeight / rect.height),
+          );
+        }
       }
       event.preventDefault();
       return;
@@ -847,13 +1010,20 @@ export class Timeline {
     if (rect.width > 0) {
       const dx = this.touchAX - previousAX;
       const span = this.state.timeRange.max - this.state.timeRange.min;
-      this.setTimeRange(Range.pan(this.state.timeRange, -(dx / rect.width) * span));
+      if (dx !== 0) this.setTimeRange(Range.pan(this.state.timeRange, -(dx / rect.width) * span));
+      if (rect.height > 0) {
+        this.panRowVertically(
+          this.verticalPanRow,
+          (this.touchAY - previousAY) * (this.plot.cssHeight / rect.height),
+        );
+      }
     }
     this.markGestureMoved(event.clientX, event.clientY);
     event.preventDefault();
   }
 
-  private onTouchEnd(event: PointerEvent): void {
+  private onTouchEnd(event: PointerEvent, cancelled = false): void {
+    this.updatePointer(event);
     if (event.pointerId === this.touchAId) {
       if (this.touchBId !== null) {
         this.touchAId = this.touchBId;
@@ -875,14 +1045,22 @@ export class Timeline {
     this.resizingBoundary = null;
     if (this.touchAId === null) {
       this.dragging = false;
-      this.pointerInside = false;
+      this.verticalPanRow = null;
+      this.crosshairPinned = !cancelled && this.pointerInside;
       this.canvas.style.cursor = "";
     } else {
       this.dragging = true;
       this.gestureStartX = this.touchAX;
       this.gestureStartY = this.touchAY;
     }
-    this.hidePriceHover();
+    if (cancelled) {
+      this.pointerInside = false;
+      this.hideCrosshair();
+      this.clearHover();
+    } else if (this.touchAId === null) {
+      this.updateCrosshairOverlay();
+      this.updateHoverAtCurrentTransform();
+    }
     this.reqDraw();
   }
 
@@ -935,7 +1113,7 @@ export class Timeline {
       !this.dragging &&
       this.resizingBoundary === null &&
       this.boundaryAt(this.pointerPy) === null
-        ? hitTestEvent(this.state.events, tx, this.pointerPx, this.pointerPy, eventY)
+        ? nearestEventIndex(this.state.events, tx, this.pointerPx)
         : null;
     this.state.hovered = index;
     if (index === null) {
@@ -944,7 +1122,7 @@ export class Timeline {
     }
 
     const event = this.eventAt(index);
-    const anchorX = tx.timeToX(event.t);
+    const anchorX = Math.max(0, Math.min(width, this.pointerPx));
     const changed =
       index !== this.notifiedHoverIndex ||
       event.t !== this.notifiedHoverT ||
@@ -1010,4 +1188,77 @@ const PRICE_FORMAT = new Intl.NumberFormat(undefined, {
 function formatPrice(price: number): string {
   if (!(price > 0) || !Number.isFinite(price)) return "—";
   return PRICE_FORMAT.format(price);
+}
+
+const HOVER_TIME_FORMAT = new Intl.DateTimeFormat(undefined, {
+  month: "short",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+});
+
+function formatHoverTime(time: number): string {
+  return HOVER_TIME_FORMAT.format(new Date(time));
+}
+
+function drawPriceTooltip(frame: Frame, anchorX: number, anchorY: number, text: string): void {
+  const ctx = frame.ctx;
+  const font = "600 11px ui-monospace, monospace";
+  const paddingX = 7;
+  const height = 23;
+  const gap = 9;
+  const margin = 5;
+  ctx.save();
+  ctx.font = font;
+  const width = Math.ceil(ctx.measureText(text).width) + paddingX * 2;
+  const left =
+    anchorX + gap + width <= frame.width - margin
+      ? anchorX + gap
+      : Math.max(margin, anchorX - gap - width);
+  const top = Math.max(margin, Math.min(frame.height - height - margin, anchorY - height / 2));
+
+  ctx.strokeStyle = "rgba(226, 232, 240, 0.58)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(anchorX, anchorY);
+  ctx.lineTo(left > anchorX ? left : left + width, anchorY);
+  ctx.stroke();
+
+  roundedRectPath(ctx, left, top, width, height, 5);
+  ctx.fillStyle = "rgba(5, 7, 13, 0.94)";
+  ctx.fill();
+  ctx.strokeStyle = "rgba(148, 163, 184, 0.62)";
+  ctx.stroke();
+  ctx.fillStyle = "#f8fafc";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, left + paddingX, top + height / 2);
+  ctx.beginPath();
+  ctx.arc(anchorX, anchorY, 2.5, 0, Math.PI * 2);
+  ctx.fillStyle = "#f8fafc";
+  ctx.fill();
+  ctx.restore();
+}
+
+function roundedRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+): void {
+  const r = Math.min(radius, width / 2, height / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + width - r, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+  ctx.lineTo(x + width, y + height - r);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+  ctx.lineTo(x + r, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
 }

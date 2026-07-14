@@ -6,6 +6,8 @@ export const MIN_PRICE_ROW_HEIGHT = 130;
 
 /** Coverage/resolution diagnostics at the bottom of every price row. */
 export const RESOLUTION_BAR_HEIGHT = 34;
+/** Shared intrinsic heatmap height. Rows crop this field instead of stretching it. */
+export const HEATMAP_FIELD_HEIGHT = 640;
 /** Pointer hit target around each draggable horizontal boundary. */
 export const RESIZE_HANDLE_RADIUS = 6;
 
@@ -14,6 +16,13 @@ export const MAX_SIGMA_CAP = 128;
 
 export function maxSigmaFor(numPx: number): number {
   return Math.max(MIN_SIGMA, Math.min(MAX_SIGMA_CAP, numPx / 4));
+}
+
+/** Keep a vertically-panned fixed-height field covering its row viewport. */
+export function clampHeatmapOffset(offset: number, viewportHeight: number): number {
+  const min = Math.min(0, viewportHeight - HEATMAP_FIELD_HEIGHT);
+  const max = Math.max(0, viewportHeight - HEATMAP_FIELD_HEIGHT);
+  return clamp(offset, min, max);
 }
 
 export interface StackLayout {

@@ -1,6 +1,6 @@
 import type { Frame } from "./context.ts";
-import { MIN_SIGMA, maxSigmaFor } from "./layout.ts";
-import { RAMP_RESOLUTION, rampLut, rampIndex, rampPaletteName } from "../ramp.ts";
+import { HEATMAP_FIELD_HEIGHT, MIN_SIGMA, maxSigmaFor } from "./layout.ts";
+import { RAMP_RESOLUTION, rampLut, rampIndex, type PaletteName } from "../ramp.ts";
 import {
   computeWaveletField,
   logPriceEdgesToReturns,
@@ -31,7 +31,9 @@ export interface HeatmapLayer {
     priceScale: number,
     mode: WaveletMode,
     y: number,
-    heatHeight: number,
+    viewportHeight: number,
+    verticalOffset: number,
+    palette: PaletteName,
   ): void;
   drawFadeOverlay(y: number, heatHeight: number): void;
 }
@@ -58,8 +60,7 @@ const SIGMOID_MIN = -18;
 const SIGMOID_MAX = 18;
 const SIGMOID_LUT_SIZE = 1 << 17;
 let sigmoidLut: Uint16Array | null = null;
-let packedRampName: string | null = null;
-let packedRamp: Uint32Array | null = null;
+const packedRamps = new Map<PaletteName, Uint32Array>();
 const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([0x01020304]).buffer)[0] === 0x04;
 const INVALID_PIXEL = packRgba(5, 7, 13, 255);
 
@@ -84,7 +85,9 @@ class HeatmapImpl implements HeatmapLayer {
     priceScale: number,
     mode: WaveletMode,
     y: number,
-    heatHeight: number,
+    viewportHeight: number,
+    verticalOffset: number,
+    palette: PaletteName,
   ): void {
     const { tx, ctx, dpr } = this.frame;
     const width = tx.screenDomain.max - tx.screenDomain.min;
@@ -92,7 +95,7 @@ class HeatmapImpl implements HeatmapLayer {
     // One independently evaluated scale per visible CSS row. Using device
     // rows would duplicate work on HiDPI screens without a perceptible gain;
     // Canvas performs the final DPR rasterization.
-    const bandCount = Math.max(2, Math.ceil(heatHeight));
+    const bandCount = HEATMAP_FIELD_HEIGHT;
     const transformBandCount = Math.min(bandCount, MAX_TRANSFORM_BANDS);
     if (numPx <= 0) return;
 
@@ -127,11 +130,19 @@ class HeatmapImpl implements HeatmapLayer {
       padRight,
       priceScale,
       mode,
-      rampPaletteName(),
+      palette,
       bandCount,
     ].join("|");
     if (resources.lastRenderKey === renderKey) {
-      ctx.drawImage(resources.offscreen, tx.screenDomain.min, y, width, heatHeight);
+      drawClippedField(
+        ctx,
+        resources.offscreen,
+        tx.screenDomain.min,
+        y,
+        width,
+        viewportHeight,
+        verticalOffset,
+      );
       return;
     }
     resources.returns = logPriceEdgesToReturns(value, resources.returns);
@@ -158,7 +169,7 @@ class HeatmapImpl implements HeatmapLayer {
     );
     ensureImage(resources, numPx, bandCount);
     const imagePixels = resources.imagePixels!;
-    const ramp = packedRampLut();
+    const ramp = packedRampLut(palette);
     const sigmoid = sigmoidIndexLut();
     const sigmoidScale = (SIGMOID_LUT_SIZE - 1) / (SIGMOID_MAX - SIGMOID_MIN);
     const sigmoidMidpoint = Math.floor((RAMP_RESOLUTION - 1) / 2);
@@ -197,7 +208,15 @@ class HeatmapImpl implements HeatmapLayer {
 
     resources.offCtx.putImageData(resources.imageData!, 0, 0);
     resources.lastRenderKey = renderKey;
-    ctx.drawImage(resources.offscreen, tx.screenDomain.min, y, width, heatHeight);
+    drawClippedField(
+      ctx,
+      resources.offscreen,
+      tx.screenDomain.min,
+      y,
+      width,
+      viewportHeight,
+      verticalOffset,
+    );
   }
 
   drawFadeOverlay(y: number, heatHeight: number): void {
@@ -265,18 +284,34 @@ function sigmoidIndexLut(): Uint16Array {
   return lut;
 }
 
-function packedRampLut(): Uint32Array {
-  const name = rampPaletteName();
-  if (packedRamp !== null && packedRampName === name) return packedRamp;
-  const rgba = rampLut();
+function packedRampLut(name: PaletteName): Uint32Array {
+  const cached = packedRamps.get(name);
+  if (cached !== undefined) return cached;
+  const rgba = rampLut(name);
   const result = new Uint32Array(RAMP_RESOLUTION);
   for (let index = 0; index < result.length; index++) {
     const offset = index * 4;
     result[index] = packRgba(rgba[offset]!, rgba[offset + 1]!, rgba[offset + 2]!, 255);
   }
-  packedRampName = name;
-  packedRamp = result;
+  packedRamps.set(name, result);
   return result;
+}
+
+function drawClippedField(
+  ctx: CanvasRenderingContext2D,
+  image: OffscreenCanvas,
+  x: number,
+  y: number,
+  width: number,
+  viewportHeight: number,
+  verticalOffset: number,
+): void {
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, width, viewportHeight);
+  ctx.clip();
+  ctx.drawImage(image, x, y + verticalOffset, width, HEATMAP_FIELD_HEIGHT);
+  ctx.restore();
 }
 
 function packRgba(red: number, green: number, blue: number, alpha: number): number {

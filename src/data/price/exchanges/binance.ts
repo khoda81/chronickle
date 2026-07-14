@@ -47,13 +47,15 @@ export async function fetchBinanceGold(opts: FetchBinanceOptions = {}): Promise<
     // Binance returns an array of arrays.
     // Index 0: Open time (ms)
     // Index 1: Open price (string)
-    const data: any[][] = await res.json();
+    const data: unknown = await res.json();
+    if (!Array.isArray(data)) throw new Error("Binance API returned a non-array response");
 
     const points: PricePoint[] = [];
 
     for (const candle of data) {
+      if (!Array.isArray(candle)) continue;
       const tMs = Number(candle[0]);
-      const price = Number.parseFloat(candle[1]);
+      const price = Number(candle[1]);
 
       // Optional: Wavelet transforms often prefer continuous market hours without
       // weekend illiquidity gaps. Since crypto trades 24/7, PAXG will have weekend data.
