@@ -23,6 +23,11 @@ export interface QueryOptions {
   readonly maxDeltaTMs: number;
 }
 
+export interface EnsureOptions {
+  readonly range: Range;
+  readonly maxDeltaTMs: number;
+}
+
 export interface BrokerOptions {
   /** Injectable wall clock for deterministic tests. */
   readonly now?: () => number;
@@ -37,11 +42,17 @@ interface RequestState {
   readonly liveEdge: boolean;
 }
 
-interface FailedRequest extends RequestState {
-  readonly message: string;
-  readonly retryAt: number;
-  readonly timer: number;
-}
+type RequestLifecycle =
+  | { readonly kind: "fetching"; readonly request: RequestState; readonly attempt: number }
+  | {
+      readonly kind: "backoff";
+      readonly request: RequestState;
+      readonly attempt: number;
+      readonly message: string;
+      readonly retryAt: number;
+      readonly timer: number;
+    }
+  | { readonly kind: "retryable"; readonly attempt: number };
 
 interface LiveRefresh {
   readonly through: number;
@@ -58,9 +69,7 @@ export class Broker {
   private readonly stores = new Map<number, ChunkedLevelStore>();
   private readonly coverage = new CoverageIndex();
   private readonly subscribers = new Set<() => void>();
-  private readonly inFlight = new Map<string, RequestState>();
-  private readonly failures = new Map<string, FailedRequest>();
-  private readonly failureAttempts = new Map<string, number>();
+  private readonly requests = new Map<string, RequestLifecycle>();
   private liveRefresh: LiveRefresh | null = null;
   private readonly now: () => number;
   private readonly defaultRetryDelayMs: (attempt: number) => number;
@@ -80,15 +89,41 @@ export class Broker {
     this.onWarning = opts.onWarning ?? ((message) => console.warn(message));
   }
 
+  /**
+   * Compatibility façade for the original unidirectional UI flow: synchronously
+   * sample current cache contents and independently schedule missing coverage.
+   */
   query(opts: QueryOptions): QueryResult {
-    const { evalTime, maxDeltaTMs } = opts;
-    if (!(maxDeltaTMs > 0) || !Number.isFinite(maxDeltaTMs)) {
-      throw new Error(`Broker.query: invalid maxDeltaTMs ${maxDeltaTMs}`);
-    }
+    validateResolution(opts.maxDeltaTMs, "Broker.query");
+    const wallNow = this.now();
+    const range = rangeOf(opts.evalTime);
+    if (range !== null) this.ensureAt(range, opts.maxDeltaTMs, wallNow);
+    return this.sampleAt(opts, wallNow);
+  }
 
+  /** Declare data demand without reading or allocating a sampled result. */
+  ensure(opts: EnsureOptions): void {
+    validateResolution(opts.maxDeltaTMs, "Broker.ensure");
+    this.ensureAt(opts.range, opts.maxDeltaTMs, this.now());
+  }
+
+  /** Read current cache contents without starting requests or changing demand. */
+  sample(opts: QueryOptions): QueryResult {
+    validateResolution(opts.maxDeltaTMs, "Broker.sample");
+    return this.sampleAt(opts, this.now());
+  }
+
+  private ensureAt(range: Range, maxDeltaTMs: number, wallNow: number): void {
+    const historicalRange = clampToNow(range, wallNow);
+    if (historicalRange !== null) this.planRequests(historicalRange, maxDeltaTMs);
+  }
+
+  private sampleAt(opts: QueryOptions, wallNow: number): QueryResult {
+    const { evalTime, maxDeltaTMs } = opts;
     const value = new Float64Array(evalTime.length);
     value.fill(NaN);
-    if (evalTime.length < 2) {
+    const queryRange = rangeOf(evalTime);
+    if (queryRange === null) {
       return {
         value,
         leadingNaN: evalTime.length,
@@ -100,11 +135,7 @@ export class Broker {
       };
     }
 
-    const queryRange = Range.create(evalTime[0]!, evalTime[evalTime.length - 1]!);
-    const wallNow = this.now();
     const historicalRange = clampToNow(queryRange, wallNow);
-    if (historicalRange !== null) this.planRequests(historicalRange, maxDeltaTMs);
-
     this.wantedResolution = this.coverage.resolve(evalTime, maxDeltaTMs, this.wantedResolution);
     const wantedResolution = this.wantedResolution;
     for (const [resolutionMs, store] of this.stores) {
@@ -164,10 +195,8 @@ export class Broker {
 
   dispose(): void {
     this.generation++;
-    for (const failure of this.failures.values()) clearTimeout(failure.timer);
+    this.clearRequestLifecycle();
     this.clearLiveRefresh();
-    this.inFlight.clear();
-    this.failures.clear();
     this.subscribers.clear();
   }
 
@@ -177,11 +206,8 @@ export class Broker {
     this.fetcher.clearCache?.();
     this.stores.clear();
     this.coverage.clear();
-    this.inFlight.clear();
-    for (const failure of this.failures.values()) clearTimeout(failure.timer);
+    this.clearRequestLifecycle();
     this.clearLiveRefresh();
-    this.failures.clear();
-    this.failureAttempts.clear();
     this.revision++;
     this.notify();
   }
@@ -210,13 +236,19 @@ export class Broker {
   }
 
   private transientlyBlocks(range: Range, maxDeltaTMs: number): boolean {
-    if (this.fetcher.serializeRequests === true && this.inFlight.size > 0) return true;
-    for (const request of this.inFlight.values()) {
-      if (request.maxDeltaTMs <= maxDeltaTMs && covers(request.range, range)) return true;
+    if (this.fetcher.serializeRequests === true && this.hasRequestKind("fetching")) return true;
+    for (const lifecycle of this.requests.values()) {
+      if (
+        lifecycle.kind === "fetching" &&
+        lifecycle.request.maxDeltaTMs <= maxDeltaTMs &&
+        covers(lifecycle.request.range, range)
+      ) {
+        return true;
+      }
     }
-    if (this.fetcher.sourceWideBackoff === true && this.failures.size > 0) return true;
-    for (const failure of this.failures.values()) {
-      if (covers(failure.range, range)) return true;
+    if (this.fetcher.sourceWideBackoff === true && this.hasRequestKind("backoff")) return true;
+    for (const lifecycle of this.requests.values()) {
+      if (lifecycle.kind === "backoff" && covers(lifecycle.request.range, range)) return true;
     }
     return false;
   }
@@ -237,10 +269,12 @@ export class Broker {
 
     // Finer ready/pending work satisfies a coarser query. A coarser request
     // deliberately does not suppress a new finer request.
-    if (this.fetcher.serializeRequests === true && this.inFlight.size > 0) {
+    if (this.fetcher.serializeRequests === true && this.hasRequestKind("fetching")) {
       blocked.add(range);
     } else {
-      for (const request of this.inFlight.values()) {
+      for (const lifecycle of this.requests.values()) {
+        if (lifecycle.kind !== "fetching") continue;
+        const request = lifecycle.request;
         if (request.maxDeltaTMs > maxDeltaTMs) continue;
         const overlap = intersect(request.range, range);
         if (overlap !== null) blocked.add(overlap);
@@ -248,11 +282,12 @@ export class Broker {
     }
     // A failed exchange call suppresses all qualities briefly; the adapter
     // controls how long through retryDelayMs().
-    if (this.fetcher.sourceWideBackoff === true && this.failures.size > 0) {
+    if (this.fetcher.sourceWideBackoff === true && this.hasRequestKind("backoff")) {
       blocked.add(range);
     } else {
-      for (const failure of this.failures.values()) {
-        const overlap = intersect(failure.range, range);
+      for (const lifecycle of this.requests.values()) {
+        if (lifecycle.kind !== "backoff") continue;
+        const overlap = intersect(lifecycle.request.range, range);
         if (overlap !== null) blocked.add(overlap);
       }
     }
@@ -268,18 +303,21 @@ export class Broker {
   }
 
   private async requestFetch(range: Range, maxDeltaTMs: number): Promise<void> {
-    if (this.fetcher.serializeRequests === true && this.inFlight.size > 0) return;
-    if (this.fetcher.sourceWideBackoff === true && this.failures.size > 0) return;
+    if (this.fetcher.serializeRequests === true && this.hasRequestKind("fetching")) return;
+    if (this.fetcher.sourceWideBackoff === true && this.hasRequestKind("backoff")) return;
     const key = requestKey(range, maxDeltaTMs);
-    if (this.inFlight.has(key) || this.failures.has(key)) return;
+    const previous = this.requests.get(key);
+    if (previous?.kind === "fetching" || previous?.kind === "backoff") return;
+    const priorAttempt = previous?.kind === "retryable" ? previous.attempt : 0;
     const startedAt = this.now();
-    const request = {
+    const request: RequestState = {
       range,
       maxDeltaTMs,
       liveEdge: startedAt >= range.max && startedAt - range.max <= LIVE_EDGE_SLOP_MS,
     };
+    const lifecycle: RequestLifecycle = { kind: "fetching", request, attempt: priorAttempt };
     const generation = this.generation;
-    this.inFlight.set(key, request);
+    this.requests.set(key, lifecycle);
     let notifyAfterRequest = false;
 
     try {
@@ -287,14 +325,12 @@ export class Broker {
       if (generation !== this.generation) return;
       const liveRefresh = this.ingest(request, result);
       if (liveRefresh !== null) this.setLiveRefresh(liveRefresh);
-      this.failureAttempts.delete(key);
       this.revision++;
       notifyAfterRequest = true;
     } catch (error) {
       if (generation !== this.generation) return;
       this.onError(`[Broker] fetch failed for ${range.min}..${range.max}`, error);
-      const attempt = (this.failureAttempts.get(key) ?? 0) + 1;
-      this.failureAttempts.set(key, attempt);
+      const attempt = priorAttempt + 1;
       const proposed =
         this.fetcher.retryDelayMs?.(error, attempt) ?? this.defaultRetryDelayMs(attempt);
       const validPolicy = proposed >= 0 && Number.isFinite(proposed);
@@ -303,21 +339,24 @@ export class Broker {
       const retryAt = this.now() + delay;
       const message = error instanceof Error ? error.message : String(error);
       const timer = setTimeout(() => {
-        const failure = this.failures.get(key);
-        if (failure === undefined || failure.retryAt !== retryAt) return;
-        // "Empty" here means no transient request state, not known-empty
-        // market coverage. The next render is allowed to retry.
-        this.failures.delete(key);
+        const current = this.requests.get(key);
+        if (current?.kind !== "backoff" || current.retryAt !== retryAt) return;
+        this.requests.set(key, { kind: "retryable", attempt });
         this.revision++;
         this.notify();
       }, delay) as unknown as number;
-      this.failures.set(key, { ...request, message, retryAt, timer });
+      this.requests.set(key, {
+        kind: "backoff",
+        request,
+        attempt,
+        message,
+        retryAt,
+        timer,
+      });
       this.revision++;
       notifyAfterRequest = true;
     } finally {
-      if (this.inFlight.get(key) === request) this.inFlight.delete(key);
-      // A subscriber-triggered redraw must see the request as settled. This
-      // matters for serialized sources: it lets the next uncovered range run.
+      if (this.requests.get(key) === lifecycle) this.requests.delete(key);
       if (notifyAfterRequest) this.notify();
     }
   }
@@ -470,24 +509,40 @@ export class Broker {
 
   private transientSegments(range: Range): ResolutionSegment[] {
     const out: ResolutionSegment[] = [];
-    for (const request of this.inFlight.values()) {
-      const overlap = intersect(request.range, range);
-      if (overlap !== null) {
-        out.push({ range: overlap, resolutionMs: request.maxDeltaTMs, state: "pending" });
-      }
-    }
-    for (const failure of this.failures.values()) {
-      const overlap = intersect(failure.range, range);
-      if (overlap !== null) {
+    for (const lifecycle of this.requests.values()) {
+      if (lifecycle.kind === "retryable") continue;
+      const overlap = intersect(lifecycle.request.range, range);
+      if (overlap === null) continue;
+      if (lifecycle.kind === "fetching") {
         out.push({
           range: overlap,
-          resolutionMs: failure.maxDeltaTMs,
+          resolutionMs: lifecycle.request.maxDeltaTMs,
+          state: "pending",
+        });
+      } else {
+        out.push({
+          range: overlap,
+          resolutionMs: lifecycle.request.maxDeltaTMs,
           state: "failed",
-          message: failure.message,
+          message: lifecycle.message,
         });
       }
     }
     return out;
+  }
+
+  private hasRequestKind(kind: "fetching" | "backoff"): boolean {
+    for (const lifecycle of this.requests.values()) {
+      if (lifecycle.kind === kind) return true;
+    }
+    return false;
+  }
+
+  private clearRequestLifecycle(): void {
+    for (const lifecycle of this.requests.values()) {
+      if (lifecycle.kind === "backoff") clearTimeout(lifecycle.timer);
+    }
+    this.requests.clear();
   }
 
   private notify(): void {
@@ -501,6 +556,17 @@ export class Broker {
       }
     }
   }
+}
+
+function validateResolution(maxDeltaTMs: number, owner: string): void {
+  if (!(maxDeltaTMs > 0) || !Number.isFinite(maxDeltaTMs)) {
+    throw new Error(`${owner}: invalid maxDeltaTMs ${maxDeltaTMs}`);
+  }
+}
+
+function rangeOf(evalTime: Float64Array): Range | null {
+  if (evalTime.length < 2) return null;
+  return Range.create(evalTime[0]!, evalTime[evalTime.length - 1]!);
 }
 
 function appendPoint(

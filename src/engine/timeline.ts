@@ -44,6 +44,7 @@ export interface HoverInfo {
 }
 
 type MutableHoverInfo = { -readonly [Key in keyof HoverInfo]: HoverInfo[Key] };
+type MutableEventSet = { -readonly [Key in keyof EventSet]: EventSet[Key] };
 
 export interface TimelineCallbacks {
   onHover?: (event: HoverInfo | null) => void;
@@ -58,15 +59,6 @@ export interface TimelineOptions {
   readonly feedColorOf: (feedId: string) => string;
   readonly callbacks?: TimelineCallbacks;
   readonly config?: Partial<TimelineConfig>;
-}
-
-interface TimelineState {
-  events: EventSet;
-  timeRange: Range;
-  priceScale: number;
-  waveletMode: WaveletMode;
-  hovered: number | null;
-  newsHeight: number;
 }
 
 export interface TimelineConfig {
@@ -87,7 +79,21 @@ export const DEFAULT_TIMELINE_CONFIG: TimelineConfig = {
   minTickPx: DEFAULT_MIN_TICK_PX,
 };
 
-const EMPTY_EVENTS: EventSet = { events: [] };
+interface PricePane {
+  readonly row: PriceRow;
+  /** Relative layout preference. Actual CSS-pixel height is derived. */
+  weight: number;
+}
+
+type PointerState = { readonly kind: "outside" } | { kind: "inside"; x: number; y: number };
+
+type Gesture =
+  | { readonly kind: "idle" }
+  | { kind: "panning"; readonly pointerId: number; lastClientX: number }
+  | { kind: "resizing"; readonly pointerId: number; readonly boundary: number; lastY: number };
+
+const OUTSIDE_POINTER: PointerState = { kind: "outside" };
+const IDLE_GESTURE: Gesture = { kind: "idle" };
 
 export class Timeline {
   private readonly canvas: HTMLCanvasElement;
@@ -96,31 +102,31 @@ export class Timeline {
   private readonly eventSource: EventSource;
   private readonly feedColorOf: (feedId: string) => string;
   private readonly config: TimelineConfig;
-  private priceRows: readonly PriceRow[];
-  private rowHeights: number[];
+
+  private timeRange: Range;
+  private priceScale = 22;
+  private waveletMode: WaveletMode = "centered";
+
+  private panes: PricePane[];
+  private newsWeight = DEFAULT_NEWS_HEIGHT;
+  private layoutRevision = 0;
+  private resolvedLayoutRevision = -1;
+  private resolvedLayoutHeight = Number.NaN;
+  private resolvedNewsHeight = 0;
+  private resolvedRowHeights = new Float64Array(0);
+
+  private pointer: PointerState = OUTSIDE_POINTER;
+  private gesture: Gesture = IDLE_GESTURE;
+  /** Render cache only: the event highlighted by the most recent frame. */
+  private paintedHover: NewsEvent | null = null;
+  /** Render cache only: the exact event snapshot currently painted on canvas. */
+  private readonly paintedEvents: MutableEventSet = { events: [] };
+
   private rafId: number | null = null;
   private resizeObserver: ResizeObserver | null = null;
-  private state: TimelineState;
-  private dragging = false;
-  private resizingBoundary: number | null = null;
-  private lastX = 0;
-  private lastY = 0;
   private evalTime = new Float64Array(0);
   private readonly nowLine: HTMLDivElement;
   private nowTimer: number | null = null;
-  private pointerInside = false;
-  private pointerPx = 0;
-  private pointerPy = 0;
-  private notifiedHoverIndex: number | null = null;
-  private notifiedHoverT = Number.NaN;
-  private notifiedHoverTitle = "";
-  private notifiedHoverLink = "";
-  private notifiedHoverFeedId = "";
-  private notifiedHoverSummary = "";
-  private notifiedAnchorX = Number.NaN;
-  private notifiedAnchorY = Number.NaN;
-  private notifiedViewportWidth = Number.NaN;
-  private notifiedViewportHeight = Number.NaN;
   private readonly hoverInfo: MutableHoverInfo = {
     index: -1,
     title: "",
@@ -136,13 +142,15 @@ export class Timeline {
 
   constructor(opts: TimelineOptions) {
     this.canvas = opts.canvas;
+    this.timeRange = opts.initialTimeRange;
     this.eventSource = opts.eventSource;
     this.feedColorOf = opts.feedColorOf;
     this.callbacks = opts.callbacks ?? {};
     this.config = { ...DEFAULT_TIMELINE_CONFIG, ...opts.config };
-    this.priceRows = opts.priceRows ?? [];
-    this.rowHeights = this.priceRows.map(() => MIN_PRICE_ROW_HEIGHT);
-    this.plot = new Plot({ canvas: opts.canvas, initialTimeRange: opts.initialTimeRange });
+    const initialRows = opts.priceRows ?? [];
+    this.panes = [];
+    this.plot = new Plot({ canvas: opts.canvas });
+
     const parent = this.canvas.parentElement;
     if (parent === null) throw new Error("Timeline canvas must have a parent element");
     this.nowLine = document.createElement("div");
@@ -150,14 +158,6 @@ export class Timeline {
     this.nowLine.style.width = `${this.config.nowWidth}px`;
     this.nowLine.style.background = this.config.nowStroke;
     parent.append(this.nowLine);
-    this.state = {
-      events: EMPTY_EVENTS,
-      timeRange: opts.initialTimeRange,
-      priceScale: 22,
-      waveletMode: "centered",
-      hovered: null,
-      newsHeight: DEFAULT_NEWS_HEIGHT,
-    };
 
     this.bindEvents();
     if (typeof ResizeObserver !== "undefined") {
@@ -165,6 +165,7 @@ export class Timeline {
       this.resizeObserver.observe(this.canvas);
     }
     this.resize();
+    if (initialRows.length > 0) this.setPriceRows(initialRows);
     this.reqDraw();
   }
 
@@ -177,57 +178,69 @@ export class Timeline {
   }
 
   setPriceRows(rows: readonly PriceRow[]): void {
-    const hadPriceRows = this.priceRows.length > 0;
-    const oldHeight = new Map(
-      this.priceRows.map((row, index) => [row.id, this.rowHeights[index]!]),
-    );
+    this.resolveLayout();
+    const oldHeight = new Map<string, number>();
+    for (let index = 0; index < this.panes.length; index++) {
+      oldHeight.set(this.panes[index]!.row.id, this.resolvedRowHeights[index]!);
+    }
     const fallback =
-      this.rowHeights.length > 0
-        ? this.rowHeights.reduce((sum, height) => sum + height, 0) / this.rowHeights.length
-        : MIN_PRICE_ROW_HEIGHT;
-    this.priceRows = [...rows];
-    this.rowHeights = rows.map((row) => oldHeight.get(row.id) ?? fallback);
-    if (!hadPriceRows && rows.length > 0) this.state.newsHeight = DEFAULT_NEWS_HEIGHT;
-    this.fitLayout();
-    this.state.hovered = null;
+      this.panes.length === 0
+        ? MIN_PRICE_ROW_HEIGHT
+        : this.resolvedRowHeights.reduce((sum, height) => sum + height, 0) / this.panes.length;
+
+    const hadRows = this.panes.length > 0;
+    if (!hadRows && rows.length > 0) {
+      const total = this.plot.cssHeight;
+      const minNews = Math.min(MIN_NEWS_HEIGHT, total / (rows.length + 1));
+      const minPrice = Math.min(MIN_PRICE_ROW_HEIGHT, (total - minNews) / rows.length);
+      const newsHeight = Math.max(
+        minNews,
+        Math.min(DEFAULT_NEWS_HEIGHT, total - minPrice * rows.length),
+      );
+      const rowHeight = Math.max(1, (total - newsHeight) / rows.length);
+      this.newsWeight = newsHeight;
+      this.panes = rows.map((row) => ({ row, weight: rowHeight }));
+    } else {
+      this.panes = rows.map((row) => ({ row, weight: oldHeight.get(row.id) ?? fallback }));
+      this.newsWeight = Math.max(1, this.resolvedNewsHeight);
+    }
+    this.invalidateLayout();
+    this.dismissHover();
     this.reqDraw();
   }
 
   refreshEvents(): void {
-    const { events } = this.eventSource(this.state.timeRange);
-    this.state.events = { events };
-    this.state.hovered = null;
     this.reqDraw();
   }
 
   setTimeRange(range: Range): void {
-    this.state.timeRange = range;
-    this.plot.setTimeRange(range);
+    this.timeRange = range;
     this.notifyViewportChange();
     this.reqDraw();
   }
 
   getTimeRange(): Range {
-    return this.state.timeRange;
+    return this.timeRange;
   }
 
   setPriceScale(scale: number): void {
-    this.state.priceScale = scale;
+    if (!Number.isFinite(scale)) throw new Error(`Invalid price scale: ${scale}`);
+    this.priceScale = scale;
     this.notifyViewportChange();
     this.reqDraw();
   }
 
   getPriceScale(): number {
-    return this.state.priceScale;
+    return this.priceScale;
   }
 
   setWaveletMode(mode: WaveletMode): void {
-    this.state.waveletMode = mode;
+    this.waveletMode = mode;
     this.reqDraw();
   }
 
   getWaveletMode(): WaveletMode {
-    return this.state.waveletMode;
+    return this.waveletMode;
   }
 
   setPalette(name: PaletteName): void {
@@ -246,8 +259,8 @@ export class Timeline {
 
   private notifyViewportChange(): void {
     this.callbacks.onViewportChange?.(
-      { min: this.state.timeRange.min, max: this.state.timeRange.max },
-      this.state.priceScale,
+      { min: this.timeRange.min, max: this.timeRange.max },
+      this.priceScale,
     );
   }
 
@@ -279,52 +292,88 @@ export class Timeline {
     const rect = this.canvas.getBoundingClientRect();
     this.canvas.width = Math.floor(rect.width * dpr);
     this.canvas.height = Math.floor(rect.height * dpr);
-    this.fitLayout();
+    this.invalidateLayout();
     this.reqDraw();
   }
 
-  private fitLayout(): void {
-    const fitted = fitStackLayout(this.state.newsHeight, this.rowHeights, this.plot.cssHeight);
-    this.state.newsHeight = fitted.newsHeight;
-    this.rowHeights = [...fitted.rowHeights];
+  private invalidateLayout(): void {
+    this.layoutRevision++;
+  }
+
+  /** Resolve layout preferences into CSS-pixel heights, caching only the derivation. */
+  private resolveLayout(): void {
+    const totalHeight = this.plot.cssHeight;
+    if (
+      this.resolvedLayoutRevision === this.layoutRevision &&
+      this.resolvedLayoutHeight === totalHeight
+    ) {
+      return;
+    }
+
+    if (this.resolvedRowHeights.length !== this.panes.length) {
+      this.resolvedRowHeights = new Float64Array(this.panes.length);
+    }
+    if (this.panes.length === 0) {
+      this.resolvedNewsHeight = Math.max(0, totalHeight);
+      this.resolvedLayoutRevision = this.layoutRevision;
+      this.resolvedLayoutHeight = totalHeight;
+      return;
+    }
+
+    let weightSum = Math.max(1, this.newsWeight);
+    for (const pane of this.panes) weightSum += Math.max(1, pane.weight);
+    const desiredRows = new Array<number>(this.panes.length);
+    for (let index = 0; index < this.panes.length; index++) {
+      desiredRows[index] = (Math.max(1, this.panes[index]!.weight) / weightSum) * totalHeight;
+    }
+    const fitted = fitStackLayout(
+      (Math.max(1, this.newsWeight) / weightSum) * totalHeight,
+      desiredRows,
+      totalHeight,
+    );
+    this.resolvedNewsHeight = fitted.newsHeight;
+    this.resolvedRowHeights.set(fitted.rowHeights);
+    this.resolvedLayoutRevision = this.layoutRevision;
+    this.resolvedLayoutHeight = totalHeight;
   }
 
   private onResize = (): void => this.resize();
 
   private draw = (): void => {
-    using frame = this.plot.beginFrame();
+    this.resolveLayout();
+    using frame = this.plot.beginFrame(this.timeRange);
     const { width, height, dpr } = frame;
-    const { priceScale, timeRange, waveletMode } = this.state;
     frame.fillRectPx(0, 0, width, height, "#05070d");
 
     const numPx = Math.ceil(width * dpr);
     if (numPx <= 0) return;
     const maxSigma = maxSigmaFor(numPx);
-    const timePerPx = (timeRange.max - timeRange.min) / numPx;
-    const context = kernelContext(waveletMode, maxSigma);
+    const timePerPx = (this.timeRange.max - this.timeRange.min) / numPx;
+    const context = kernelContext(this.waveletMode, maxSigma);
     const padLeft = context.leftCells;
     const padRight = context.rightCells;
     const edgeCount = padLeft + numPx + padRight + 1;
     if (this.evalTime.length < edgeCount) this.evalTime = new Float64Array(edgeCount);
     for (let index = 0; index < edgeCount; index++) {
-      this.evalTime[index] = timeRange.min + (index - padLeft) * timePerPx;
+      this.evalTime[index] = this.timeRange.min + (index - padLeft) * timePerPx;
     }
     const evalView = this.evalTime.subarray(0, edgeCount) as Float64Array;
 
-    const eventResult = this.eventSource(timeRange);
-    this.state.events = { events: eventResult.events };
-    const eventY = this.state.newsHeight / 2;
-    this.updateHover(frame.tx, eventY, width, height);
+    const eventResult = this.eventSource(this.timeRange);
+    this.paintedEvents.events = eventResult.events;
+    const eventY = this.resolvedNewsHeight / 2;
+    const hovered = this.hitTest(frame.tx, eventY);
+    this.publishHover(hovered, frame.tx, eventY, width, height);
     frame.text("NEWS", 8, 9, "10px ui-monospace, monospace", "#94a3b8", "left", "top");
-    frame.events().drawRow(this.state.events, this.feedColorOf, this.state.hovered, eventY);
+    frame.events().drawRow(this.paintedEvents, this.feedColorOf, hovered, eventY);
 
-    let rowY = this.state.newsHeight;
-    for (let index = 0; index < this.priceRows.length; index++) {
-      const row = this.priceRows[index]!;
-      const rowHeight = this.rowHeights[index]!;
+    let rowY = this.resolvedNewsHeight;
+    for (let index = 0; index < this.panes.length; index++) {
+      const pane = this.panes[index]!;
+      const rowHeight = this.resolvedRowHeights[index]!;
       const heatHeight = Math.max(2, rowHeight - RESOLUTION_BAR_HEIGHT);
-      const result = row.dataSource(evalView, timePerPx);
-      frame.heatmap(row.id).drawWaveletField(
+      const result = pane.row.dataSource(evalView, timePerPx);
+      frame.heatmap(pane.row.id).drawWaveletField(
         {
           evalTime: evalView,
           value: result.value,
@@ -332,8 +381,8 @@ export class Timeline {
           padRight,
           revision: result.revision,
         },
-        priceScale,
-        waveletMode,
+        this.priceScale,
+        this.waveletMode,
         rowY,
         heatHeight,
       );
@@ -341,12 +390,12 @@ export class Timeline {
       frame.fillRectPx(
         5,
         rowY + 5,
-        Math.min(width - 10, 12 + row.label.length * 7),
+        Math.min(width - 10, 12 + pane.row.label.length * 7),
         20,
         "rgba(5,7,13,0.78)",
       );
       frame.text(
-        row.label,
+        pane.row.label,
         11,
         rowY + 15,
         "11px ui-monospace, monospace",
@@ -358,66 +407,70 @@ export class Timeline {
       frame.fillRectPx(0, rowY - 1, width, 1, "rgba(255,255,255,0.18)");
     }
 
-    // The only time axis lives on the news/price boundary.
-    frame.fillRectPx(0, this.state.newsHeight, width, 1, "rgba(255,255,255,0.3)");
-    frame.drawTimeAxis(this.state.newsHeight, this.config.minTickPx);
+    frame.fillRectPx(0, this.resolvedNewsHeight, width, 1, "rgba(255,255,255,0.3)");
+    frame.drawTimeAxis(this.resolvedNewsHeight, this.config.minTickPx);
     this.drawResizeHandles(frame);
     this.updateNowLine(timePerPx);
   };
 
   private drawResizeHandles(frame: Frame): void {
-    for (const y of this.boundaryYs()) {
+    if (this.panes.length === 0) return;
+    let y = this.resolvedNewsHeight;
+    frame.fillRectPx(frame.width / 2 - 20, y - 2, 40, 4, "rgba(203,213,225,0.62)");
+    for (let index = 0; index < this.panes.length - 1; index++) {
+      y += this.resolvedRowHeights[index]!;
       frame.fillRectPx(frame.width / 2 - 20, y - 2, 40, 4, "rgba(203,213,225,0.62)");
     }
   }
 
-  private boundaryYs(): number[] {
-    if (this.priceRows.length === 0) return [];
-    const ys = [this.state.newsHeight];
-    let y = this.state.newsHeight;
-    for (let index = 0; index < this.rowHeights.length - 1; index++) {
-      y += this.rowHeights[index]!;
-      ys.push(y);
-    }
-    return ys;
-  }
-
   private boundaryAt(y: number): number | null {
-    if (this.priceRows.length === 0) return null;
-    let boundaryY = this.state.newsHeight;
+    this.resolveLayout();
+    if (this.panes.length === 0) return null;
+    let boundaryY = this.resolvedNewsHeight;
     if (Math.abs(y - boundaryY) <= RESIZE_HANDLE_RADIUS) return 0;
-    for (let index = 0; index < this.rowHeights.length - 1; index++) {
-      boundaryY += this.rowHeights[index]!;
+    for (let index = 0; index < this.panes.length - 1; index++) {
+      boundaryY += this.resolvedRowHeights[index]!;
       if (Math.abs(y - boundaryY) <= RESIZE_HANDLE_RADIUS) return index + 1;
     }
     return null;
   }
 
   private moveBoundary(boundary: number, delta: number): void {
-    if (this.rowHeights.length === 0 || delta === 0) return;
+    if (this.panes.length === 0 || delta === 0) return;
+    this.resolveLayout();
     const total = this.plot.cssHeight;
-    const count = this.rowHeights.length;
+    const count = this.panes.length;
     const minNews = Math.min(MIN_NEWS_HEIGHT, total / (count + 1));
     const minPrice = Math.min(MIN_PRICE_ROW_HEIGHT, (total - minNews) / count);
+
     if (boundary === 0) {
-      const pair = this.state.newsHeight + this.rowHeights[0]!;
+      const pair = this.resolvedNewsHeight + this.resolvedRowHeights[0]!;
       const newsHeight = Math.max(
         minNews,
-        Math.min(pair - minPrice, this.state.newsHeight + delta),
+        Math.min(pair - minPrice, this.resolvedNewsHeight + delta),
       );
-      this.rowHeights[0] = pair - newsHeight;
-      this.state.newsHeight = newsHeight;
-      return;
+      this.newsWeight = newsHeight;
+      this.panes[0]!.weight = pair - newsHeight;
+    } else {
+      const left = boundary - 1;
+      const right = boundary;
+      const pair = this.resolvedRowHeights[left]! + this.resolvedRowHeights[right]!;
+      const leftHeight = Math.max(
+        minPrice,
+        Math.min(pair - minPrice, this.resolvedRowHeights[left]! + delta),
+      );
+      this.panes[left]!.weight = leftHeight;
+      this.panes[right]!.weight = pair - leftHeight;
+      this.newsWeight = this.resolvedNewsHeight;
     }
-    const left = boundary - 1;
-    const right = boundary;
-    const pair = this.rowHeights[left]! + this.rowHeights[right]!;
-    const leftHeight = Math.max(
-      minPrice,
-      Math.min(pair - minPrice, this.rowHeights[left]! + delta),
-    );
-    this.rowHeights[left] = leftHeight;
-    this.rowHeights[right] = pair - leftHeight;
+
+    // Preserve all unaffected panes at their currently rendered proportions.
+    for (let index = 0; index < this.panes.length; index++) {
+      if (boundary === 0 && index === 0) continue;
+      if (boundary > 0 && (index === boundary - 1 || index === boundary)) continue;
+      this.panes[index]!.weight = this.resolvedRowHeights[index]!;
+    }
+    this.invalidateLayout();
   }
 
   /** Move the wall-clock marker without invalidating data or the heatmap. */
@@ -425,23 +478,21 @@ export class Timeline {
     if (this.nowTimer !== null) clearTimeout(this.nowTimer);
     this.nowTimer = null;
     const now = Date.now();
-    const { timeRange } = this.state;
-    if (now > timeRange.max) {
+    if (now > this.timeRange.max) {
       this.nowLine.hidden = true;
       return;
     }
-    if (now >= timeRange.min) {
-      const x = ((now - timeRange.min) / (timeRange.max - timeRange.min)) * this.plot.cssWidth;
+    if (now >= this.timeRange.min) {
+      const x =
+        ((now - this.timeRange.min) / (this.timeRange.max - this.timeRange.min)) *
+        this.plot.cssWidth;
       this.nowLine.hidden = false;
       this.nowLine.style.transform = `translate3d(${x - this.config.nowWidth / 2}px, 0, 0)`;
     } else {
       this.nowLine.hidden = true;
     }
 
-    // Ten updates per horizontal pixel matches the old visual motion, but this
-    // timer now changes one compositor transform instead of redrawing/querying
-    // the entire timeline. Cap at 120 Hz on extremely zoomed-in views.
-    const delayMs = Math.max(1000 / 120, timeRange.min - now, timePerPx / 10);
+    const delayMs = Math.max(1000 / 120, this.timeRange.min - now, timePerPx / 10);
     this.nowTimer = setTimeout(() => {
       this.nowTimer = null;
       this.updateNowLine(timePerPx);
@@ -450,44 +501,54 @@ export class Timeline {
 
   private onPointerDown = (event: PointerEvent): void => {
     this.updatePointer(event);
-    const boundary = this.boundaryAt(this.pointerPy);
+    if (this.pointer.kind !== "inside") return;
+    const boundary = this.boundaryAt(this.pointer.y);
     if (boundary !== null) {
-      this.resizingBoundary = boundary;
-      this.dragging = false;
-      this.lastY = this.pointerPy;
-      if (this.clearHover()) this.reqDraw();
+      this.gesture = {
+        kind: "resizing",
+        pointerId: event.pointerId,
+        boundary,
+        lastY: this.pointer.y,
+      };
+      if (this.dismissHover()) this.reqDraw();
       this.canvas.style.cursor = "ns-resize";
       this.canvas.setPointerCapture?.(event.pointerId);
       event.preventDefault();
       return;
     }
-    this.dragging = true;
-    this.lastX = event.clientX;
+    this.gesture = {
+      kind: "panning",
+      pointerId: event.pointerId,
+      lastClientX: event.clientX,
+    };
     this.canvas.setPointerCapture?.(event.pointerId);
   };
 
   private onPointerMove = (event: PointerEvent): void => {
-    if (this.resizingBoundary !== null) {
-      this.updatePointer(event);
-      const y = this.pointerPy;
-      this.moveBoundary(this.resizingBoundary, y - this.lastY);
-      this.lastY = y;
+    const gesture = this.gesture;
+    if (gesture.kind === "resizing") {
+      if (event.pointerId !== gesture.pointerId) return;
+      const y = this.clientToCanvasY(event.clientY);
+      this.moveBoundary(gesture.boundary, y - gesture.lastY);
+      gesture.lastY = y;
       this.reqDraw();
       return;
     }
-    if (!this.dragging) return;
-    const dx = event.clientX - this.lastX;
-    this.lastX = event.clientX;
+    if (gesture.kind !== "panning" || event.pointerId !== gesture.pointerId) return;
+    const dx = event.clientX - gesture.lastClientX;
+    gesture.lastClientX = event.clientX;
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width <= 0) return;
-    const span = this.state.timeRange.max - this.state.timeRange.min;
-    this.setTimeRange(Range.pan(this.state.timeRange, -(dx / rect.width) * span));
+    const span = this.timeRange.max - this.timeRange.min;
+    this.setTimeRange(Range.pan(this.timeRange, -(dx / rect.width) * span));
   };
 
   private onPointerUp = (event: PointerEvent): void => {
-    this.dragging = false;
-    this.resizingBoundary = null;
+    const gesture = this.gesture;
+    if (gesture.kind !== "idle" && event.pointerId !== gesture.pointerId) return;
+    this.gesture = IDLE_GESTURE;
     this.canvas.releasePointerCapture?.(event.pointerId);
+    this.updatePointer(event);
     this.reqDraw();
   };
 
@@ -502,115 +563,108 @@ export class Timeline {
     let dy = event.deltaY;
     if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) dy *= this.config.wheelLineHeight;
     else if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) dy *= cssHeight;
-    const span = this.state.timeRange.max - this.state.timeRange.min;
+    const span = this.timeRange.max - this.timeRange.min;
     const dt = (this.config.timeScrollSensitivity * span * event.deltaX) / cssWidth;
-    if (dt !== 0) this.setTimeRange(Range.pan(this.state.timeRange, dt));
+    if (dt !== 0) this.setTimeRange(Range.pan(this.timeRange, dt));
     if (event.shiftKey) {
-      this.setPriceScale(this.state.priceScale - dy * this.config.wheelSensitivity);
+      this.setPriceScale(this.priceScale - dy * this.config.wheelSensitivity);
       return;
     }
     const tx = new DataTransform(
-      this.state.timeRange,
+      this.timeRange,
       Range.create(0, cssWidth),
       Range.create(0, cssHeight),
     );
     const factor = Math.exp(-dy * this.config.wheelSensitivity);
-    this.setTimeRange(Range.zoom(this.state.timeRange, tx.xToTime(px), factor));
+    this.setTimeRange(Range.zoom(this.timeRange, tx.xToTime(px), factor));
   };
 
   private onHoverMove = (event: PointerEvent): void => {
     this.updatePointer(event);
-    this.canvas.style.cursor = this.boundaryAt(this.pointerPy) === null ? "" : "ns-resize";
-    if (this.dragging || this.resizingBoundary !== null) return;
-    if (this.updateHoverAtCurrentTransform()) this.reqDraw();
+    if (this.pointer.kind !== "inside") return;
+    this.canvas.style.cursor = this.boundaryAt(this.pointer.y) === null ? "" : "ns-resize";
+    if (this.gesture.kind !== "idle") return;
+    if (this.currentHoverEvent() !== this.paintedHover) this.reqDraw();
   };
 
   private onHoverLeave = (): void => {
-    this.pointerInside = false;
-    if (this.dragging || this.resizingBoundary !== null) return;
-    if (this.clearHover()) this.reqDraw();
+    this.pointer = OUTSIDE_POINTER;
+    if (this.gesture.kind !== "idle") return;
+    if (this.dismissHover()) this.reqDraw();
   };
 
   private onClick = (event: PointerEvent): void => {
     this.updatePointer(event);
-    if (this.updateHoverAtCurrentTransform()) this.reqDraw();
-    if (this.state.hovered === null) return;
-    window.open(this.eventAt(this.state.hovered).link, "_blank", "noopener,noreferrer");
+    const hovered = this.currentHoverEvent();
+    if (hovered !== null) window.open(hovered.link, "_blank", "noopener,noreferrer");
   };
 
+  private updatePointer(event: Pick<PointerEvent, "clientX" | "clientY">): void {
+    const rect = this.canvas.getBoundingClientRect();
+    if (
+      rect.width <= 0 ||
+      rect.height <= 0 ||
+      event.clientX < rect.left ||
+      event.clientX > rect.right ||
+      event.clientY < rect.top ||
+      event.clientY > rect.bottom
+    ) {
+      this.pointer = OUTSIDE_POINTER;
+      return;
+    }
+    const x = (event.clientX - rect.left) * (this.plot.cssWidth / rect.width);
+    const y = (event.clientY - rect.top) * (this.plot.cssHeight / rect.height);
+    if (this.pointer.kind === "inside") {
+      this.pointer.x = x;
+      this.pointer.y = y;
+    } else {
+      this.pointer = { kind: "inside", x, y };
+    }
+  }
+
+  private clientToCanvasY(clientY: number): number {
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.height <= 0) return 0;
+    return (clientY - rect.top) * (this.plot.cssHeight / rect.height);
+  }
+
+  private currentHoverEvent(): NewsEvent | null {
+    const width = this.plot.cssWidth;
+    const height = this.plot.cssHeight;
+    if (!(width > 0) || !(height > 0)) return null;
+    this.resolveLayout();
+    const tx = new DataTransform(this.timeRange, Range.create(0, width), Range.create(0, height));
+    const index = this.hitTest(tx, this.resolvedNewsHeight / 2);
+    return index === null ? null : this.eventAt(index);
+  }
+
+  private hitTest(tx: DataTransform, eventY: number): number | null {
+    if (this.pointer.kind !== "inside" || this.gesture.kind !== "idle") return null;
+    if (this.boundaryAt(this.pointer.y) !== null) return null;
+    return hitTestEvent(this.paintedEvents, tx, this.pointer.x, this.pointer.y, eventY);
+  }
+
   private eventAt(index: number): NewsEvent {
-    const event = this.state.events.events[index];
+    const event = this.paintedEvents.events[index];
     if (event === undefined) throw new Error(`Event index out of range: ${index}`);
     return event;
   }
 
-  private updatePointer(event: Pick<PointerEvent, "clientX" | "clientY">): void {
-    const rect = this.canvas.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) {
-      this.pointerInside = false;
+  private publishHover(
+    index: number | null,
+    tx: DataTransform,
+    eventY: number,
+    width: number,
+    height: number,
+  ): void {
+    if (index === null) {
+      this.paintedHover = null;
+      this.callbacks.onHover?.(null);
       return;
     }
-    this.pointerInside =
-      event.clientX >= rect.left &&
-      event.clientX <= rect.right &&
-      event.clientY >= rect.top &&
-      event.clientY <= rect.bottom;
-    this.pointerPx = (event.clientX - rect.left) * (this.plot.cssWidth / rect.width);
-    this.pointerPy = (event.clientY - rect.top) * (this.plot.cssHeight / rect.height);
-  }
-
-  private updateHoverAtCurrentTransform(): boolean {
-    const width = this.plot.cssWidth;
-    const height = this.plot.cssHeight;
-    if (!(width > 0) || !(height > 0)) return this.clearHover();
-    const tx = new DataTransform(
-      this.state.timeRange,
-      Range.create(0, width),
-      Range.create(0, height),
-    );
-    return this.updateHover(tx, this.state.newsHeight / 2, width, height);
-  }
-
-  private updateHover(tx: DataTransform, eventY: number, width: number, height: number): boolean {
-    const previous = this.state.hovered;
-    const index =
-      this.pointerInside &&
-      !this.dragging &&
-      this.resizingBoundary === null &&
-      this.boundaryAt(this.pointerPy) === null
-        ? hitTestEvent(this.state.events, tx, this.pointerPx, this.pointerPy, eventY)
-        : null;
-    this.state.hovered = index;
-    if (index === null) {
-      this.clearHover();
-      return previous !== null;
-    }
-
     const event = this.eventAt(index);
-    const anchorX = tx.timeToX(event.t);
-    const changed =
-      index !== this.notifiedHoverIndex ||
-      event.t !== this.notifiedHoverT ||
-      event.title !== this.notifiedHoverTitle ||
-      event.link !== this.notifiedHoverLink ||
-      event.feedId !== this.notifiedHoverFeedId ||
-      event.summary !== this.notifiedHoverSummary ||
-      anchorX !== this.notifiedAnchorX ||
-      eventY !== this.notifiedAnchorY ||
-      width !== this.notifiedViewportWidth ||
-      height !== this.notifiedViewportHeight;
-    if (!changed || this.callbacks.onHover === undefined) return previous !== index;
-
-    this.notifiedHoverIndex = index;
-    this.notifiedHoverT = event.t;
-    this.notifiedHoverTitle = event.title;
-    this.notifiedHoverLink = event.link;
-    this.notifiedHoverFeedId = event.feedId;
-    this.notifiedHoverSummary = event.summary;
-    this.notifiedAnchorX = anchorX;
-    this.notifiedAnchorY = eventY;
-    this.notifiedViewportWidth = width;
-    this.notifiedViewportHeight = height;
+    this.paintedHover = event;
+    if (this.callbacks.onHover === undefined) return;
     const info = this.hoverInfo;
     info.index = index;
     info.title = event.title;
@@ -618,29 +672,17 @@ export class Timeline {
     info.feedId = event.feedId;
     info.summary = event.summary;
     info.t = event.t;
-    info.anchorX = anchorX;
+    info.anchorX = tx.timeToX(event.t);
     info.anchorY = eventY;
     info.viewportWidth = width;
     info.viewportHeight = height;
     this.callbacks.onHover(info);
-    return previous !== index;
   }
 
-  private clearHover(): boolean {
-    const visualChanged = this.state.hovered !== null;
-    this.state.hovered = null;
-    if (this.notifiedHoverIndex === null) return visualChanged;
-    this.notifiedHoverIndex = null;
-    this.notifiedHoverT = Number.NaN;
-    this.notifiedHoverTitle = "";
-    this.notifiedHoverLink = "";
-    this.notifiedHoverFeedId = "";
-    this.notifiedHoverSummary = "";
-    this.notifiedAnchorX = Number.NaN;
-    this.notifiedAnchorY = Number.NaN;
-    this.notifiedViewportWidth = Number.NaN;
-    this.notifiedViewportHeight = Number.NaN;
+  private dismissHover(): boolean {
+    const changed = this.paintedHover !== null;
+    this.paintedHover = null;
     this.callbacks.onHover?.(null);
-    return visualChanged;
+    return changed;
   }
 }

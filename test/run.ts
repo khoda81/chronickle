@@ -213,6 +213,35 @@ test("ZOH returns are timestamp-aligned, causal, and zero-fill unknown data", ()
   assert(field.values[2]! > 0, "causal response was drawn before the price-change timestamp");
 });
 
+test("price sample is side-effect free and ensure owns fetch demand", async () => {
+  let requests = 0;
+  const fetcher: Fetcher = {
+    async fetchRange({ range }) {
+      requests++;
+      return {
+        points: [
+          { t: range.min, price: 100 },
+          { t: range.max, price: 101 },
+        ],
+        searchedRange: range,
+      };
+    },
+  };
+  const broker = new Broker(fetcher, { now: () => 1_000 });
+  const evalTime = new Float64Array([0, 1_000]);
+  const empty = broker.sample({ evalTime, maxDeltaTMs: 1_000 });
+  assert(requests === 0, "sample unexpectedly started a request");
+  assert(empty.value.every(Number.isNaN), "empty sample invented data");
+
+  broker.ensure({ range: Range.create(0, 1_000), maxDeltaTMs: 1_000 });
+  assert(Number(requests) === 1, "ensure did not schedule missing coverage");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const ready = broker.sample({ evalTime, maxDeltaTMs: 1_000 });
+  assert(Number(requests) === 1, "sampling cached data scheduled another request");
+  approx(Math.exp(ready.value[0]!), 100, 1e-10);
+});
+
 test("broker fetches finer data after coarse observations are cached", async () => {
   const requests: number[] = [];
   const fetcher: Fetcher = {
@@ -630,6 +659,39 @@ test("clearing the price cache ignores stale in-flight responses", async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
   const fresh = broker.query({ evalTime, maxDeltaTMs: 1_000 });
   approx(Math.exp(fresh.value[0]!), 100, 1e-10);
+});
+
+test("event sample is side-effect free and ensure owns backfill demand", async () => {
+  const feed: RssFeed = {
+    id: "test",
+    source: "Test feed",
+    url: "https://example.com/feed.xml",
+    color: "red",
+    enabled: true,
+  };
+  let walks = 0;
+  const broker = new EventBroker(
+    {},
+    () => [feed],
+    () => ({
+      failureReason: null,
+      async walk(_targetMin, onEvents) {
+        walks++;
+        onEvents([{ t: 500, title: "event", link: "x", summary: "", feedId: feed.id }]);
+        return "exhausted";
+      },
+    }),
+    { onDebug: () => undefined },
+  );
+  const range = Range.create(0, 1_000);
+  assert(broker.sample(range).events.length === 0, "empty event sample invented data");
+  assert(walks === 0, "event sample unexpectedly started a walk");
+
+  broker.ensure(range);
+  assert(Number(walks) === 1, "event ensure did not start backfill");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert(broker.sample(range).events.length === 1, "event sample did not read committed cache");
+  assert(Number(walks) === 1, "event sample restarted backfill");
 });
 
 test("clearing the event cache ignores stale walker callbacks", async () => {
