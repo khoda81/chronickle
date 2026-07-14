@@ -108,51 +108,32 @@ export class EventBroker {
   }
 
   /**
-   * Compatibility façade: return cached events immediately and independently
-   * schedule any missing feed history.
+   * Synchronous query. Returns cached events in `range` (filtered to enabled
+   * feeds) and kicks off per-feed backfill for any enabled feed whose oldest
+   * cached event is newer than `range.min`. Safe to call every frame — the
+   * `fetching` state dedups in-flight walks, and `backoff`/`failed`/`exhausted`
+   * prevent redundant requests.
    */
   query(range: Range): EventQueryResult {
-    const feeds = this.activeFeeds();
-    this.ensureFor(range, feeds);
-    return this.sampleFor(range, feeds);
-  }
-
-  /** Declare visible event demand without constructing a result snapshot. */
-  ensure(range: Range): void {
-    this.ensureFor(range, this.activeFeeds());
-  }
-
-  /** Read the current event cache without starting feed walks. */
-  sample(range: Range): EventQueryResult {
-    return this.sampleFor(range, this.activeFeeds());
-  }
-
-  private ensureFor(range: Range, feeds: readonly RssFeed[]): void {
-    for (const feed of feeds) this.kickIfNeeded(feed, this.stateOf(feed.id), range.min);
-  }
-
-  private sampleFor(range: Range, feeds: readonly RssFeed[]): EventQueryResult {
-    const enabledIds = new Set(feeds.map((feed) => feed.id));
-    const inRange = sliceByTime(this.events, range.min, range.max).filter((event) =>
-      enabledIds.has(event.feedId),
+    const enabledIds = new Set(this.activeFeeds().map((f) => f.id));
+    const inRange = sliceByTime(this.events, range.min, range.max).filter((e) =>
+      enabledIds.has(e.feedId),
     );
-    const allCovered = feeds.every((feed) => this.isCovered(this.stateOf(feed.id), range.min));
-    const status: EventQueryStatus =
-      inRange.length === 0 ? "empty" : allCovered ? "complete" : "partial";
-    return { events: inRange, status };
-  }
 
-  private isCovered(state: FeedState, rangeMin: number): boolean {
-    switch (state.kind) {
-      case "fetching":
-        return false;
-      case "exhausted":
-      case "failed":
-        return true;
-      case "idle":
-      case "backoff":
-        return state.oldestT <= rangeMin;
+    // Kick backfill for enabled feeds that don't yet cover range.min.
+    let allCovered = true;
+    for (const feed of this.activeFeeds()) {
+      const st = this.stateOf(feed.id);
+      const covered = this.kickIfNeeded(feed, st, range.min);
+      if (!covered) allCovered = false;
     }
+
+    let status: EventQueryStatus;
+    if (allCovered && inRange.length > 0) status = "complete";
+    else if (inRange.length > 0) status = "partial";
+    else status = "empty";
+
+    return { events: inRange, status };
   }
 
   /** Subscribe to cache updates. Returns an unsubscribe function. */
@@ -194,9 +175,14 @@ export class EventBroker {
     }
   }
 
-  /** Missing feed state is the canonical initial state; reads do not materialize it. */
+  /** Get or create the feed state. New feeds start in `idle` with oldestT=∞. */
   private stateOf(feedId: string): FeedState {
-    return this.feedState.get(feedId) ?? { kind: "idle", oldestT: Infinity };
+    let st = this.feedState.get(feedId);
+    if (st === undefined) {
+      st = { kind: "idle", oldestT: Infinity };
+      this.feedState.set(feedId, st);
+    }
+    return st;
   }
 
   /** Get or create the walker for a feed. */

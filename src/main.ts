@@ -65,7 +65,6 @@ interface AppElements {
   readonly symbolToggle: HTMLButtonElement;
   readonly symbolMenu: HTMLDivElement;
   readonly addChart: HTMLButtonElement;
-  readonly activeCharts: HTMLDivElement;
   readonly canvas: HTMLCanvasElement;
   readonly tooltip: HTMLDivElement;
   readonly feedInput: HTMLInputElement;
@@ -79,7 +78,6 @@ interface ChartInstance {
   readonly sourceLabel: string;
   readonly symbol: string;
   readonly broker: Broker;
-  readonly unsubscribePrice: () => void;
 }
 
 function el<T extends HTMLElement>(tag: string, cls?: string): T {
@@ -146,7 +144,6 @@ function buildApp(): AppElements {
   const addChart = el<HTMLButtonElement>("button", "chart-add");
   addChart.textContent = "Add row";
   marketControls.append(source, symbolPicker, addChart);
-  const activeCharts = el<HTMLDivElement>("div", "active-charts");
 
   const feedControls = el<HTMLDivElement>("div", "feed-controls");
   const feedInput = el<HTMLInputElement>("input", "feed-input");
@@ -156,6 +153,8 @@ function buildApp(): AppElements {
   const feedAdd = el<HTMLButtonElement>("button", "feed-add");
   feedAdd.textContent = "Add feed";
   feedControls.append(feedInput, feedAdd);
+  const dataControls = el<HTMLDivElement>("div", "data-controls");
+  dataControls.append(marketControls, feedControls);
   const feedList = el<HTMLDivElement>("div", "feed-list");
 
   const wrap = el<HTMLDivElement>("div", "canvas-wrap");
@@ -164,7 +163,7 @@ function buildApp(): AppElements {
   wrap.append(canvas, tooltip);
   const status = el<HTMLDivElement>("div", "status");
   status.textContent = "Initializing…";
-  app.append(header, marketControls, activeCharts, feedControls, feedList, wrap, status);
+  app.append(header, dataControls, feedList, wrap, status);
   return {
     status,
     reload,
@@ -176,7 +175,6 @@ function buildApp(): AppElements {
     symbolToggle,
     symbolMenu,
     addChart,
-    activeCharts,
     canvas,
     tooltip,
     feedInput,
@@ -233,30 +231,30 @@ function main(): void {
     const rows: PriceRow[] = charts.map((chart) => ({
       id: chart.key,
       label: `${chart.sourceLabel} · ${chart.symbol}`,
-      dataSource: (evalTime, maxDeltaTMs) => chart.broker.query({ evalTime, maxDeltaTMs }),
+      read: (request) => chart.broker.read(request),
+      subscribe: (demand, onChange) => chart.broker.subscribe(demand, onChange),
+      onRemove: () => removeChart(chart.key),
+      onDataChange: () => {
+        const cached = chart.broker.cachedRange();
+        if (cached !== null) {
+          setStatus(
+            app.status,
+            `${chart.sourceLabel} ${chart.symbol} loaded through ${new Date(
+              cached.max,
+            ).toLocaleString()}`,
+          );
+        }
+      },
     }));
     timeline.setPriceRows(rows);
-    app.activeCharts.innerHTML = "";
-    for (const chart of charts) {
-      const chip = el<HTMLDivElement>("div", "chart-chip");
-      const label = el<HTMLSpanElement>("span");
-      label.textContent = `${chart.sourceLabel} · ${chart.symbol}`;
-      const remove = el<HTMLButtonElement>("button", "chart-remove");
-      remove.textContent = "×";
-      remove.title = `Remove ${chart.sourceLabel} ${chart.symbol}`;
-      remove.addEventListener("click", () => removeChart(chart.key));
-      chip.append(label, remove);
-      app.activeCharts.append(chip);
-    }
   }
 
   function removeChart(key: string): void {
     const index = charts.findIndex((chart) => chart.key === key);
     if (index < 0) return;
     const [chart] = charts.splice(index, 1);
-    chart!.unsubscribePrice();
-    chart!.broker.dispose();
     updatePriceRows();
+    chart!.broker.dispose();
     persistCharts();
     setStatus(app.status, `Removed ${chart!.sourceLabel} ${chart!.symbol}`);
   }
@@ -289,22 +287,12 @@ function main(): void {
         );
       },
     });
-    const unsubscribePrice = broker.subscribe(() => {
-      timeline.reqDraw();
-      const cached = broker.cachedRange();
-      if (cached !== null)
-        setStatus(
-          app.status,
-          `${source.label} ${symbol} loaded through ${new Date(cached.max).toLocaleString()}`,
-        );
-    });
     charts.push({
       key,
       sourceId: source.id,
       sourceLabel: source.label,
       symbol,
       broker,
-      unsubscribePrice,
     });
     updatePriceRows();
     if (persist) persistCharts();

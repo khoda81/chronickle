@@ -23,9 +23,16 @@ export interface QueryOptions {
   readonly maxDeltaTMs: number;
 }
 
-export interface EnsureOptions {
+/** Fetch/cache demand independent of a particular sampling grid. */
+export interface BrokerDemand {
   readonly range: Range;
   readonly maxDeltaTMs: number;
+}
+
+/** Mutable viewport interest. Updating it does not allocate a new subscription. */
+export interface BrokerSubscription {
+  update(demand: BrokerDemand): void;
+  dispose(): void;
 }
 
 export interface BrokerOptions {
@@ -42,17 +49,17 @@ interface RequestState {
   readonly liveEdge: boolean;
 }
 
-type RequestLifecycle =
-  | { readonly kind: "fetching"; readonly request: RequestState; readonly attempt: number }
-  | {
-      readonly kind: "backoff";
-      readonly request: RequestState;
-      readonly attempt: number;
-      readonly message: string;
-      readonly retryAt: number;
-      readonly timer: number;
-    }
-  | { readonly kind: "retryable"; readonly attempt: number };
+interface FailedRequest extends RequestState {
+  readonly message: string;
+  readonly retryAt: number;
+  readonly timer: number;
+}
+
+interface DemandSubscription {
+  demand: BrokerDemand;
+  readonly fn: () => void;
+  disposed: boolean;
+}
 
 interface LiveRefresh {
   readonly through: number;
@@ -69,7 +76,10 @@ export class Broker {
   private readonly stores = new Map<number, ChunkedLevelStore>();
   private readonly coverage = new CoverageIndex();
   private readonly subscribers = new Set<() => void>();
-  private readonly requests = new Map<string, RequestLifecycle>();
+  private readonly demandSubscriptions = new Set<DemandSubscription>();
+  private readonly inFlight = new Map<string, RequestState>();
+  private readonly failures = new Map<string, FailedRequest>();
+  private readonly failureAttempts = new Map<string, number>();
   private liveRefresh: LiveRefresh | null = null;
   private readonly now: () => number;
   private readonly defaultRetryDelayMs: (attempt: number) => number;
@@ -90,40 +100,18 @@ export class Broker {
   }
 
   /**
-   * Compatibility façade for the original unidirectional UI flow: synchronously
-   * sample current cache contents and independently schedule missing coverage.
+   * Read currently cached data. This method is deliberately side-effect-free:
+   * it never starts requests or changes broker demand.
    */
-  query(opts: QueryOptions): QueryResult {
-    validateResolution(opts.maxDeltaTMs, "Broker.query");
-    const wallNow = this.now();
-    const range = rangeOf(opts.evalTime);
-    if (range !== null) this.ensureAt(range, opts.maxDeltaTMs, wallNow);
-    return this.sampleAt(opts, wallNow);
-  }
-
-  /** Declare data demand without reading or allocating a sampled result. */
-  ensure(opts: EnsureOptions): void {
-    validateResolution(opts.maxDeltaTMs, "Broker.ensure");
-    this.ensureAt(opts.range, opts.maxDeltaTMs, this.now());
-  }
-
-  /** Read current cache contents without starting requests or changing demand. */
-  sample(opts: QueryOptions): QueryResult {
-    validateResolution(opts.maxDeltaTMs, "Broker.sample");
-    return this.sampleAt(opts, this.now());
-  }
-
-  private ensureAt(range: Range, maxDeltaTMs: number, wallNow: number): void {
-    const historicalRange = clampToNow(range, wallNow);
-    if (historicalRange !== null) this.planRequests(historicalRange, maxDeltaTMs);
-  }
-
-  private sampleAt(opts: QueryOptions, wallNow: number): QueryResult {
+  read(opts: QueryOptions): QueryResult {
     const { evalTime, maxDeltaTMs } = opts;
+    if (!(maxDeltaTMs > 0) || !Number.isFinite(maxDeltaTMs)) {
+      throw new Error(`Broker.read: invalid maxDeltaTMs ${maxDeltaTMs}`);
+    }
+
     const value = new Float64Array(evalTime.length);
     value.fill(NaN);
-    const queryRange = rangeOf(evalTime);
-    if (queryRange === null) {
+    if (evalTime.length < 2) {
       return {
         value,
         leadingNaN: evalTime.length,
@@ -135,7 +123,10 @@ export class Broker {
       };
     }
 
+    const queryRange = Range.create(evalTime[0]!, evalTime[evalTime.length - 1]!);
+    const wallNow = this.now();
     const historicalRange = clampToNow(queryRange, wallNow);
+
     this.wantedResolution = this.coverage.resolve(evalTime, maxDeltaTMs, this.wantedResolution);
     const wantedResolution = this.wantedResolution;
     for (const [resolutionMs, store] of this.stores) {
@@ -187,17 +178,67 @@ export class Broker {
     };
   }
 
-  subscribe(fn: () => void): () => void {
-    this.subscribers.add(fn);
+  /**
+   * Compatibility helper for non-immediate callers. New UI code should pair
+   * read() with subscribe(demand, fn), keeping reads pure.
+   */
+  query(opts: QueryOptions): QueryResult {
+    if (opts.evalTime.length >= 2) {
+      this.ensure({
+        range: Range.create(opts.evalTime[0]!, opts.evalTime[opts.evalTime.length - 1]!),
+        maxDeltaTMs: opts.maxDeltaTMs,
+      });
+    }
+    return this.read(opts);
+  }
+
+  subscribe(demand: BrokerDemand, fn: () => void): BrokerSubscription;
+  subscribe(fn: () => void): () => void;
+  subscribe(
+    demandOrFn: BrokerDemand | (() => void),
+    maybeFn?: () => void,
+  ): BrokerSubscription | (() => void) {
+    // Legacy source-wide notification, retained for non-viewport callers.
+    if (typeof demandOrFn === "function") {
+      this.subscribers.add(demandOrFn);
+      this.armLiveRefresh();
+      return () => this.subscribers.delete(demandOrFn);
+    }
+
+    if (maybeFn === undefined) throw new Error("Broker.subscribe: callback is required");
+    const entry: DemandSubscription = {
+      demand: validateDemand(demandOrFn),
+      fn: maybeFn,
+      disposed: false,
+    };
+    this.demandSubscriptions.add(entry);
+    this.ensure(entry.demand);
     this.armLiveRefresh();
-    return () => this.subscribers.delete(fn);
+    return {
+      update: (demand) => {
+        if (entry.disposed) throw new Error("Broker subscription is disposed");
+        const next = validateDemand(demand);
+        if (sameDemand(entry.demand, next)) return;
+        entry.demand = next;
+        this.ensure(next);
+      },
+      dispose: () => {
+        if (entry.disposed) return;
+        entry.disposed = true;
+        this.demandSubscriptions.delete(entry);
+        if (!this.hasSubscribers()) this.disarmLiveRefresh();
+      },
+    };
   }
 
   dispose(): void {
     this.generation++;
-    this.clearRequestLifecycle();
+    for (const failure of this.failures.values()) clearTimeout(failure.timer);
     this.clearLiveRefresh();
+    this.inFlight.clear();
+    this.failures.clear();
     this.subscribers.clear();
+    this.demandSubscriptions.clear();
   }
 
   /** Drop all observations/request state and ignore responses from the old generation. */
@@ -206,9 +247,13 @@ export class Broker {
     this.fetcher.clearCache?.();
     this.stores.clear();
     this.coverage.clear();
-    this.clearRequestLifecycle();
+    this.inFlight.clear();
+    for (const failure of this.failures.values()) clearTimeout(failure.timer);
     this.clearLiveRefresh();
+    this.failures.clear();
+    this.failureAttempts.clear();
     this.revision++;
+    this.ensureAll();
     this.notify();
   }
 
@@ -224,6 +269,15 @@ export class Broker {
     return min < max ? Range.create(min, max) : null;
   }
 
+  private ensure(demand: BrokerDemand): void {
+    const historicalRange = clampToNow(demand.range, this.now());
+    if (historicalRange !== null) this.planRequests(historicalRange, demand.maxDeltaTMs);
+  }
+
+  private ensureAll(): void {
+    for (const subscription of this.demandSubscriptions) this.ensure(subscription.demand);
+  }
+
   private planRequests(range: Range, maxDeltaTMs: number): void {
     // The overwhelmingly common steady-state path is already answered by one
     // ready level. Avoid constructing and merging a temporary RangeSet on
@@ -236,19 +290,13 @@ export class Broker {
   }
 
   private transientlyBlocks(range: Range, maxDeltaTMs: number): boolean {
-    if (this.fetcher.serializeRequests === true && this.hasRequestKind("fetching")) return true;
-    for (const lifecycle of this.requests.values()) {
-      if (
-        lifecycle.kind === "fetching" &&
-        lifecycle.request.maxDeltaTMs <= maxDeltaTMs &&
-        covers(lifecycle.request.range, range)
-      ) {
-        return true;
-      }
+    if (this.fetcher.serializeRequests === true && this.inFlight.size > 0) return true;
+    for (const request of this.inFlight.values()) {
+      if (request.maxDeltaTMs <= maxDeltaTMs && covers(request.range, range)) return true;
     }
-    if (this.fetcher.sourceWideBackoff === true && this.hasRequestKind("backoff")) return true;
-    for (const lifecycle of this.requests.values()) {
-      if (lifecycle.kind === "backoff" && covers(lifecycle.request.range, range)) return true;
+    if (this.fetcher.sourceWideBackoff === true && this.failures.size > 0) return true;
+    for (const failure of this.failures.values()) {
+      if (covers(failure.range, range)) return true;
     }
     return false;
   }
@@ -269,12 +317,10 @@ export class Broker {
 
     // Finer ready/pending work satisfies a coarser query. A coarser request
     // deliberately does not suppress a new finer request.
-    if (this.fetcher.serializeRequests === true && this.hasRequestKind("fetching")) {
+    if (this.fetcher.serializeRequests === true && this.inFlight.size > 0) {
       blocked.add(range);
     } else {
-      for (const lifecycle of this.requests.values()) {
-        if (lifecycle.kind !== "fetching") continue;
-        const request = lifecycle.request;
+      for (const request of this.inFlight.values()) {
         if (request.maxDeltaTMs > maxDeltaTMs) continue;
         const overlap = intersect(request.range, range);
         if (overlap !== null) blocked.add(overlap);
@@ -282,12 +328,11 @@ export class Broker {
     }
     // A failed exchange call suppresses all qualities briefly; the adapter
     // controls how long through retryDelayMs().
-    if (this.fetcher.sourceWideBackoff === true && this.hasRequestKind("backoff")) {
+    if (this.fetcher.sourceWideBackoff === true && this.failures.size > 0) {
       blocked.add(range);
     } else {
-      for (const lifecycle of this.requests.values()) {
-        if (lifecycle.kind !== "backoff") continue;
-        const overlap = intersect(lifecycle.request.range, range);
+      for (const failure of this.failures.values()) {
+        const overlap = intersect(failure.range, range);
         if (overlap !== null) blocked.add(overlap);
       }
     }
@@ -303,21 +348,18 @@ export class Broker {
   }
 
   private async requestFetch(range: Range, maxDeltaTMs: number): Promise<void> {
-    if (this.fetcher.serializeRequests === true && this.hasRequestKind("fetching")) return;
-    if (this.fetcher.sourceWideBackoff === true && this.hasRequestKind("backoff")) return;
+    if (this.fetcher.serializeRequests === true && this.inFlight.size > 0) return;
+    if (this.fetcher.sourceWideBackoff === true && this.failures.size > 0) return;
     const key = requestKey(range, maxDeltaTMs);
-    const previous = this.requests.get(key);
-    if (previous?.kind === "fetching" || previous?.kind === "backoff") return;
-    const priorAttempt = previous?.kind === "retryable" ? previous.attempt : 0;
+    if (this.inFlight.has(key) || this.failures.has(key)) return;
     const startedAt = this.now();
-    const request: RequestState = {
+    const request = {
       range,
       maxDeltaTMs,
       liveEdge: startedAt >= range.max && startedAt - range.max <= LIVE_EDGE_SLOP_MS,
     };
-    const lifecycle: RequestLifecycle = { kind: "fetching", request, attempt: priorAttempt };
     const generation = this.generation;
-    this.requests.set(key, lifecycle);
+    this.inFlight.set(key, request);
     let notifyAfterRequest = false;
 
     try {
@@ -325,12 +367,14 @@ export class Broker {
       if (generation !== this.generation) return;
       const liveRefresh = this.ingest(request, result);
       if (liveRefresh !== null) this.setLiveRefresh(liveRefresh);
+      this.failureAttempts.delete(key);
       this.revision++;
       notifyAfterRequest = true;
     } catch (error) {
       if (generation !== this.generation) return;
       this.onError(`[Broker] fetch failed for ${range.min}..${range.max}`, error);
-      const attempt = priorAttempt + 1;
+      const attempt = (this.failureAttempts.get(key) ?? 0) + 1;
+      this.failureAttempts.set(key, attempt);
       const proposed =
         this.fetcher.retryDelayMs?.(error, attempt) ?? this.defaultRetryDelayMs(attempt);
       const validPolicy = proposed >= 0 && Number.isFinite(proposed);
@@ -339,25 +383,26 @@ export class Broker {
       const retryAt = this.now() + delay;
       const message = error instanceof Error ? error.message : String(error);
       const timer = setTimeout(() => {
-        const current = this.requests.get(key);
-        if (current?.kind !== "backoff" || current.retryAt !== retryAt) return;
-        this.requests.set(key, { kind: "retryable", attempt });
+        const failure = this.failures.get(key);
+        if (failure === undefined || failure.retryAt !== retryAt) return;
+        // "Empty" here means no transient request state, not known-empty
+        // market coverage. The next render is allowed to retry.
+        this.failures.delete(key);
         this.revision++;
+        this.ensureAll();
         this.notify();
       }, delay) as unknown as number;
-      this.requests.set(key, {
-        kind: "backoff",
-        request,
-        attempt,
-        message,
-        retryAt,
-        timer,
-      });
+      this.failures.set(key, { ...request, message, retryAt, timer });
       this.revision++;
       notifyAfterRequest = true;
     } finally {
-      if (this.requests.get(key) === lifecycle) this.requests.delete(key);
-      if (notifyAfterRequest) this.notify();
+      if (this.inFlight.get(key) === request) this.inFlight.delete(key);
+      // Continue serialized/backfilled demand before notifying the UI. Reads
+      // remain pure; subscriptions are the sole request-driving mechanism.
+      if (notifyAfterRequest) {
+        this.ensureAll();
+        this.notify();
+      }
     }
   }
 
@@ -443,11 +488,12 @@ export class Broker {
 
   private armLiveRefresh(): void {
     const refresh = this.liveRefresh;
-    if (refresh === null || refresh.timer !== null || this.subscribers.size === 0) return;
+    if (refresh === null || refresh.timer !== null || !this.hasSubscribers()) return;
     const delay = Math.max(0, refresh.at - this.now());
     refresh.timer = setTimeout(() => {
       if (this.liveRefresh !== refresh) return;
       this.liveRefresh = null;
+      this.ensureAll();
       this.notify();
     }, delay) as unknown as number;
   }
@@ -456,6 +502,16 @@ export class Broker {
     const refresh = this.liveRefresh;
     if (refresh?.timer !== null && refresh?.timer !== undefined) clearTimeout(refresh.timer);
     this.liveRefresh = null;
+  }
+
+  private disarmLiveRefresh(): void {
+    const refresh = this.liveRefresh;
+    if (refresh?.timer !== null && refresh?.timer !== undefined) clearTimeout(refresh.timer);
+    if (refresh !== null) refresh.timer = null;
+  }
+
+  private hasSubscribers(): boolean {
+    return this.subscribers.size > 0 || this.demandSubscriptions.size > 0;
   }
 
   private ingestObserved(
@@ -509,43 +565,34 @@ export class Broker {
 
   private transientSegments(range: Range): ResolutionSegment[] {
     const out: ResolutionSegment[] = [];
-    for (const lifecycle of this.requests.values()) {
-      if (lifecycle.kind === "retryable") continue;
-      const overlap = intersect(lifecycle.request.range, range);
-      if (overlap === null) continue;
-      if (lifecycle.kind === "fetching") {
+    for (const request of this.inFlight.values()) {
+      const overlap = intersect(request.range, range);
+      if (overlap !== null) {
+        out.push({ range: overlap, resolutionMs: request.maxDeltaTMs, state: "pending" });
+      }
+    }
+    for (const failure of this.failures.values()) {
+      const overlap = intersect(failure.range, range);
+      if (overlap !== null) {
         out.push({
           range: overlap,
-          resolutionMs: lifecycle.request.maxDeltaTMs,
-          state: "pending",
-        });
-      } else {
-        out.push({
-          range: overlap,
-          resolutionMs: lifecycle.request.maxDeltaTMs,
+          resolutionMs: failure.maxDeltaTMs,
           state: "failed",
-          message: lifecycle.message,
+          message: failure.message,
         });
       }
     }
     return out;
   }
 
-  private hasRequestKind(kind: "fetching" | "backoff"): boolean {
-    for (const lifecycle of this.requests.values()) {
-      if (lifecycle.kind === kind) return true;
-    }
-    return false;
-  }
-
-  private clearRequestLifecycle(): void {
-    for (const lifecycle of this.requests.values()) {
-      if (lifecycle.kind === "backoff") clearTimeout(lifecycle.timer);
-    }
-    this.requests.clear();
-  }
-
   private notify(): void {
+    for (const subscription of this.demandSubscriptions) {
+      try {
+        subscription.fn();
+      } catch (error) {
+        this.onError("[Broker] subscriber failed", error);
+      }
+    }
     for (const fn of this.subscribers) {
       try {
         fn();
@@ -558,15 +605,17 @@ export class Broker {
   }
 }
 
-function validateResolution(maxDeltaTMs: number, owner: string): void {
-  if (!(maxDeltaTMs > 0) || !Number.isFinite(maxDeltaTMs)) {
-    throw new Error(`${owner}: invalid maxDeltaTMs ${maxDeltaTMs}`);
+function validateDemand(demand: BrokerDemand): BrokerDemand {
+  if (!(demand.maxDeltaTMs > 0) || !Number.isFinite(demand.maxDeltaTMs)) {
+    throw new Error(`Broker.subscribe: invalid maxDeltaTMs ${demand.maxDeltaTMs}`);
   }
+  return demand;
 }
 
-function rangeOf(evalTime: Float64Array): Range | null {
-  if (evalTime.length < 2) return null;
-  return Range.create(evalTime[0]!, evalTime[evalTime.length - 1]!);
+function sameDemand(a: BrokerDemand, b: BrokerDemand): boolean {
+  return (
+    a.range.min === b.range.min && a.range.max === b.range.max && a.maxDeltaTMs === b.maxDeltaTMs
+  );
 }
 
 function appendPoint(
