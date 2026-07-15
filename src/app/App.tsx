@@ -117,9 +117,6 @@ export function App() {
         onDataChange: () => {
           const cached = broker.cachedRange();
           if (cached === null) return;
-          setStatus(
-            `${chart.sourceLabel} ${chart.symbol} loaded through ${new Date(cached.max).toLocaleString()}`,
-          );
         },
       };
     });

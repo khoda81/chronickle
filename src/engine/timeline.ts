@@ -328,7 +328,7 @@ export class Timeline {
   private captureNowAnchor(now: number): number {
     const span = this.state.timeRange.max - this.state.timeRange.min;
     if (!(span > 0)) return DEFAULT_NOW_ANCHOR;
-    return Math.max(0, Math.min(1, (now - this.state.timeRange.min) / span));
+    return (now - this.state.timeRange.min) / span;
   }
 
   private panTimeRange(range: Range, now = Date.now()): void {
@@ -1343,9 +1343,9 @@ export class Timeline {
     const previous = this.state.hovered;
     const index =
       this.pointerInside &&
-      !this.dragging &&
-      this.resizingBoundary === null &&
-      this.boundaryAt(this.pointerPy) === null
+        !this.dragging &&
+        this.resizingBoundary === null &&
+        this.boundaryAt(this.pointerPy) === null
         ? eventIndexAtOrBefore(this.state.events, tx, this.pointerPx)
         : null;
     this.state.hovered = index;
