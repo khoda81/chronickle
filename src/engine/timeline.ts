@@ -37,6 +37,8 @@ export interface SignalRow {
   readonly subscribe: DataSubscriber;
   readonly palette: PaletteName;
   readonly verticalOffset: number;
+  /** Preferred restored height. Used only when the row has no live height yet. */
+  readonly height?: number;
   readonly onRemove?: () => void;
   readonly onDataChange?: () => void;
   readonly onPaletteChange?: (palette: PaletteName) => void;
@@ -66,15 +68,27 @@ export interface HoverInfo {
 
 type MutableHoverInfo = { -readonly [Key in keyof HoverInfo]: HoverInfo[Key] };
 
+export type TimelinePlayback =
+  { readonly mode: "following"; readonly anchor: number } | { readonly mode: "paused" };
+
+export interface TimelineLayout {
+  readonly newsHeight: number;
+  readonly rows: readonly { readonly id: string; readonly height: number }[];
+}
+
 export interface TimelineCallbacks {
   onHover?: (event: HoverInfo | null) => void;
   onViewportChange?: (viewport: { min: number; max: number }, priceScale: number) => void;
+  onPlaybackChange?: (playback: TimelinePlayback) => void;
+  onLayoutChange?: (layout: TimelineLayout) => void;
   onReload?: () => void;
 }
 
 export interface TimelineOptions {
   readonly canvas: HTMLCanvasElement;
   readonly initialTimeRange: Range;
+  readonly initialPlayback?: TimelinePlayback;
+  readonly initialNewsHeight?: number;
   readonly signalRows?: readonly SignalRow[];
   readonly eventSource: EventSource;
   readonly feedColorOf: (feedId: string) => string;
@@ -89,9 +103,7 @@ interface TimelineState {
   waveletMode: WaveletMode;
   hovered: number | null;
   newsHeight: number;
-
-  followNow: boolean;
-  nowAnchor: number;
+  playback: TimelinePlayback;
 }
 
 export interface TimelineConfig {
@@ -134,6 +146,8 @@ export class Timeline {
   private latestDpr = 1;
   private latestNumPx = 0;
   private readonly rowChrome = new Map<string, SignalRowChrome>();
+  private restoreNewsHeightOnFirstRows: boolean;
+  private layoutDirty = false;
   private rafId: number | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private state: TimelineState;
@@ -192,8 +206,11 @@ export class Timeline {
     this.feedColorOf = opts.feedColorOf;
     this.callbacks = opts.callbacks ?? {};
     this.config = { ...DEFAULT_TIMELINE_CONFIG, ...opts.config };
+    this.restoreNewsHeightOnFirstRows = opts.initialNewsHeight !== undefined;
     this.signalRows = opts.signalRows ?? [];
-    this.rowHeights = this.signalRows.map(() => MIN_SIGNAL_ROW_HEIGHT);
+    this.rowHeights = this.signalRows.map((row) =>
+      restoredRowHeight(row.height, MIN_SIGNAL_ROW_HEIGHT),
+    );
     this.rowPalettes = this.signalRows.map((row) => row.palette);
     this.rowVerticalOffsets = this.signalRows.map((row) => row.verticalOffset);
     this.rowHoverSamples = this.signalRows.map(() => ({ t: Number.NaN, value: Number.NaN }));
@@ -230,9 +247,8 @@ export class Timeline {
       logGain: 22,
       waveletMode: "centered",
       hovered: null,
-      newsHeight: DEFAULT_NEWS_HEIGHT,
-      followNow: true,
-      nowAnchor: DEFAULT_NOW_ANCHOR,
+      newsHeight: restoredRowHeight(opts.initialNewsHeight, DEFAULT_NEWS_HEIGHT),
+      playback: normalizePlayback(opts.initialPlayback),
     };
     this.syncPlaybackButton();
     this.rebuildRowChrome();
@@ -265,11 +281,16 @@ export class Timeline {
         ? this.rowHeights.reduce((sum, height) => sum + height, 0) / this.rowHeights.length
         : MIN_SIGNAL_ROW_HEIGHT;
     this.signalRows = [...rows];
-    this.rowHeights = rows.map((row) => oldHeight.get(row.id) ?? fallback);
+    this.rowHeights = rows.map(
+      (row) => oldHeight.get(row.id) ?? restoredRowHeight(row.height, fallback),
+    );
     this.rowPalettes = rows.map((row) => row.palette);
     this.rowVerticalOffsets = rows.map((row) => row.verticalOffset);
     this.rowHoverSamples = rows.map(() => ({ t: Number.NaN, value: Number.NaN }));
-    if (!hadPriceRows && rows.length > 0) this.state.newsHeight = DEFAULT_NEWS_HEIGHT;
+    if (!hadPriceRows && rows.length > 0) {
+      if (!this.restoreNewsHeightOnFirstRows) this.state.newsHeight = DEFAULT_NEWS_HEIGHT;
+      this.restoreNewsHeightOnFirstRows = false;
+    }
     this.fitLayout();
     this.rowEvalTime = rows.map(() => new Float64Array(0));
     this.subscribedDemands = rows.map(() => null);
@@ -296,23 +317,28 @@ export class Timeline {
     this.reqDraw();
   }
 
-  private setFollowNow(followNow: boolean): void {
-    if (followNow === this.state.followNow) return;
-    this.state.followNow = followNow;
+  private setPlayback(playback: TimelinePlayback): void {
+    if (samePlayback(playback, this.state.playback)) return;
+    this.state.playback = playback;
     this.syncPlaybackButton();
+    this.callbacks.onPlaybackChange?.(playback);
     this.reqDraw();
   }
 
-  private captureNowAnchor(now: number): void {
+  private captureNowAnchor(now: number): number {
     const span = this.state.timeRange.max - this.state.timeRange.min;
-    if (!(span > 0)) return;
-    this.state.nowAnchor = (now - this.state.timeRange.min) / span;
+    if (!(span > 0)) return DEFAULT_NOW_ANCHOR;
+    return Math.max(0, Math.min(1, (now - this.state.timeRange.min) / span));
   }
 
   private panTimeRange(range: Range, now = Date.now()): void {
     this.state.timeRange = range;
     this.plot.setTimeRange(range);
-    if (this.state.followNow) this.captureNowAnchor(now);
+    if (this.state.playback.mode === "following") {
+      const playback = { mode: "following", anchor: this.captureNowAnchor(now) } as const;
+      this.state.playback = playback;
+      this.callbacks.onPlaybackChange?.(playback);
+    }
     this.notifyViewportChange();
     this.reqDraw();
   }
@@ -340,6 +366,17 @@ export class Timeline {
     return this.state.waveletMode;
   }
 
+  getPlayback(): TimelinePlayback {
+    return this.state.playback;
+  }
+
+  getLayout(): TimelineLayout {
+    return {
+      newsHeight: this.state.newsHeight,
+      rows: this.signalRows.map((row, index) => ({ id: row.id, height: this.rowHeights[index]! })),
+    };
+  }
+
   dispose(): void {
     if (this.rafId !== null) cancelAnimationFrame(this.rafId);
     if (this.nowTimer !== null) clearTimeout(this.nowTimer);
@@ -365,6 +402,12 @@ export class Timeline {
       { min: this.state.timeRange.min, max: this.state.timeRange.max },
       this.state.logGain,
     );
+  }
+
+  private flushLayoutChange(): void {
+    if (!this.layoutDirty) return;
+    this.layoutDirty = false;
+    this.callbacks.onLayoutChange?.(this.getLayout());
   }
 
   private bindEvents(): void {
@@ -635,13 +678,11 @@ export class Timeline {
   };
 
   private advanceFollowNow(now: number): void {
-    if (!this.state.followNow) return;
+    if (this.state.playback.mode !== "following") return;
     const span = this.state.timeRange.max - this.state.timeRange.min;
-    const min = now - span * this.state.nowAnchor;
-    const range = Range.create(
-      min,
-      this.state.nowAnchor === RIGHT_EDGE_NOW_ANCHOR ? now : min + span,
-    );
+    const anchor = this.state.playback.anchor;
+    const min = now - span * anchor;
+    const range = Range.create(min, anchor === RIGHT_EDGE_NOW_ANCHOR ? now : min + span);
     this.state.timeRange = range;
     this.plot.setTimeRange(range);
   }
@@ -666,7 +707,8 @@ export class Timeline {
     this.timeHover.textContent = formatHoverTime(hoverTime);
     this.timeHover.hidden = false;
 
-    const timeWidth = this.timeHover.offsetWidth; const margin = 5;
+    const timeWidth = this.timeHover.offsetWidth;
+    const margin = 5;
     const gap = 9;
     const leftX = x - timeWidth - gap;
     const maxX = Math.max(margin, width - timeWidth - margin);
@@ -783,6 +825,7 @@ export class Timeline {
 
   private moveBoundary(boundary: number, delta: number): void {
     if (this.rowHeights.length === 0 || delta === 0) return;
+    this.layoutDirty = true;
     const total = this.plot.cssHeight;
     const count = this.rowHeights.length;
     const minNews = Math.min(MIN_NEWS_HEIGHT, total / (count + 1));
@@ -850,7 +893,7 @@ export class Timeline {
     if (this.nowTimer !== null) clearTimeout(this.nowTimer);
     let delayMs = this.state.timeRange.min - renderedNow;
 
-    if (this.state.followNow) delayMs = timePerDevicePx;
+    if (this.state.playback.mode === "following") delayMs = timePerDevicePx;
     else if (renderedNow > this.state.timeRange.max) return;
 
     this.nowTimer = setTimeout(
@@ -863,13 +906,12 @@ export class Timeline {
   }
 
   private onPlaybackClick = (): void => {
-    if (this.state.followNow) {
-      this.setFollowNow(false);
+    if (this.state.playback.mode === "following") {
+      this.setPlayback({ mode: "paused" });
       return;
     }
 
-    this.captureNowAnchor(Date.now());
-    this.setFollowNow(true);
+    this.setPlayback({ mode: "following", anchor: this.captureNowAnchor(Date.now()) });
   };
 
   private followNowAtRightEdge(): void {
@@ -877,16 +919,16 @@ export class Timeline {
     const span = this.state.timeRange.max - this.state.timeRange.min;
     if (!(span > 0)) return;
 
-    this.state.nowAnchor = RIGHT_EDGE_NOW_ANCHOR;
-    this.state.followNow = true;
+    this.state.playback = { mode: "following", anchor: RIGHT_EDGE_NOW_ANCHOR };
     this.applyTimeRange(Range.create(now - span, now), true);
     this.syncPlaybackButton();
+    this.callbacks.onPlaybackChange?.(this.state.playback);
   }
 
   private onReloadClick = (): void => this.callbacks.onReload?.();
 
   private syncPlaybackButton(): void {
-    const playing = this.state.followNow;
+    const playing = this.state.playback.mode === "following";
     this.playbackButton.replaceChildren(createTimelineIcon(playing ? Pause : Play));
     this.playbackButton.setAttribute("aria-pressed", String(playing));
     this.playbackButton.title = playing ? "Pause current-time playback" : "Play from here";
@@ -965,6 +1007,7 @@ export class Timeline {
     if (event.pointerId !== this.dragPointerId) return;
     this.dragging = false;
     this.resizingBoundary = null;
+    this.flushLayoutChange();
     this.verticalPanRow = null;
     this.dragPointerId = null;
     if (this.canvas.hasPointerCapture?.(event.pointerId)) {
@@ -984,6 +1027,7 @@ export class Timeline {
     this.dragPointerId = null;
     this.dragging = false;
     this.resizingBoundary = null;
+    this.flushLayoutChange();
     this.verticalPanRow = null;
     this.hideCrosshair();
     this.reqDraw();
@@ -1213,6 +1257,7 @@ export class Timeline {
       this.canvas.releasePointerCapture(event.pointerId);
     }
     this.resizingBoundary = null;
+    this.flushLayoutChange();
     if (this.touchAId === null) {
       this.dragging = false;
       this.verticalPanRow = null;
@@ -1298,9 +1343,9 @@ export class Timeline {
     const previous = this.state.hovered;
     const index =
       this.pointerInside &&
-        !this.dragging &&
-        this.resizingBoundary === null &&
-        this.boundaryAt(this.pointerPy) === null
+      !this.dragging &&
+      this.resizingBoundary === null &&
+      this.boundaryAt(this.pointerPy) === null
         ? eventIndexAtOrBefore(this.state.events, tx, this.pointerPx)
         : null;
     this.state.hovered = index;
@@ -1366,6 +1411,24 @@ export class Timeline {
     this.callbacks.onHover?.(null);
     return visualChanged;
   }
+}
+
+function restoredRowHeight(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function normalizePlayback(playback: TimelinePlayback | undefined): TimelinePlayback {
+  if (playback?.mode !== "following") {
+    return playback ?? { mode: "following", anchor: DEFAULT_NOW_ANCHOR };
+  }
+  const anchor = Number.isFinite(playback.anchor) ? playback.anchor : DEFAULT_NOW_ANCHOR;
+  return { mode: "following", anchor: Math.max(0, Math.min(1, anchor)) };
+}
+
+function samePlayback(a: TimelinePlayback, b: TimelinePlayback): boolean {
+  return (
+    a.mode === b.mode && (a.mode === "paused" || (b.mode === "following" && a.anchor === b.anchor))
+  );
 }
 
 const PRICE_FORMAT = new Intl.NumberFormat(undefined, {

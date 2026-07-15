@@ -125,9 +125,7 @@ export class SignalSegmentStore {
       }
       const location = this.findContainingSegment(t);
       value[index] =
-        location === null
-          ? NaN
-          : this.blocks[location.blockIndex]!.value[location.segmentIndex]!;
+        location === null ? NaN : this.blocks[location.blockIndex]!.value[location.segmentIndex]!;
     }
     return value;
   }
@@ -396,10 +394,7 @@ function appendSlice(out: HeldSignalSegment[], segment: HeldSignalSegment): void
   }
 }
 
-function segmentsEqual(
-  a: readonly HeldSignalSegment[],
-  b: readonly HeldSignalSegment[],
-): boolean {
+function segmentsEqual(a: readonly HeldSignalSegment[], b: readonly HeldSignalSegment[]): boolean {
   if (a.length !== b.length) return false;
   for (let index = 0; index < a.length; index++) {
     const left = a[index]!;

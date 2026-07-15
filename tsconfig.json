@@ -3,7 +3,12 @@
     "target": "ES2022",
     "useDefineForClassFields": true,
     "module": "ESNext",
-    "lib": ["ES2022", "DOM", "DOM.Iterable", "ESNext.Disposable"],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable",
+      "ESNext.Disposable"
+    ],
     "skipLibCheck": true,
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
@@ -17,7 +22,12 @@
     "noUnusedParameters": true,
     "strict": true,
     "noEmit": true,
-    "outDir": "dist"
+    "outDir": "dist",
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js"
   },
-  "include": ["src", "test"]
+  "include": [
+    "src",
+    "test"
+  ]
 }

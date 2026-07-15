@@ -218,10 +218,7 @@ export function createPollingSignalSource(fetcher: RangeLoader): SignalAdapter {
           cursorMs,
           nextAtMs: wallNow,
           retainedUntilMs: Number.POSITIVE_INFINITY,
-          statusRange: Range.create(
-            Math.min(cursorMs, wallNow - plan.resolutionMs),
-            wallNow,
-          ),
+          statusRange: Range.create(Math.min(cursorMs, wallNow - plan.resolutionMs), wallNow),
         };
       };
 

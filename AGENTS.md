@@ -7,7 +7,7 @@ Browser-based SPA that correlates market volatility (Nobitex USD/IRT trades) wit
 - **Language:** TypeScript (strict, `noUncheckedIndexedAccess`)
 - **Runtime/Bundler:** Bun + Vite
 - **VCS:** jj (commit frequently, set description after every change)
-- **UI:** Vanilla TS + DOM. No charting libraries. Custom `<canvas>` renderer.
+- **UI:** SolidJS for application UI and persisted state. No charting libraries. Custom `<canvas>` renderer.
 
 ## Commands
 
@@ -25,22 +25,28 @@ Always run `bun run test` and `bun run typecheck` after non-trivial edits. The p
 
 ```
 src/
-  domain.ts            # Shared immutable types: HeatSample, HeatSeries, NewsEvent, EventSet
+  app/
+    App.tsx              # Solid composition root and application actions
+    persistence.ts       # Versioned, debounced localStorage snapshot
+    components/          # Declarative controls, feed list, and event tooltip
   data/
-    nobitex.ts         # Fetch /v2/trades/{symbol}, resample to uniform dt, compute |log-return|
-    rss.ts             # Fetch RSS via CORS proxy, parse XML, normalize to sorted EventSet
-    index.ts           # Re-exports
+    events/              # Feed registry, RSS loading, and event broker
+    signal/              # Generic signal broker/store and market adapters
   engine/
-    viewport.ts        # Pure Viewport (pan/zoom/fit) + timeToX/xToTime
-    renderer.ts        # Pure canvas renderer: heatmap + event nodes + axis + hit-test
-    timeline.ts        # Timeline class: rAF loop, pointer/wheel handlers, hover/click
-  main.ts              # App entry: wires data -> timeline, tooltip UI, status bar
-  styles.css           # App styles
+    timeline.ts          # Canvas controller: rAF, gestures, subscriptions, overlays
+    plot.ts              # Canvas/frame lifecycle
+    gfx/                 # Immediate-mode drawing primitives
+  main.tsx               # Solid mount only
+  styles.css             # Transitional global stylesheet; split by component over time
 ```
 
-### Data flow
+### Ownership boundary
 
-`main.ts` fetches `HeatSeries` + `EventSet`, pushes them into `Timeline` via `setSeries`/`setEvents`, and fits the viewport to the data range. The `Timeline` owns the render loop and input; the renderer is a pure function of `(viewport, series, events, size, hover)`.
+Solid owns the DOM outside the timeline engine and all serializable application state. `Timeline` owns the canvas, pointer/gesture runtime, render scheduling, scratch buffers, and broker subscriptions. Do not put per-frame values or pointer coordinates in Solid signals merely to make them reactive.
+
+The application persists one versioned snapshot containing viewport, wavelet mode, playback mode, news height, and per-row palette/offset/height. Runtime resources such as brokers, subscriptions, observers, timers, and typed-array scratch storage are never serialized.
+
+Canvas redraw invalidation remains explicit and coalesced through `Timeline.reqDraw()`. A framework effect must not call the renderer for every reactive dependency.
 
 ### External APIs
 
@@ -64,7 +70,7 @@ These override default "minimal diff" guidance. Optimize for minimal elegant cod
 ### 2. Fail Fast & Explicitly
 
 - No blanket `try/catch` to suppress errors or return defaults.
-- Throw loud, explicit errors on invalid state. Surface failures to the user (see `status` bar in `main.ts`).
+- Throw loud, explicit errors on invalid state. Surface failures to the user through the status bar in `app/App.tsx`.
 
 ### 3. Structural Integrity > Minimal Diff
 
@@ -74,12 +80,12 @@ These override default "minimal diff" guidance. Optimize for minimal elegant cod
 ### 4. Minimal Mutation & Elegant State
 
 - Keep state model small. Replace state wholesale (immutable updates) rather than mutating fields.
-- Prefer pure functions. The renderer is a pure function of its inputs; `Timeline.state` is replaced, not mutated.
+- Prefer pure functions at domain and rendering boundaries. Local mutation is acceptable for controller-owned hot-path state and reusable scratch storage.
 
 ### 5. GC Discipline in the Render Loop
 
 - The hot path (`render`, pan/zoom handlers) must not allocate.
-- Reuse module-level scratch buffers (see `rampPixels` LUT in `renderer.ts`).
+- Reuse controller- or module-owned scratch buffers and precomputed lookup tables.
 - Avoid per-frame object creation in `requestAnimationFrame`.
 
 ### 6. VCS (jj)
@@ -93,5 +99,5 @@ These override default "minimal diff" guidance. Optimize for minimal elegant cod
 - Timestamps are epoch milliseconds everywhere internally. Nobitex OHLC returns seconds — convert on ingestion.
 - All `readonly` fields on domain types. Arrays exposed as `readonly T[]`.
 - Strict null checks everywhere; `noUncheckedIndexedAccess` is on, so indexed access yields `T | undefined` — handle it.
-- Canvas uses device-pixel-ratio scaling (`ctx.setTransform(dpr, ...)`); all layout constants in `renderer.ts` are CSS pixels.
+- Canvas uses device-pixel-ratio scaling (`ctx.setTransform(dpr, ...)`); all layout constants in the canvas engine are CSS pixels.
 - Color ramp for the heatmap is a precomputed 256-entry LUT built once from a gradient.

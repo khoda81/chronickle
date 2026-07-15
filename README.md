@@ -9,7 +9,7 @@ Live: **<https://khoda81.github.io/chronickle/>**
 
 - **Language:** TypeScript (strict, `noUncheckedIndexedAccess`)
 - **Runtime/Bundler:** Bun + Vite
-- **UI:** Vanilla TS + DOM. No charting libraries. Custom `<canvas>` renderer.
+- **UI:** SolidJS for application UI and persisted state; a framework-independent custom `<canvas>` renderer for the timeline.
 
 ## Develop
 

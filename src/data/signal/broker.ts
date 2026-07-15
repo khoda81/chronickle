@@ -201,8 +201,8 @@ export class Broker {
     if (clipped.discardedFutureCount > 0) {
       this.onWarning(
         `[Broker] discarded ${clipped.discardedFutureCount} future point(s); ` +
-        `searched range ended at ${result.searchedRange.max}, ` +
-        `latest returned timestamp was ${clipped.latestFutureT}`,
+          `searched range ended at ${result.searchedRange.max}, ` +
+          `latest returned timestamp was ${clipped.latestFutureT}`,
       );
     }
     let changed = false;
