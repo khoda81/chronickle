@@ -3,26 +3,23 @@
 import { PriceSeries, type PricePoint } from "../../domain.ts";
 import { Range } from "../../engine/range.ts";
 import { RangeSet } from "../rangeSet.ts";
-import { FetchedCoverageIndex, type ResolutionSegment } from "./coverage.ts";
-import type { AdapterActivity, AdapterDelivery, AdapterSession, PriceAdapter } from "./fetcher.ts";
-import { PriceSpanStore, type PriceSpanInput } from "./store.ts";
+import { SettledCoverageIndex, type CoverageSegment } from "./coverage.ts";
+import type { AcquisitionActivity, AdapterDelivery as SignalDelivery, AdapterSession, PriceAdapter as SignalSource } from "./fetcher.ts";
+import { SignalSpanStore, type SignalSpan } from "./store.ts";
 
 export type QueryStatus = "complete" | "partial" | "empty";
 
-export interface QueryResult {
+export interface SignalView {
   readonly value: Float64Array;
-  readonly leadingNaN: number;
-  readonly trailingNaN: number;
-  readonly status: QueryStatus;
   /** Renderer-requested maximum sample spacing. */
   readonly targetResolutionMs: number;
-  readonly resolution: readonly ResolutionSegment[];
+  readonly coverage: readonly CoverageSegment[];
   readonly revision: number;
 }
 
-export interface QueryOptions {
+export interface ReadRequest {
   readonly evalTime: Float64Array;
-  readonly maxDeltaTMs: number;
+  readonly maxSampleGapMs: number;
 }
 
 /** Fetch/cache demand independent of a particular sampling grid. */
@@ -32,7 +29,7 @@ export interface BrokerDemand {
 }
 
 /** Mutable viewport interest. Updating it does not allocate a new subscription. */
-export interface BrokerSubscription {
+export interface Subscription {
   update(demand: BrokerDemand): void;
   dispose(): void;
 }
@@ -51,19 +48,19 @@ interface DemandSubscription {
 }
 
 export class Broker {
-  private readonly store = new PriceSpanStore();
-  private readonly fetchedCoverage = new FetchedCoverageIndex();
+  private readonly store = new SignalSpanStore();
+  private readonly fetchedCoverage = new SettledCoverageIndex();
   private readonly demandSubscriptions = new Set<DemandSubscription>();
   private readonly adapterSession: AdapterSession;
   private readonly now: () => number;
   private readonly onError: (message: string, error?: unknown) => void;
   private readonly onWarning: (message: string) => void;
   private revision = 0;
-  private adapterActivities: readonly AdapterActivity[] = [];
+  private adapterActivities: readonly AcquisitionActivity[] = [];
   private valueBuffer: Float64Array<ArrayBufferLike> = new Float64Array(0);
   private resolutionBuffer: Float64Array<ArrayBufferLike> = new Float64Array(0);
 
-  constructor(adapter: PriceAdapter, opts: BrokerOptions = {}) {
+  constructor(adapter: SignalSource, opts: BrokerOptions = {}) {
     this.now = opts.now ?? Date.now;
     this.onError = opts.onError ?? ((message, error) => console.error(message, error));
     this.onWarning = opts.onWarning ?? ((message) => console.warn(message));
@@ -91,8 +88,8 @@ export class Broker {
    * Read currently cached data. This method is deliberately side-effect-free:
    * it never starts requests or changes broker demand.
    */
-  read(opts: QueryOptions): QueryResult {
-    const { evalTime, maxDeltaTMs } = opts;
+  read(opts: ReadRequest): SignalView {
+    const { evalTime, maxSampleGapMs: maxDeltaTMs } = opts;
     if (!(maxDeltaTMs > 0) || !Number.isFinite(maxDeltaTMs)) {
       throw new Error(`Broker.read: invalid maxDeltaTMs ${maxDeltaTMs}`);
     }
@@ -105,11 +102,8 @@ export class Broker {
       value.fill(NaN);
       return {
         value,
-        leadingNaN: evalTime.length,
-        trailingNaN: 0,
-        status: "empty",
         targetResolutionMs: maxDeltaTMs,
-        resolution: [],
+        coverage: [],
         revision: this.revision,
       };
     }
@@ -146,28 +140,25 @@ export class Broker {
       historicalRange === null
         ? []
         : [
-            ...this.readySegments(evalTime, wallNow),
-            ...this.fetchedCoverage.emptySegments(historicalRange, maxDeltaTMs, readyCoverage),
-            ...this.transientSegments(historicalRange),
-          ].sort(
-            (a, b) =>
-              a.range.min - b.range.min ||
-              coverageLabelRank(b.state) - coverageLabelRank(a.state) ||
-              a.range.max - b.range.max,
-          );
+          ...this.readySegments(evalTime, wallNow),
+          ...this.fetchedCoverage.emptySegments(historicalRange, maxDeltaTMs, readyCoverage),
+          ...this.transientSegments(historicalRange),
+        ].sort(
+          (a, b) =>
+            a.range.min - b.range.min ||
+            coverageLabelRank(b.state) - coverageLabelRank(a.state) ||
+            a.range.max - b.range.max,
+        );
 
     return {
       value,
-      leadingNaN,
-      trailingNaN,
-      status,
       targetResolutionMs: maxDeltaTMs,
-      resolution,
+      coverage: resolution,
       revision: this.revision,
     };
   }
 
-  subscribe(demand: BrokerDemand, fn: () => void): BrokerSubscription {
+  subscribe(demand: BrokerDemand, fn: () => void): Subscription {
     const entry: DemandSubscription = {
       demand: validateDemand(demand),
       fn,
@@ -214,7 +205,7 @@ export class Broker {
   }
 
   /** Latest cached log price at or before `time`, clamped to the live wall clock. */
-  logPriceAtOrBefore(time: number): number | null {
+  valueAtOrBefore(time: number): number | null {
     if (!Number.isFinite(time)) {
       throw new Error(`Broker.logPriceAtOrBefore: invalid time ${time}`);
     }
@@ -243,14 +234,14 @@ export class Broker {
     return answered.covers(range);
   }
 
-  private ingest(result: AdapterDelivery): void {
+  private ingest(result: SignalDelivery): void {
     const clipped = clipPoints(PriceSeries.from(result.points).observations, result.searchedRange);
     const points = clipped.points;
     if (clipped.discardedFutureCount > 0) {
       this.onWarning(
         `[Broker] discarded ${clipped.discardedFutureCount} future point(s); ` +
-          `searched range ended at ${result.searchedRange.max}, ` +
-          `latest returned timestamp was ${clipped.latestFutureT}`,
+        `searched range ended at ${result.searchedRange.max}, ` +
+        `latest returned timestamp was ${clipped.latestFutureT}`,
       );
     }
     if (points.length > 0) {
@@ -270,7 +261,7 @@ export class Broker {
     observedThroughMs: number,
     searchedThroughRequestEnd: boolean,
   ): void {
-    const spans: PriceSpanInput[] = [];
+    const spans: SignalSpan[] = [];
     for (let index = 1; index < points.length; index++) {
       const previous = points[index - 1]!;
       const current = points[index]!;
@@ -280,8 +271,8 @@ export class Broker {
       spans.push({
         startTime: previous.t,
         endTime: current.t,
-        startLogPrice: Math.log(previous.price),
-        endLogPrice: Math.log(current.price),
+        startValue: Math.log(previous.price),
+        endValue: Math.log(current.price),
         // Quality describes the cadence that was searched, not the wall-clock
         // distance to the next returned candle. Otherwise every overnight or
         // weekend closure becomes a fake coarse interval and an intermediate
@@ -302,8 +293,8 @@ export class Broker {
         spans.push({
           startTime: last.t,
           endTime: heldUntil,
-          startLogPrice: logPrice,
-          endLogPrice: logPrice,
+          startValue: logPrice,
+          endValue: logPrice,
           resolutionMs: nominalResolutionMs,
         });
       }
@@ -312,7 +303,7 @@ export class Broker {
     this.store.insertBatch(spans);
   }
 
-  private readySegments(evalTime: Float64Array, wallNow: number): ResolutionSegment[] {
+  private readySegments(evalTime: Float64Array, wallNow: number): CoverageSegment[] {
     return this.store.segments(evalTime, wallNow).map((span) => ({
       range: Range.create(span.startTime, span.endTime),
       resolutionMs: span.resolutionMs,
@@ -320,14 +311,14 @@ export class Broker {
     }));
   }
 
-  private transientSegments(range: Range): ResolutionSegment[] {
-    const out: ResolutionSegment[] = [];
+  private transientSegments(range: Range): CoverageSegment[] {
+    const out: CoverageSegment[] = [];
     for (const activity of this.adapterActivities) {
       const overlap = intersect(activity.range, range);
       if (overlap === null) continue;
       out.push({
         range: overlap,
-        resolutionMs: activity.resolutionMs,
+        samplePeriodMs: activity.resolutionMs,
         state:
           activity.state === "failed"
             ? "failed"
@@ -371,7 +362,7 @@ function clampToNow(range: Range, now: number): Range | null {
   return range.min < max ? Range.create(range.min, max) : null;
 }
 
-function coverageLabelRank(state: ResolutionSegment["state"]): number {
+function coverageLabelRank(state: CoverageSegment["state"]): number {
   if (state === "failed") return 3;
   if (state === "pending") return 2;
   if (state === "watching") return 2;

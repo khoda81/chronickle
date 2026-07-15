@@ -3,11 +3,11 @@ import { Range } from "../../engine/range.ts";
 const BLOCK_CAPACITY = 512;
 
 /** One observed zero-order-hold interval. */
-export interface PriceSpanInput {
+export interface SignalSpan {
   readonly startTime: number;
   readonly endTime: number;
-  readonly startLogPrice: number;
-  readonly endLogPrice: number;
+  readonly startValue: number;
+  readonly endValue: number;
   readonly resolutionMs: number;
 }
 
@@ -54,7 +54,7 @@ interface SpanLocation {
  * search per requested screen edge. It never walks observations skipped by a
  * zoomed-out pixel, so read cost depends on viewport width rather than history.
  */
-export class PriceSpanStore {
+export class SignalSpanStore {
   private readonly blocks: SpanBlock[] = [];
   private totalSpanCount = 0;
 
@@ -101,7 +101,7 @@ export class PriceSpanStore {
   }
 
   /** Overlay a sorted, internally non-overlapping batch. */
-  insertBatch(incoming: readonly PriceSpanInput[]): void {
+  insertBatch(incoming: readonly SignalSpan[]): void {
     if (incoming.length === 0) return;
     validateIncoming(incoming);
 
@@ -442,7 +442,7 @@ export class PriceSpanStore {
   }
 }
 
-function chunkSpans(spans: readonly PriceSpanInput[]): SpanBlock[] {
+function chunkSpans(spans: readonly SignalSpan[]): SpanBlock[] {
   const blocks: SpanBlock[] = [];
   for (let offset = 0; offset < spans.length; offset += BLOCK_CAPACITY) {
     const length = Math.min(BLOCK_CAPACITY, spans.length - offset);
@@ -457,8 +457,8 @@ function chunkSpans(spans: readonly PriceSpanInput[]): SpanBlock[] {
       const span = spans[offset + index]!;
       startTime[index] = span.startTime;
       endTime[index] = span.endTime;
-      startLogPrice[index] = span.startLogPrice;
-      endLogPrice[index] = span.endLogPrice;
+      startLogPrice[index] = span.startValue;
+      endLogPrice[index] = span.endValue;
       resolutionMs[index] = span.resolutionMs;
       maxResolutionMs = Math.max(maxResolutionMs, span.resolutionMs);
       if (index > 0 && endTime[index - 1]! < span.startTime) internalGapCount++;
@@ -479,16 +479,16 @@ function chunkSpans(spans: readonly PriceSpanInput[]): SpanBlock[] {
   return blocks;
 }
 
-function flattenBlocks(blocks: readonly SpanBlock[], start: number, end: number): PriceSpanInput[] {
-  const out: PriceSpanInput[] = [];
+function flattenBlocks(blocks: readonly SpanBlock[], start: number, end: number): SignalSpan[] {
+  const out: SignalSpan[] = [];
   for (let blockIndex = start; blockIndex < end; blockIndex++) {
     const block = blocks[blockIndex]!;
     for (let spanIndex = 0; spanIndex < block.length; spanIndex++) {
       out.push({
         startTime: block.startTime[spanIndex]!,
         endTime: block.endTime[spanIndex]!,
-        startLogPrice: block.startLogPrice[spanIndex]!,
-        endLogPrice: block.endLogPrice[spanIndex]!,
+        startValue: block.startLogPrice[spanIndex]!,
+        endValue: block.endLogPrice[spanIndex]!,
         resolutionMs: block.resolutionMs[spanIndex]!,
       });
     }
@@ -497,10 +497,10 @@ function flattenBlocks(blocks: readonly SpanBlock[], start: number, end: number)
 }
 
 function overlay(
-  existing: readonly PriceSpanInput[],
-  incoming: readonly PriceSpanInput[],
-): PriceSpanInput[] {
-  const out: PriceSpanInput[] = [];
+  existing: readonly SignalSpan[],
+  incoming: readonly SignalSpan[],
+): SignalSpan[] {
+  const out: SignalSpan[] = [];
   let existingIndex = 0;
   let incomingIndex = 0;
   let cursor = Math.min(existing[0]?.startTime ?? Infinity, incoming[0]?.startTime ?? Infinity);
@@ -537,8 +537,8 @@ function overlay(
       appendSlice(out, {
         startTime: cursor,
         endTime: next,
-        startLogPrice: source.startLogPrice,
-        endLogPrice: next === source.endTime ? source.endLogPrice : source.startLogPrice,
+        startValue: source.startValue,
+        endValue: next === source.endTime ? source.endValue : source.startValue,
         resolutionMs: source.resolutionMs,
       });
     }
@@ -547,16 +547,16 @@ function overlay(
   return out;
 }
 
-function appendSlice(out: PriceSpanInput[], span: PriceSpanInput): void {
+function appendSlice(out: SignalSpan[], span: SignalSpan): void {
   const previous = out[out.length - 1];
   if (
     previous !== undefined &&
     previous.endTime === span.startTime &&
     previous.resolutionMs === span.resolutionMs &&
-    previous.startLogPrice === previous.endLogPrice &&
-    previous.endLogPrice === span.startLogPrice
+    previous.startValue === previous.endValue &&
+    previous.endValue === span.startValue
   ) {
-    out[out.length - 1] = { ...previous, endTime: span.endTime, endLogPrice: span.endLogPrice };
+    out[out.length - 1] = { ...previous, endTime: span.endTime, endValue: span.endValue };
   } else {
     out.push(span);
   }
@@ -566,7 +566,7 @@ function compareLocations(a: SpanLocation, b: SpanLocation): number {
   return a.blockIndex - b.blockIndex || a.spanIndex - b.spanIndex;
 }
 
-function validateIncoming(spans: readonly PriceSpanInput[]): void {
+function validateIncoming(spans: readonly SignalSpan[]): void {
   let previousEnd = Number.NEGATIVE_INFINITY;
   for (let index = 0; index < spans.length; index++) {
     const span = spans[index]!;
@@ -577,7 +577,7 @@ function validateIncoming(spans: readonly PriceSpanInput[]): void {
     ) {
       throw new Error(`PriceSpanStore.insertBatch: invalid span at ${index}`);
     }
-    if (!Number.isFinite(span.startLogPrice) || !Number.isFinite(span.endLogPrice)) {
+    if (!Number.isFinite(span.startValue) || !Number.isFinite(span.endValue)) {
       throw new Error(`PriceSpanStore.insertBatch: non-finite price at ${index}`);
     }
     validateResolution(span.resolutionMs);

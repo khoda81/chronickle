@@ -13,7 +13,7 @@
  *   43200 ("720"), 86400 ("D"), 172800 ("2D"), 259200 ("3D")
  */
 
-import { createPollingAdapter, type PriceAdapter } from "../fetcher.ts";
+import { createPollingSignalSource, type PriceAdapter } from "../fetcher.ts";
 import { pickResolution } from "../resolution.ts";
 import { fetchOhlc, NobitexOhlcResponse, ohlcToPriceSeries } from "./nobitex.ts";
 import { PricePoint } from "../../../domain.ts";
@@ -49,7 +49,7 @@ export function createNobitexAdapter(opts: NobitexAdapterOptions = {}): PriceAda
   const symbol = opts.symbol ?? "USDTIRT";
   const timeoutMs = opts.timeoutMs;
 
-  return createPollingAdapter({
+  return createPollingSignalSource({
     minFetchPoints: 256,
     livePollDelayMs: 1_000,
     // Nobitex applies endpoint-wide throttling. The broker owns transient

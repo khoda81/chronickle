@@ -30,7 +30,7 @@ import type { ResolutionLayer } from "./resolution.ts";
 import { Heatmap } from "./heatmap.ts";
 import { Events } from "./events.ts";
 import { Axis } from "./axis.ts";
-import { Resolution } from "./resolution.ts";
+import { CoverageBar } from "./resolution.ts";
 
 export class Frame implements Disposable {
   constructor(
@@ -159,7 +159,7 @@ export class Frame implements Disposable {
   }
 
   resolution(): ResolutionLayer {
-    return Resolution.create(this);
+    return CoverageBar.create(this);
   }
 
   /** Draw the time axis with an explicit minimum tick spacing (CSS px). */

@@ -4,22 +4,22 @@ import { RangeSet } from "../src/data/rangeSet.ts";
 import {
   Broker as PriceBroker,
   type BrokerOptions,
-  type BrokerSubscription,
-  type QueryOptions,
-  type QueryResult,
+  type Subscription,
+  type ReadRequest,
+  type SignalView,
 } from "../src/data/price/broker.ts";
-import { FetchedCoverageIndex } from "../src/data/price/coverage.ts";
+import { SettledCoverageIndex } from "../src/data/price/coverage.ts";
 import { createBinanceAdapter } from "../src/data/price/exchanges/binanceFetcher.ts";
 import { chooseYahooInterval, createYahooAdapter } from "../src/data/price/exchanges/yahoo.ts";
 import {
-  createPollingAdapter,
+  createPollingSignalSource,
   type AdapterBatch,
   type AdapterDemand,
   type PriceAdapter,
 } from "../src/data/price/fetcher.ts";
 import { marketSource } from "../src/data/price/markets.ts";
 import { filterMarketSymbols, parseNobitexMarketKey } from "../src/data/price/symbols.ts";
-import { PriceSpanStore } from "../src/data/price/store.ts";
+import { SignalSpanStore } from "../src/data/price/store.ts";
 import { Range } from "../src/engine/range.ts";
 import { fitStackLayout, heatmapScaleWindow } from "../src/engine/gfx/layout.ts";
 import { placeTooltip } from "../src/ui/tooltip.ts";
@@ -27,7 +27,7 @@ import {
   computeCenteredGaussianReference,
   computeWaveletField,
   kernelContext,
-  logPriceEdgesToReturns,
+  signalEdgesToDeltas,
 } from "../src/engine/wavelet.ts";
 
 type Test = { readonly name: string; readonly run: () => void | Promise<void> };
@@ -56,18 +56,18 @@ interface Fetcher {
 const brokers = new Set<Broker>();
 
 class Broker extends PriceBroker {
-  private compatibilitySubscription: BrokerSubscription | null = null;
+  private compatibilitySubscription: Subscription | null = null;
 
   constructor(source: Fetcher | PriceAdapter, opts: BrokerOptions = {}) {
     super(isAdapter(source) ? source : adaptFetcher(source, opts.now ?? Date.now), opts);
     brokers.add(this);
   }
 
-  query(opts: QueryOptions): QueryResult {
+  query(opts: ReadRequest): SignalView {
     if (opts.evalTime.length >= 2) {
       const demand = {
         range: Range.create(opts.evalTime[0]!, opts.evalTime[opts.evalTime.length - 1]!),
-        maxDeltaTMs: opts.maxDeltaTMs,
+        maxDeltaTMs: opts.maxSampleGapMs,
       };
       if (this.compatibilitySubscription === null) {
         this.compatibilitySubscription = this.subscribe(demand, () => undefined);
@@ -91,7 +91,7 @@ function isAdapter(source: Fetcher | PriceAdapter): source is PriceAdapter {
 }
 
 function adaptFetcher(fetcher: Fetcher, now: () => number): PriceAdapter {
-  return createPollingAdapter({
+  return createPollingSignalSource({
     serializeRequests: fetcher.serializeRequests,
     sourceWideBackoff: fetcher.sourceWideBackoff,
     livePollDelayMs: fetcher.liveRetryDelayMs,
@@ -246,7 +246,7 @@ test("hover labels flip around their anchor and remain inside the viewport", () 
 
 test("price span store returns NaN outside coverage and holds ZOH values", () => {
   const evalTime = new Float64Array([0, 10, 15, 20]);
-  const store = new PriceSpanStore();
+  const store = new SignalSpanStore();
   const empty = store.sample(evalTime, 20);
   assert(empty.value.every(Number.isNaN), "empty store did not return NaN");
 
@@ -254,15 +254,15 @@ test("price span store returns NaN outside coverage and holds ZOH values", () =>
     {
       startTime: 5,
       endTime: 15,
-      startLogPrice: 1,
-      endLogPrice: 2,
+      startValue: 1,
+      endValue: 2,
       resolutionMs: 10,
     },
     {
       startTime: 15,
       endTime: 25,
-      startLogPrice: 2,
-      endLogPrice: 2,
+      startValue: 2,
+      endValue: 2,
       resolutionMs: 10,
     },
   ]);
@@ -276,20 +276,20 @@ test("price span store returns NaN outside coverage and holds ZOH values", () =>
 });
 
 test("price predecessor lookup holds across uncovered gaps", () => {
-  const store = new PriceSpanStore();
+  const store = new SignalSpanStore();
   store.insertBatch([
     {
       startTime: 10,
       endTime: 20,
-      startLogPrice: 1,
-      endLogPrice: 2,
+      startValue: 1,
+      endValue: 2,
       resolutionMs: 10,
     },
     {
       startTime: 40,
       endTime: 50,
-      startLogPrice: 3,
-      endLogPrice: 4,
+      startValue: 3,
+      endValue: 4,
       resolutionMs: 10,
     },
   ]);
@@ -342,7 +342,7 @@ test("broker read is side-effect-free and viewport subscriptions drive fetching"
 });
 
 test("broker trusts the adapter plan, not irregular observation spacing", async () => {
-  const adapter = createPollingAdapter({
+  const adapter = createPollingSignalSource({
     now: () => 20_000,
     resolve: () => 1_000,
     async fetchRange(plan) {
@@ -361,12 +361,12 @@ test("broker trusts the adapter plan, not irregular observation spacing", async 
 
   const result = broker.read({
     evalTime: new Float64Array([0, 5_000, 10_000]),
-    maxDeltaTMs: 5_000,
+    maxSampleGapMs: 5_000,
   });
-  const ready = result.resolution.filter((segment) => segment.state === "ready");
+  const ready = result.coverage.filter((segment) => segment.state === "ready");
   assert(ready.length > 0, "adapter observations were not cached");
   assert(
-    ready.every((segment) => segment.resolutionMs === 1_000),
+    ready.every((segment) => segment.samplePeriodMs === 1_000),
     "broker inferred resolution from an irregular timestamp gap",
   );
 });
@@ -404,18 +404,18 @@ test("leaving now updates the adapter session instead of creating another subscr
 });
 
 test("an empty price span store has no invalid cached range", () => {
-  const store = new PriceSpanStore();
+  const store = new SignalSpanStore();
   assert(store.timeRange() === null, "empty store exposed a cached range");
 });
 
 test("finer price spans replace coarse history and reject late coarse overwrites", () => {
-  const store = new PriceSpanStore();
+  const store = new SignalSpanStore();
   store.insertBatch([
     {
       startTime: 0,
       endTime: 20,
-      startLogPrice: 1,
-      endLogPrice: 2,
+      startValue: 1,
+      endValue: 2,
       resolutionMs: 20,
     },
   ]);
@@ -423,8 +423,8 @@ test("finer price spans replace coarse history and reject late coarse overwrites
     {
       startTime: 5,
       endTime: 15,
-      startLogPrice: 10,
-      endLogPrice: 11,
+      startValue: 10,
+      endValue: 11,
       resolutionMs: 10,
     },
   ]);
@@ -432,8 +432,8 @@ test("finer price spans replace coarse history and reject late coarse overwrites
     {
       startTime: 0,
       endTime: 20,
-      startLogPrice: -1,
-      endLogPrice: -2,
+      startValue: -1,
+      endValue: -2,
       resolutionMs: 30,
     },
   ]);
@@ -504,7 +504,7 @@ test("causal transform never responds before an impulse", () => {
 });
 
 test("ZOH returns are timestamp-aligned, causal, and zero-fill unknown data", () => {
-  const returns = logPriceEdgesToReturns(new Float64Array([10, 10, 11, NaN, 12, 12]));
+  const returns = signalEdgesToDeltas(new Float64Array([10, 10, 11, NaN, 12, 12]));
   assert(returns.length === 6, "return grid no longer matches the edge grid");
   approx(returns[0]!, 0);
   approx(returns[1]!, 0);
@@ -539,9 +539,9 @@ test("broker fetches finer data after coarse observations are cached", async () 
   };
   const broker = new Broker(fetcher);
   const evalTime = new Float64Array([0, 5_000, 10_000]);
-  broker.query({ evalTime, maxDeltaTMs: 5_000 });
+  broker.query({ evalTime, maxSampleGapMs: 5_000 });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  broker.query({ evalTime, maxSampleGapMs: 1_000 });
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert(requests.includes(5_000), "coarse level was not fetched");
   assert(requests.includes(1_000), "fine level was suppressed by coarse coverage");
@@ -560,7 +560,7 @@ test("live adapter subscriptions fetch elapsed wall-clock time without UI reload
   const broker = new Broker(fetcher, { now: () => now });
   broker.query({
     evalTime: new Float64Array([0, 10_000, 20_000]),
-    maxDeltaTMs: 1_000,
+    maxSampleGapMs: 1_000,
   });
   assert(requests[0]!.max === 10_000, "future time leaked into the fetch range");
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -593,14 +593,14 @@ test("last-point expected lifetime suppresses moving-now micro-requests", async 
   };
   const broker = new Broker(fetcher, { now: () => now });
   const evalTime = new Float64Array([0, 5, 10, 15]);
-  broker.query({ evalTime, maxDeltaTMs: 5 });
+  broker.query({ evalTime, maxSampleGapMs: 5 });
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert(count(requests) === 1, "initial live request was not issued");
 
   now = 8;
-  broker.query({ evalTime, maxDeltaTMs: 5 });
+  broker.query({ evalTime, maxSampleGapMs: 5 });
   now = 9.999;
-  broker.query({ evalTime, maxDeltaTMs: 5 });
+  broker.query({ evalTime, maxSampleGapMs: 5 });
   assert(count(requests) === 1, "wall-clock movement refetched the same candle");
 
   now = 11.001;
@@ -633,11 +633,11 @@ test("a lagging live endpoint is polled on its refresh cadence, not every redraw
   const broker = new Broker(fetcher, { now: () => now });
   const evalTime = new Float64Array([0, 5_000, 10_000, 15_000]);
   broker.subscribe({ range: Range.create(0, 15_000), maxDeltaTMs: 5_000 }, () => notifications++);
-  broker.query({ evalTime, maxDeltaTMs: 5_000 });
+  broker.query({ evalTime, maxSampleGapMs: 5_000 });
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   now = 10_003;
-  broker.query({ evalTime, maxDeltaTMs: 5_000 });
+  broker.query({ evalTime, maxSampleGapMs: 5_000 });
   assert(count(requests) === 1, "redraw bypassed the live refresh lease");
 
   now = 10_007;
@@ -646,7 +646,7 @@ test("a lagging live endpoint is polled on its refresh cadence, not every redraw
   const polled = count(requests);
   assert(polled >= 2, "adapter did not poll the lagging live endpoint");
   now = 10_020;
-  broker.query({ evalTime, maxDeltaTMs: 5_000 });
+  broker.query({ evalTime, maxSampleGapMs: 5_000 });
   assert(count(requests) === polled, "UI redraw started a live request");
   broker.dispose();
 });
@@ -655,7 +655,7 @@ test("follow-now demand updates keep one live lease and do not feed notification
   let now = 10_000;
   let calls = 0;
   let notifications = 0;
-  const adapter = createPollingAdapter({
+  const adapter = createPollingSignalSource({
     now: () => now,
     livePollDelayMs: 60_000,
     minFetchPoints: 8,
@@ -689,10 +689,10 @@ test("follow-now demand updates keep one live lease and do not feed notification
   );
   const status = broker.read({
     evalTime: new Float64Array([0, now]),
-    maxDeltaTMs: 1_000,
+    maxSampleGapMs: 1_000,
   });
   assert(
-    status.resolution.some((segment) => segment.state === "watching"),
+    status.coverage.some((segment) => segment.state === "watching"),
     "live lease was missing from acquisition diagnostics",
   );
   subscription.dispose();
@@ -702,7 +702,7 @@ test("follow-now demand updates keep one live lease and do not feed notification
 test("adapter expands tiny demands and broker caches the complete delivery", async () => {
   let calls = 0;
   let fetched: Range | null = null;
-  const adapter = createPollingAdapter({
+  const adapter = createPollingSignalSource({
     now: () => 100_000,
     minFetchPoints: 8,
     resolve: () => 1_000,
@@ -739,7 +739,7 @@ test("adapter expands tiny demands and broker caches the complete delivery", asy
 test("adapter keeps a live lease warm for its configured grace period", async () => {
   let now = 10_000;
   let latestStates: readonly string[] = [];
-  const adapter = createPollingAdapter({
+  const adapter = createPollingSignalSource({
     now: () => now,
     liveRetentionMs: 20,
     livePollDelayMs: 60_000,
@@ -786,16 +786,16 @@ test("returned future points are discarded while the last valid sample is held",
     onWarning: (message) => warnings.push(message),
   });
   const evalTime = new Float64Array([0, 5_000, 10_000]);
-  broker.query({ evalTime, maxDeltaTMs: 5_000 });
+  broker.query({ evalTime, maxSampleGapMs: 5_000 });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  const result = broker.query({ evalTime, maxDeltaTMs: 5_000 });
-  const ready = result.resolution.filter((segment) => segment.state === "ready");
+  const result = broker.query({ evalTime, maxSampleGapMs: 5_000 });
+  const ready = result.coverage.filter((segment) => segment.state === "ready");
   assert(
     ready.every((segment) => segment.range.max <= 7_500),
     "presented coverage entered the future",
   );
   assert(Number.isNaN(result.value[2]!), "future value was rendered");
-  approx(Math.exp(broker.logPriceAtOrBefore(10_000)!), 11, 1e-12);
+  approx(Math.exp(broker.valueAtOrBefore(10_000)!), 11, 1e-12);
   assert(
     warnings.some((message) => message.includes("10000")),
     "future API point was silent",
@@ -803,7 +803,7 @@ test("returned future points are discarded while the last valid sample is held",
 });
 
 test("hierarchical span summaries answer full-range quality without scanning history", () => {
-  const store = new PriceSpanStore();
+  const store = new SignalSpanStore();
   const spans = Array.from({ length: 2_000 }, (_, index) => ({
     startTime: index * 1_000,
     endTime: (index + 1) * 1_000,
@@ -817,7 +817,7 @@ test("hierarchical span summaries answer full-range quality without scanning his
 });
 
 test("coverage summaries isolate gaps at leaf-block boundaries", () => {
-  const store = new PriceSpanStore();
+  const store = new SignalSpanStore();
   const spans = Array.from({ length: 1_024 }, (_, index) => {
     const gap = index >= 512 ? 10_000 : 0;
     return {
@@ -840,7 +840,7 @@ test("coverage summaries isolate gaps at leaf-block boundaries", () => {
 });
 
 test("ready data is projected out of fetched-but-empty coverage", () => {
-  const coverage = new FetchedCoverageIndex();
+  const coverage = new SettledCoverageIndex();
   coverage.add(5_000, Range.create(0, 10_000));
   const ready = new RangeSet();
   ready.add(Range.create(2_000, 8_000));
@@ -851,7 +851,7 @@ test("ready data is projected out of fetched-but-empty coverage", () => {
 });
 
 test("finer fetched evidence satisfies coarser continuously varying zoom demands", () => {
-  const coverage = new FetchedCoverageIndex();
+  const coverage = new SettledCoverageIndex();
   coverage.add(1_001.25, Range.create(0, 10_000));
   assert(coverage.answers(Range.create(0, 10_000), 5_432.1), "finer empty evidence was ignored");
   assert(
@@ -892,11 +892,10 @@ test("searched market closures do not create an intermediate-zoom fetch storm", 
   };
   const broker = new Broker(fetcher, { now: () => 11_000 });
   const evalTime = new Float64Array([0, 5_500, 11_000]);
-  broker.query({ evalTime, maxDeltaTMs: 1_001.25 });
+  broker.query({ evalTime, maxSampleGapMs: 1_001.25 });
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  const intermediate = broker.query({ evalTime, maxDeltaTMs: 5_432.1 });
-  assert(intermediate.status === "complete", "market closure became unresolved at mid zoom");
+  const intermediate = broker.query({ evalTime, maxSampleGapMs: 5_432.1 });
   assert(calls === 1, `market closure triggered ${calls - 1} redundant request(s)`);
   broker.dispose();
 });
@@ -920,9 +919,9 @@ test("broker trusts the returned searched range, not the requested range", async
   };
   const broker = new Broker(fetcher, { now: () => 20_000 });
   const evalTime = new Float64Array([0, 5_000, 10_000]);
-  broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  broker.query({ evalTime, maxSampleGapMs: 1_000 });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  broker.query({ evalTime, maxSampleGapMs: 1_000 });
   assert(requests.length === 2, `bounded scheduler started ${requests.length} calls`);
   assert(
     requests[1]!.min <= 0 && requests[1]!.max >= 5_000,
@@ -949,12 +948,12 @@ test("empty and coarse evidence never suppress a finer request", async () => {
   };
   const broker = new Broker(fetcher, { now: () => 10_000 });
   const evalTime = new Float64Array([0, 5_000, 10_000]);
-  broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  broker.query({ evalTime, maxSampleGapMs: 1_000 });
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  broker.query({ evalTime, maxDeltaTMs: 5_000 });
+  broker.query({ evalTime, maxSampleGapMs: 5_000 });
   assert(count(requests) === 1, "observed finer/equal data did not satisfy coarse query");
-  broker.query({ evalTime, maxDeltaTMs: 500 });
+  broker.query({ evalTime, maxSampleGapMs: 500 });
   assert(count(requests) === 2 && requests[1] === 500, "finer request was suppressed");
 });
 
@@ -968,14 +967,14 @@ test("finer pending work suppresses only coarser duplicate requests", () => {
   };
   const broker = new Broker(fetcher, { now: () => 10_000 });
   const evalTime = new Float64Array([0, 5_000, 10_000]);
-  const first = broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  const first = broker.query({ evalTime, maxSampleGapMs: 1_000 });
   assert(
-    first.resolution.some((segment) => segment.state === "pending"),
+    first.coverage.some((segment) => segment.state === "pending"),
     "pending hidden",
   );
-  broker.query({ evalTime, maxDeltaTMs: 5_000 });
+  broker.query({ evalTime, maxSampleGapMs: 5_000 });
   assert(count(requests) === 1, "fine pending request did not suppress coarse duplicate");
-  broker.query({ evalTime, maxDeltaTMs: 500 });
+  broker.query({ evalTime, maxSampleGapMs: 500 });
   assert(count(requests) === 2, "coarse pending request suppressed a finer request");
 });
 
@@ -1007,8 +1006,8 @@ test("moving demand aborts stale serialized work before starting the latest rang
     },
   };
   const broker = new Broker(fetcher, { now: () => 3_000 });
-  broker.query({ evalTime: new Float64Array([0, 1_000]), maxDeltaTMs: 1_000 });
-  broker.query({ evalTime: new Float64Array([2_000, 3_000]), maxDeltaTMs: 1_000 });
+  broker.query({ evalTime: new Float64Array([0, 1_000]), maxSampleGapMs: 1_000 });
+  broker.query({ evalTime: new Float64Array([2_000, 3_000]), maxSampleGapMs: 1_000 });
   assert(calls === 2, "latest viewport did not replace stale serialized work");
   assert(aborted === 1 && maxActiveCalls === 1, "stale and current requests overlapped");
   finish({ points: [], searchedRange: Range.create(2_000, 3_000) });
@@ -1027,9 +1026,9 @@ test("source-wide backoff suppresses new moving-tail ranges", async () => {
     },
   };
   const broker = new Broker(fetcher, { now: () => 3_000, onError: () => undefined });
-  broker.query({ evalTime: new Float64Array([0, 1_000]), maxDeltaTMs: 1_000 });
+  broker.query({ evalTime: new Float64Array([0, 1_000]), maxSampleGapMs: 1_000 });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  broker.query({ evalTime: new Float64Array([2_000, 3_000]), maxDeltaTMs: 1_000 });
+  broker.query({ evalTime: new Float64Array([2_000, 3_000]), maxSampleGapMs: 1_000 });
   assert(calls === 1, "a disjoint moving-tail range bypassed source-wide backoff");
   broker.dispose();
 });
@@ -1057,7 +1056,7 @@ test("subscriber failures are not reclassified as fetch failures", async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
   const result = broker.query(query);
   assert(
-    result.resolution.every((segment) => segment.state !== "failed"),
+    result.coverage.every((segment) => segment.state !== "failed"),
     "subscriber exception became a failed exchange range",
   );
   assert(errors.includes("[Broker] subscriber failed"), "subscriber exception was hidden");
@@ -1083,8 +1082,8 @@ test("a late coarse response cannot overwrite an earlier fine response", async (
   };
   const broker = new Broker(fetcher, { now: () => 5_000 });
   const evalTime = new Float64Array([0, 1_000, 2_000, 3_000, 4_000, 5_000]);
-  broker.query({ evalTime, maxDeltaTMs: 5_000 });
-  broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  broker.query({ evalTime, maxSampleGapMs: 5_000 });
+  broker.query({ evalTime, maxSampleGapMs: 1_000 });
 
   resolveFine({
     points: [
@@ -1107,7 +1106,7 @@ test("a late coarse response cannot overwrite an earlier fine response", async (
   });
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  const result = broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  const result = broker.query({ evalTime, maxSampleGapMs: 1_000 });
   approx(Math.exp(result.value[1]!), 101, 1e-10);
 });
 
@@ -1120,9 +1119,9 @@ test("clearing the price cache ignores stale in-flight responses", async () => {
   };
   const broker = new Broker(fetcher, { now: () => 1_000 });
   const evalTime = new Float64Array([0, 1_000]);
-  broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  broker.query({ evalTime, maxSampleGapMs: 1_000 });
   broker.clearCache();
-  broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  broker.query({ evalTime, maxSampleGapMs: 1_000 });
   assert(resolvers.length === 2, "reload did not start a fresh request generation");
 
   resolvers[0]!({
@@ -1133,7 +1132,7 @@ test("clearing the price cache ignores stale in-flight responses", async () => {
     searchedRange: Range.create(0, 1_000),
   });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  const beforeFresh = broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  const beforeFresh = broker.query({ evalTime, maxSampleGapMs: 1_000 });
   assert(beforeFresh.value.every(Number.isNaN), "stale response repopulated the cleared cache");
 
   resolvers[1]!({
@@ -1144,7 +1143,7 @@ test("clearing the price cache ignores stale in-flight responses", async () => {
     searchedRange: Range.create(0, 1_000),
   });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  const fresh = broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  const fresh = broker.query({ evalTime, maxSampleGapMs: 1_000 });
   approx(Math.exp(fresh.value[0]!), 100, 1e-10);
 });
 
@@ -1335,16 +1334,16 @@ test("broker exposes failures and uses the fetcher's retry policy", async () => 
   };
   const broker = new Broker(fetcher, { onError: () => undefined });
   const evalTime = new Float64Array([0, 1_000]);
-  broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  broker.query({ evalTime, maxSampleGapMs: 1_000 });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  const result = broker.query({ evalTime, maxDeltaTMs: 1_000 });
-  const failed = result.resolution.find((segment) => segment.state === "failed");
+  const result = broker.query({ evalTime, maxSampleGapMs: 1_000 });
+  const failed = result.coverage.find((segment) => segment.state === "failed");
   assert(failed !== undefined, "failed request was still presented as pending");
   assert(failed.message === "upstream unavailable", "failure detail was lost");
-  broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  broker.query({ evalTime, maxSampleGapMs: 1_000 });
   assert(Number(calls) === 1, "failure backoff did not suppress a retry");
   await new Promise((resolve) => setTimeout(resolve, 120));
-  broker.query({ evalTime, maxDeltaTMs: 1_000 });
+  broker.query({ evalTime, maxSampleGapMs: 1_000 });
   assert(Number(calls) === 2, "request did not retry after adapter backoff elapsed");
   broker.dispose();
 });

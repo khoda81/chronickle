@@ -2,7 +2,7 @@
 
 import type { PricePoint } from "../../../domain.ts";
 import { Range } from "../../../engine/range.ts";
-import { createPollingAdapter, type PriceAdapter } from "../fetcher.ts";
+import { createPollingSignalSource, type PriceAdapter } from "../fetcher.ts";
 import { pickResolution } from "../resolution.ts";
 
 const BINANCE_KLINES = "https://api.binance.com/api/v3/klines";
@@ -38,7 +38,7 @@ export function createBinanceAdapter(opts: BinanceAdapterOptions): PriceAdapter 
     throw new Error(`Invalid Binance symbol: ${opts.symbol}`);
   }
 
-  return createPollingAdapter({
+  return createPollingSignalSource({
     minFetchPoints: 256,
     retryDelayMs(error, attempt) {
       const message = error instanceof Error ? error.message : String(error);

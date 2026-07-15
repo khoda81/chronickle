@@ -1,26 +1,26 @@
-import type { ResolutionSegment } from "../../data/price/coverage.ts";
+import type { CoverageSegment } from "../../data/price/coverage.ts";
 import type { Frame } from "./context.ts";
-import { RESOLUTION_BAR_HEIGHT } from "./layout.ts";
+import { COVERAGE_BAR_HEIGHT } from "./layout.ts";
 
 const QUALITY_STEPS = 256;
 const QUALITY_COLORS = buildQualityColors();
 const FONT = "10px ui-monospace, monospace";
-const TEXT_Y_OFFSET = RESOLUTION_BAR_HEIGHT / 2;
+const TEXT_Y_OFFSET = COVERAGE_BAR_HEIGHT / 2;
 
 export interface ResolutionLayer {
-  draw(segments: readonly ResolutionSegment[], targetResolutionMs: number, y: number): void;
+  draw(segments: readonly CoverageSegment[], targetResolutionMs: number, y: number): void;
 }
 
-export const Resolution = {
+export const CoverageBar = {
   create(frame: Frame): ResolutionLayer {
     return new ResolutionImpl(frame);
   },
 };
 
 class ResolutionImpl implements ResolutionLayer {
-  constructor(private readonly frame: Frame) {}
+  constructor(private readonly frame: Frame) { }
 
-  draw(segments: readonly ResolutionSegment[], targetResolutionMs: number, y: number): void {
+  draw(segments: readonly CoverageSegment[], targetResolutionMs: number, y: number): void {
     const { frame } = this;
     const width = Math.ceil(frame.width);
     if (width <= 0) return;
@@ -34,7 +34,7 @@ class ResolutionImpl implements ResolutionLayer {
       const x0 = Math.max(0, Math.floor(frame.tx.timeToX(segment.range.min)));
       const x1 = Math.min(width, Math.ceil(frame.tx.timeToX(segment.range.max)));
       if (!(x1 > x0)) continue;
-      const value = Math.min(1, targetResolutionMs / segment.resolutionMs);
+      const value = Math.min(1, targetResolutionMs / segment.samplePeriodMs);
       for (let x = x0; x < x1; x++) quality[x] = Math.max(quality[x]!, value);
     }
 
@@ -43,7 +43,7 @@ class ResolutionImpl implements ResolutionLayer {
     for (let x = 1; x <= width; x++) {
       const nextIndex = x < width ? qualityIndex(quality[x]!) : -1;
       if (nextIndex === runIndex) continue;
-      frame.fillRectPx(runStart, y, x - runStart, RESOLUTION_BAR_HEIGHT, QUALITY_COLORS[runIndex]!);
+      frame.fillRectPx(runStart, y, x - runStart, COVERAGE_BAR_HEIGHT, QUALITY_COLORS[runIndex]!);
       runStart = x;
       runIndex = nextIndex;
     }
@@ -58,7 +58,7 @@ class ResolutionImpl implements ResolutionLayer {
       if (!(x1 > x0)) continue;
       frame.fillRectPx(
         x0,
-        segment.state === "failed" ? y : y + RESOLUTION_BAR_HEIGHT - 3,
+        segment.state === "failed" ? y : y + COVERAGE_BAR_HEIGHT - 3,
         x1 - x0,
         3,
         segment.state === "failed"
@@ -74,7 +74,7 @@ class ResolutionImpl implements ResolutionLayer {
   }
 
   private drawLabels(
-    segments: readonly ResolutionSegment[],
+    segments: readonly CoverageSegment[],
     targetResolutionMs: number,
     y: number,
   ): void {
@@ -105,28 +105,28 @@ class ResolutionImpl implements ResolutionLayer {
 
 function drawLabel(frame: Frame, text: string, x: number, y: number, color: string): void {
   const width = Math.ceil(frame.ctx.measureText(text).width);
-  frame.fillRectPx(x - 3, y + 2, width + 6, RESOLUTION_BAR_HEIGHT - 4, "rgba(5,7,13,0.7)");
+  frame.fillRectPx(x - 3, y + 2, width + 6, COVERAGE_BAR_HEIGHT - 4, "rgba(5,7,13,0.7)");
   frame.text(text, x, y + TEXT_Y_OFFSET, FONT, color, "left", "middle");
 }
 
-function segmentLabel(segment: ResolutionSegment): string {
+function segmentLabel(segment: CoverageSegment): string {
   switch (segment.state) {
     case "ready":
-      return `ready ${formatResolution(segment.resolutionMs)}`;
+      return `ready ${formatResolution(segment.samplePeriodMs)}`;
     case "empty":
       return "no data";
     case "pending":
-      return `loading ${formatResolution(segment.resolutionMs)}`;
+      return `loading ${formatResolution(segment.samplePeriodMs)}`;
     case "watching":
-      return `live ${formatResolution(segment.resolutionMs)}`;
+      return `live ${formatResolution(segment.samplePeriodMs)}`;
     case "failed":
       return segment.message === undefined
-        ? `error ${formatResolution(segment.resolutionMs)}`
+        ? `error ${formatResolution(segment.samplePeriodMs)}`
         : `error · ${segment.message}`;
   }
 }
 
-function labelColor(state: ResolutionSegment["state"]): string {
+function labelColor(state: CoverageSegment["state"]): string {
   if (state === "pending") return "#fde68a";
   if (state === "watching") return "#99f6e4";
   if (state === "failed") return "#fecaca";

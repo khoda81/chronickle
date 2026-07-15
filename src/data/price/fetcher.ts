@@ -32,7 +32,7 @@ export interface AdapterDelivery extends AdapterBatch {
 
 export type AdapterActivityState = "fetching" | "watching" | "failed";
 
-export interface AdapterActivity {
+export interface AcquisitionActivity {
   readonly state: AdapterActivityState;
   readonly range: Range;
   readonly resolutionMs: number;
@@ -40,10 +40,10 @@ export interface AdapterActivity {
   readonly retryAtMs?: number;
 }
 
-export interface AdapterSink {
+export interface SignalSink {
   next(batch: AdapterDelivery): void;
-  status(activities: readonly AdapterActivity[]): void;
-  error(error: unknown, activity: AdapterActivity): void;
+  status(activities: readonly AcquisitionActivity[]): void;
+  error(error: unknown, activity: AcquisitionActivity): void;
 }
 
 /** One long-lived acquisition session per broker/source. */
@@ -59,12 +59,12 @@ export interface AdapterSession {
  */
 export interface PriceAdapter {
   plan(demand: AdapterDemand): AdapterPlan;
-  connect(sink: AdapterSink): AdapterSession;
+  connect(sink: SignalSink): AdapterSession;
   clearCache?(): void;
 }
 
 /** Low-level HTTP implementation used by the generic polling coordinator. */
-export interface RangeFetcher {
+export interface RangeLoader {
   /** Retained for source declarations; the coordinator itself is single-lane. */
   readonly serializeRequests?: boolean;
   /** Minimum useful request size. The coordinator may fetch more than demanded. */
@@ -110,7 +110,7 @@ const DEFAULT_LIVE_RETENTION_MS = 15_000;
  * Turn a range fetcher into a demand-aware adapter. There is one bounded work
  * lane and at most one live lease, so redraws cannot multiply polling loops.
  */
-export function createPollingAdapter(fetcher: RangeFetcher): PriceAdapter {
+export function createPollingSignalSource(fetcher: RangeLoader): PriceAdapter {
   const now = fetcher.now ?? Date.now;
 
   const adapter: PriceAdapter = {
@@ -151,7 +151,7 @@ export function createPollingAdapter(fetcher: RangeFetcher): PriceAdapter {
 
       const emitStatus = (): void => {
         if (disposed) return;
-        const activities: AdapterActivity[] = [];
+        const activities: AcquisitionActivity[] = [];
         if (live !== null) {
           activities.push({
             state: "watching",
@@ -382,7 +382,7 @@ export function createPollingAdapter(fetcher: RangeFetcher): PriceAdapter {
             if (fetcher.sourceWideBackoff === true) {
               sourceRetryAt = Math.max(sourceRetryAt, work.retryAtMs);
             }
-            const activity: AdapterActivity = {
+            const activity: AcquisitionActivity = {
               state: "failed",
               range: work.fetchRange,
               resolutionMs: work.plan.resolutionMs,

@@ -9,7 +9,7 @@ import { filterMarketSymbols, type MarketSymbol } from "./data/price/symbols.ts"
 import type { RssFeed } from "./domain.ts";
 import { DEFAULT_PALETTE, PALETTES, type PaletteName } from "./engine/ramp.ts";
 import { Range } from "./engine/range.ts";
-import { Timeline, type PriceRow } from "./engine/timeline.ts";
+import { Timeline, type SignalRow } from "./engine/timeline.ts";
 import type { WaveletMode } from "./engine/wavelet.ts";
 import { EventTooltip } from "./ui/tooltip.ts";
 import { flushUiState, loadUiState, saveUiState } from "./uiState.ts";
@@ -205,7 +205,7 @@ function main(): void {
   const timeline = new Timeline({
     canvas: app.canvas,
     initialTimeRange: sharedRange,
-    priceRows: [],
+    signalRows: [],
     eventSource: (range) => eventBroker.query(range),
     feedColorOf: (feedId) => registry.colorOf(feedId),
     callbacks: {
@@ -232,11 +232,11 @@ function main(): void {
   const persistCharts = () => saveUiState({ charts: chartSpecs() });
 
   function updatePriceRows(): void {
-    const rows: PriceRow[] = charts.map((chart) => ({
+    const rows: SignalRow[] = charts.map((chart) => ({
       id: chart.key,
       label: `${chart.sourceLabel} · ${chart.symbol}`,
       read: (request) => chart.broker.read(request),
-      readLogPriceAt: (time) => chart.broker.logPriceAtOrBefore(time),
+      readLogPriceAt: (time) => chart.broker.valueAtOrBefore(time),
       subscribe: (demand, onChange) => chart.broker.subscribe(demand, onChange),
       palette: chart.palette,
       verticalOffset: chart.verticalOffset,
@@ -261,7 +261,7 @@ function main(): void {
         }
       },
     }));
-    timeline.setPriceRows(rows);
+    timeline.setSignalRows(rows);
   }
 
   function removeChart(key: string): void {

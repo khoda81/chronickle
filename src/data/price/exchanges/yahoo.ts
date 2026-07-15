@@ -1,7 +1,7 @@
 /** Range-aware Yahoo Finance chart adapter for futures, equities, and indices. */
 
 import type { PricePoint } from "../../../domain.ts";
-import { createPollingAdapter, type AdapterBatch, type PriceAdapter } from "../fetcher.ts";
+import { createPollingSignalSource, type AdapterBatch, type PriceAdapter } from "../fetcher.ts";
 
 const YAHOO_CHART_API = "https://query2.finance.yahoo.com/v8/finance/chart";
 const CORS_PROXY = "https://corsproxy.io/?url=";
@@ -43,7 +43,7 @@ export function createYahooAdapter(opts: YahooAdapterOptions): PriceAdapter {
   const pending = new Map<string, Promise<CachedYahooResult>>();
   let generation = 0;
 
-  return createPollingAdapter({
+  return createPollingSignalSource({
     minFetchPoints: 128,
     serializeRequests: true,
     sourceWideBackoff: true,
@@ -231,13 +231,13 @@ function chooseInterval(maxDeltaTMs: number, rangeMin: number, now: number): Yah
 interface YahooChartResponse {
   readonly chart?: {
     readonly result?:
-      | readonly {
-          readonly timestamp?: readonly number[];
-          readonly indicators?: {
-            readonly quote?: readonly { readonly open?: readonly (number | null)[] }[];
-          };
-        }[]
-      | null;
+    | readonly {
+      readonly timestamp?: readonly number[];
+      readonly indicators?: {
+        readonly quote?: readonly { readonly open?: readonly (number | null)[] }[];
+      };
+    }[]
+    | null;
     readonly error?: { readonly code?: string; readonly description?: string } | null;
   };
 }

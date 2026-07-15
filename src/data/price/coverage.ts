@@ -3,16 +3,16 @@ import { RangeSet } from "../rangeSet.ts";
 
 export type CoverageState = "ready" | "empty" | "pending" | "watching" | "failed";
 
-export interface ResolutionSegment {
+export interface CoverageSegment {
   readonly range: Range;
-  readonly resolutionMs: number;
+  readonly samplePeriodMs: number;
   readonly state: CoverageState;
   readonly message?: string;
   readonly retryAtMs?: number;
 }
 
 /** Request-quality-local evidence that an adapter definitively searched a range. */
-export class FetchedCoverageIndex {
+export class SettledCoverageIndex {
   private readonly fetched = new Map<number, RangeSet>();
 
   clear(): void {
@@ -39,13 +39,13 @@ export class FetchedCoverageIndex {
   }
 
   /** Completed search ranges not already supported by ready sample data. */
-  emptySegments(range: Range, requestResolutionMs: number, ready: RangeSet): ResolutionSegment[] {
+  emptySegments(range: Range, requestResolutionMs: number, ready: RangeSet): CoverageSegment[] {
     const fetched = new RangeSet();
     this.addBlockers(fetched, requestResolutionMs, range);
-    const out: ResolutionSegment[] = [];
+    const out: CoverageSegment[] = [];
     for (const searched of fetched.intersections(range)) {
       for (const gap of ready.gaps(searched)) {
-        out.push({ range: gap, resolutionMs: requestResolutionMs, state: "empty" });
+        out.push({ range: gap, samplePeriodMs: requestResolutionMs, state: "empty" });
       }
     }
     return out;

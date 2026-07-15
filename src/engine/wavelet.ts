@@ -80,7 +80,7 @@ export class WaveletWorkspace implements WaveletField {
  * essential for a genuinely causal rendering. Unknown edges represent no
  * observed impulse and therefore contribute zero.
  */
-export function logPriceEdgesToReturns(logPrice: Float64Array, reuse?: Float64Array): Float64Array {
+export function signalEdgesToDeltas(logPrice: Float64Array, reuse?: Float64Array): Float64Array {
   const out = reuse?.length === logPrice.length ? reuse : new Float64Array(logPrice.length);
   if (out.length === 0) return out;
   out[0] = 0;

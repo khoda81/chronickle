@@ -2,10 +2,10 @@
 
 export const DEFAULT_NEWS_HEIGHT = 110;
 export const MIN_NEWS_HEIGHT = 64;
-export const MIN_PRICE_ROW_HEIGHT = 130;
+export const MIN_SIGNAL_ROW_HEIGHT = 130;
 
 /** Coverage/resolution diagnostics at the bottom of every price row. */
-export const RESOLUTION_BAR_HEIGHT = 18;
+export const COVERAGE_BAR_HEIGHT = 18;
 /** Reference height that defines the logarithmic vertical scale spacing. */
 export const HEATMAP_FIELD_HEIGHT = 640;
 /** Maximum horizontal supersampling used when viewing sub-pixel scales. */
@@ -86,7 +86,7 @@ export function fitStackLayout(
   // Small embeds may not have enough room for the preferred minima. In that
   // case all rows shrink proportionally while remaining usable.
   const minNews = Math.min(MIN_NEWS_HEIGHT, total / (count + 1));
-  const minPrice = Math.min(MIN_PRICE_ROW_HEIGHT, (total - minNews) / count);
+  const minPrice = Math.min(MIN_SIGNAL_ROW_HEIGHT, (total - minNews) / count);
   const fittedNews = clamp(newsHeight, minNews, Math.max(minNews, total - minPrice * count));
   const priceSpace = Math.max(0, total - fittedNews);
   const extra = Math.max(0, priceSpace - minPrice * count);

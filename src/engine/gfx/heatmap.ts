@@ -2,7 +2,7 @@ import type { Frame } from "./context.ts";
 import { RAMP_RESOLUTION, rampLut, rampIndex, type PaletteName } from "../ramp.ts";
 import {
   computeWaveletField,
-  logPriceEdgesToReturns,
+  signalEdgesToDeltas,
   WaveletWorkspace,
   type WaveletMode,
   type WaveletWindow,
@@ -79,7 +79,7 @@ class HeatmapImpl implements HeatmapLayer {
   constructor(
     private readonly frame: Frame,
     private readonly resources: HeatmapResources,
-  ) {}
+  ) { }
 
   drawWaveletField(
     padded: PaddedEval,
@@ -142,7 +142,7 @@ class HeatmapImpl implements HeatmapLayer {
       drawField(ctx, resources.offscreen, tx.screenDomain.min, y, width, viewportHeight);
       return;
     }
-    resources.returns = logPriceEdgesToReturns(value, resources.returns);
+    resources.returns = signalEdgesToDeltas(value, resources.returns);
 
     if (resources.scalesMs.length !== transformBandCount) {
       resources.scalesMs = new Float64Array(transformBandCount);
