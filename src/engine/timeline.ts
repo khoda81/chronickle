@@ -824,20 +824,19 @@ export class Timeline {
   }
 
   private scheduleClock(timePerDevicePx: number, renderedNow: number): void {
-    console.debug("Scheduling a redraw.");
     if (this.nowTimer !== null) clearTimeout(this.nowTimer);
     let delayMs = this.state.timeRange.min - renderedNow;
 
-    if (this.state.followNow)
-      delayMs = timePerDevicePx;
-    else if (renderedNow > this.state.timeRange.max)
-      return;
+    if (this.state.followNow) delayMs = timePerDevicePx;
+    else if (renderedNow > this.state.timeRange.max) return;
 
-
-    this.nowTimer = setTimeout(() => {
-      this.nowTimer = null;
-      this.reqDraw();
-    }, Math.max(delayMs, timePerDevicePx)) as unknown as number;
+    this.nowTimer = setTimeout(
+      () => {
+        this.nowTimer = null;
+        this.reqDraw();
+      },
+      Math.max(delayMs, timePerDevicePx),
+    );
   }
 
   private onPlaybackClick = (): void => {
@@ -1245,9 +1244,9 @@ export class Timeline {
     const previous = this.state.hovered;
     const index =
       this.pointerInside &&
-        !this.dragging &&
-        this.resizingBoundary === null &&
-        this.boundaryAt(this.pointerPy) === null
+      !this.dragging &&
+      this.resizingBoundary === null &&
+      this.boundaryAt(this.pointerPy) === null
         ? nearestEventIndex(this.state.events, tx, this.pointerPx)
         : null;
     this.state.hovered = index;
