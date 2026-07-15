@@ -1,15 +1,14 @@
 import { PriceSeries, type NewsEvent, type RssFeed } from "../src/domain.ts";
 import { EventBroker } from "../src/data/events/broker.ts";
+import { RangeSet } from "../src/data/rangeSet.ts";
 import { Broker } from "../src/data/price/broker.ts";
-import { CoverageIndex } from "../src/data/price/coverage.ts";
+import { EmptyCoverageIndex } from "../src/data/price/coverage.ts";
 import { createBinanceFetcher } from "../src/data/price/exchanges/binanceFetcher.ts";
 import { chooseYahooInterval, createYahooFetcher } from "../src/data/price/exchanges/yahoo.ts";
 import type { Fetcher, FetchRangeResult } from "../src/data/price/fetcher.ts";
 import { marketSource } from "../src/data/price/markets.ts";
 import { filterMarketSymbols, parseNobitexMarketKey } from "../src/data/price/symbols.ts";
-import { ReturnPyramid } from "../src/data/price/returnPyramid.ts";
-import { ChunkedLevelStore } from "../src/data/price/store.ts";
-import { evaluateStaircase } from "../src/data/price/staircase.ts";
+import { PriceSpanStore } from "../src/data/price/store.ts";
 import { Range } from "../src/engine/range.ts";
 import { fitStackLayout } from "../src/engine/gfx/layout.ts";
 import { placeTooltip } from "../src/ui/tooltip.ts";
@@ -103,16 +102,31 @@ test("hover labels flip around their anchor and remain inside the viewport", () 
   assert(cramped.x === 8 && cramped.y === 8, "oversized label was not clamped to the viewport");
 });
 
-test("staircase returns NaN when empty and holds the final observation", () => {
-  const evalTime = new Float64Array([0, 10, 20]);
-  const empty = evaluateStaircase([], evalTime);
+test("price span store returns NaN outside coverage and holds ZOH values", () => {
+  const evalTime = new Float64Array([0, 10, 15, 20]);
+  const store = new PriceSpanStore();
+  const empty = store.sample(evalTime, 20);
   assert(empty.value.every(Number.isNaN), "empty store did not return NaN");
 
-  const store = new ChunkedLevelStore();
-  store.insertBatch(new Float64Array([5, 15]), new Float64Array([1, 2]));
-  const sampled = evaluateStaircase(store.chunks, evalTime).value;
+  store.insertBatch([
+    {
+      startTime: 5,
+      endTime: 15,
+      startLogPrice: 1,
+      endLogPrice: 2,
+      resolutionMs: 10,
+    },
+    {
+      startTime: 15,
+      endTime: 25,
+      startLogPrice: 2,
+      endLogPrice: 2,
+      resolutionMs: 10,
+    },
+  ]);
+  const sampled = store.sample(evalTime, 20).value;
   assert(Number.isNaN(sampled[0]!), "value before first observation was defined");
-  assert(sampled[1] === 1 && sampled[2] === 2, "ZOH evaluation is incorrect");
+  assert(sampled[1] === 1 && sampled[2] === 2 && sampled[3] === 2, "ZOH evaluation is incorrect");
 });
 
 test("broker read is side-effect-free and viewport subscriptions drive fetching", async () => {
@@ -156,26 +170,45 @@ test("broker read is side-effect-free and viewport subscriptions drive fetching"
   broker.dispose();
 });
 
-test("a singleton price store has no invalid zero-width cached range", () => {
-  const store = new ChunkedLevelStore();
-  store.insertBatch(new Float64Array([1_000]), new Float64Array([Math.log(100)]));
-  assert(store.timeRange() === null, "singleton store exposed an invalid min=max range");
+test("an empty price span store has no invalid cached range", () => {
+  const store = new PriceSpanStore();
+  assert(store.timeRange() === null, "empty store exposed a cached range");
 });
 
-test("return pyramid preserves signed mass and absolute activity", () => {
-  const pyramid = ReturnPyramid.from(
-    [
-      { t: 1, deltaLogPrice: 1 },
-      { t: 6, deltaLogPrice: -0.25 },
-      { t: 11, deltaLogPrice: 0.5 },
-    ],
-    10,
-  );
-  const bins = pyramid.query(Range.create(0, 20), 20);
-  assert(bins.length === 1, "expected one dyadic parent bin");
-  approx(bins[0]!.sum, 1.25);
-  approx(bins[0]!.absoluteSum, 1.75);
-  assert(bins[0]!.count === 3, "return count was not aggregated");
+test("finer price spans replace coarse history and reject late coarse overwrites", () => {
+  const store = new PriceSpanStore();
+  store.insertBatch([
+    {
+      startTime: 0,
+      endTime: 20,
+      startLogPrice: 1,
+      endLogPrice: 2,
+      resolutionMs: 20,
+    },
+  ]);
+  store.insertBatch([
+    {
+      startTime: 5,
+      endTime: 15,
+      startLogPrice: 10,
+      endLogPrice: 11,
+      resolutionMs: 10,
+    },
+  ]);
+  store.insertBatch([
+    {
+      startTime: 0,
+      endTime: 20,
+      startLogPrice: -1,
+      endLogPrice: -2,
+      resolutionMs: 30,
+    },
+  ]);
+  const sampled = store.sample(new Float64Array([2, 7, 15, 18]), 20).value;
+  assert(sampled[0] === 1, "late coarse response overwrote leading history");
+  assert(sampled[1] === 10, "fine history was not selected");
+  assert(sampled[2] === 11, "fine endpoint did not own the shared boundary");
+  assert(sampled[3] === 1, "late coarse response overwrote trailing history");
 });
 
 test("centered Gaussian is symmetric and crop invariant away from boundaries", () => {
@@ -414,38 +447,102 @@ test("returned future points are discarded while the last valid sample is held",
   );
 });
 
-test("coverage sweep exactly matches pointwise resolution selection", () => {
-  const coverage = new CoverageIndex();
-  coverage.addReady(1_000, Range.create(2_000, 7_000));
-  coverage.addReady(5_000, Range.create(0, 10_000));
-  coverage.addReady(60_000, Range.create(-5_000, 20_000));
-  const evalTime = new Float64Array(31);
-  for (let i = 0; i < evalTime.length; i++) evalTime[i] = -5_000 + i * 1_000;
+test("hierarchical span summaries answer full-range quality without scanning history", () => {
+  const store = new PriceSpanStore();
+  const spans = Array.from({ length: 2_000 }, (_, index) => ({
+    startTime: index * 1_000,
+    endTime: (index + 1) * 1_000,
+    startLogPrice: index,
+    endLogPrice: index + 1,
+    resolutionMs: index === 1_000 ? 5_000 : 1_000,
+  }));
+  store.insertBatch(spans);
+  assert(store.answers(Range.create(0, 2_000_000), 5_000), "coarse query was not answered");
+  assert(!store.answers(Range.create(0, 2_000_000), 1_000), "coarse interval satisfied fine query");
+});
 
-  for (const target of [500, 1_000, 3_000, 5_000, 10_000, 120_000]) {
-    const swept = coverage.resolve(evalTime, target);
-    for (let i = 0; i < evalTime.length; i++) {
-      const t = evalTime[i]!;
-      const expected =
-        coverage.finestReadyAt(t, target) ?? coverage.closestCoarserAt(t, target) ?? NaN;
-      if (Number.isNaN(expected)) assert(Number.isNaN(swept[i]!), `expected NaN at ${i}`);
-      else assert(swept[i] === expected, `resolution mismatch at ${i}: ${swept[i]} vs ${expected}`);
-    }
-  }
+test("coverage summaries isolate gaps at leaf-block boundaries", () => {
+  const store = new PriceSpanStore();
+  const spans = Array.from({ length: 1_024 }, (_, index) => {
+    const gap = index >= 512 ? 10_000 : 0;
+    return {
+      startTime: index * 1_000 + gap,
+      endTime: (index + 1) * 1_000 + gap,
+      startLogPrice: index,
+      endLogPrice: index + 1,
+      resolutionMs: 1_000,
+    };
+  });
+  store.insertBatch(spans);
+  assert(
+    store.answers(Range.create(522_000, 1_034_000), 1_000),
+    "query beginning after a block-boundary gap was rejected",
+  );
+  assert(
+    !store.answers(Range.create(0, 1_034_000), 1_000),
+    "block-boundary gap was hidden by the summary tree",
+  );
 });
 
 test("finer ready evidence removes overlapping coarser empty evidence", () => {
-  const coverage = new CoverageIndex();
-  coverage.addEmpty(5_000, Range.create(0, 10_000));
-  coverage.addReady(1_000, Range.create(2_000, 8_000));
-  const segments = coverage.segments(Range.create(0, 10_000), 5_000);
-  const ready = segments.filter((segment) => segment.state === "ready");
-  const empty = segments.filter((segment) => segment.state === "empty");
-  for (const r of ready) {
-    for (const e of empty) {
-      assert(r.range.max <= e.range.min || r.range.min >= e.range.max, "ready/empty overlap");
-    }
+  const coverage = new EmptyCoverageIndex();
+  coverage.add(5_000, Range.create(0, 10_000));
+  coverage.removeSatisfied(1_000, Range.create(2_000, 8_000));
+  const empty = coverage.segments(Range.create(0, 10_000), 5_000);
+  for (const segment of empty) {
+    assert(segment.range.max <= 2_000 || segment.range.min >= 8_000, "ready/empty overlap");
   }
+});
+
+test("finer empty evidence satisfies coarser continuously varying zoom demands", () => {
+  const coverage = new EmptyCoverageIndex();
+  coverage.add(1_001.25, Range.create(0, 10_000));
+  assert(coverage.answers(Range.create(0, 10_000), 5_432.1), "finer empty evidence was ignored");
+  assert(
+    !coverage.answers(Range.create(0, 10_000), 500),
+    "coarse empty evidence suppressed a finer query",
+  );
+});
+
+test("RangeSet preserves many chronological fragments without full-list rebuilds", () => {
+  const ranges = new RangeSet();
+  for (let index = 0; index < 20_000; index++) {
+    ranges.add(Range.create(index * 4, index * 4 + 1));
+  }
+  assert(ranges.ranges().length === 20_000, "disjoint ranges were merged or lost");
+  assert(ranges.contains(40_000), "binary lookup missed an inserted range");
+  assert(!ranges.contains(40_002), "binary lookup crossed a gap");
+});
+
+test("searched market closures do not create an intermediate-zoom fetch storm", async () => {
+  let calls = 0;
+  const fetcher: Fetcher = {
+    fetchRange({ range }) {
+      calls++;
+      if (calls > 1) return new Promise(() => undefined);
+      return Promise.resolve({
+        points: [
+          { t: 0, price: 10 },
+          { t: 1_000, price: 11 },
+          { t: 2_000, price: 12 },
+          // Simulated overnight/weekend closure.
+          { t: 10_000, price: 13 },
+          { t: 11_000, price: 14 },
+        ],
+        resolutionHintMs: 1_000,
+        searchedRange: range,
+      });
+    },
+  };
+  const broker = new Broker(fetcher, { now: () => 11_000 });
+  const evalTime = new Float64Array([0, 5_500, 11_000]);
+  broker.query({ evalTime, maxDeltaTMs: 1_001.25 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const intermediate = broker.query({ evalTime, maxDeltaTMs: 5_432.1 });
+  assert(intermediate.status === "complete", "market closure became unresolved at mid zoom");
+  assert(calls === 1, `market closure triggered ${calls - 1} redundant request(s)`);
+  broker.dispose();
 });
 
 test("broker trusts the returned searched range, not the requested range", async () => {
@@ -591,7 +688,11 @@ test("subscriber failures are not reclassified as fetch failures", async () => {
   );
   assert(errors.includes("[Broker] subscriber failed"), "subscriber exception was hidden");
   assert(!errors.some((message) => message.includes("fetch failed")), "fetch was blamed for UI");
-  assert(broker.cachedRange() === null, "singleton response recreated an invalid cached range");
+  const cached = broker.cachedRange();
+  assert(
+    cached !== null && cached.min === 500 && cached.max === 1_500,
+    "singleton hold range was lost",
+  );
   broker.dispose();
 });
 

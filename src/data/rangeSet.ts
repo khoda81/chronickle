@@ -11,7 +11,6 @@
 
 import { Range } from "../engine/range.ts";
 
-// TODO:‌ This should keep the ranges sorted and use binary search
 export class RangeSet {
   private readonly intervals: Range[] = [];
 
@@ -31,10 +30,15 @@ export class RangeSet {
 
   /** True if every point in `r` lies inside some covered interval. */
   covers(r: Range): boolean {
-    for (const iv of this.intervals) {
-      if (iv.min <= r.min && iv.max >= r.max) return true;
+    let lo = 0;
+    let hi = this.intervals.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (this.intervals[mid]!.min <= r.min) lo = mid + 1;
+      else hi = mid;
     }
-    return false;
+    const candidate = this.intervals[lo - 1];
+    return candidate !== undefined && candidate.max >= r.max;
   }
 
   /** True when `t` belongs to one of the covered intervals. */
@@ -70,22 +74,58 @@ export class RangeSet {
    * exposed observably, so wholesale replacement is unnecessary here.
    */
   add(r: Range): void {
-    // Merge all intervals that overlap or touch `r` into a single span.
-    let lo = r.min;
-    let hi = r.max;
-    const kept: Range[] = [];
-    for (const iv of this.intervals) {
-      const overlapsOrTouches = iv.max >= lo - 1 && iv.min <= hi + 1;
-      if (overlapsOrTouches) {
-        if (iv.min < lo) lo = iv.min;
-        if (iv.max > hi) hi = iv.max;
-      } else {
-        kept.push(iv);
-      }
+    let min = r.min;
+    let max = r.max;
+    const intervals = this.intervals;
+    const last = intervals[intervals.length - 1];
+
+    // Coverage producers sweep forward in time. Keep that overwhelmingly
+    // common path allocation-free and O(1), rather than rebuilding/sorting the
+    // complete set for every accepted price span.
+    if (last === undefined) {
+      intervals.push(r);
+      return;
     }
-    kept.push(Range.create(lo, hi));
-    kept.sort((a, b) => a.min - b.min);
-    this.intervals.splice(0, this.intervals.length, ...kept);
+    if (last.max < min - 1) {
+      intervals.push(r);
+      return;
+    }
+    if (last.min <= max + 1) {
+      // The new range reaches the tail. It can only merge with a suffix, but
+      // may bridge several suffix intervals as its bounds expand.
+      let start = intervals.length - 1;
+      while (start > 0 && intervals[start - 1]!.max >= min - 1) start--;
+      for (let index = start; index < intervals.length; index++) {
+        const interval = intervals[index]!;
+        min = Math.min(min, interval.min);
+        max = Math.max(max, interval.max);
+      }
+      intervals.splice(start, intervals.length - start, Range.create(min, max));
+      return;
+    }
+
+    // Find the first interval that could overlap or touch the new range.
+    let lo = 0;
+    let hi = intervals.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (intervals[mid]!.max < min - 1) lo = mid + 1;
+      else hi = mid;
+    }
+    const start = lo;
+    if (start === intervals.length || intervals[start]!.min > max + 1) {
+      intervals.splice(start, 0, r);
+      return;
+    }
+
+    let end = start;
+    while (end < intervals.length && intervals[end]!.min <= max + 1) {
+      const interval = intervals[end]!;
+      min = Math.min(min, interval.min);
+      max = Math.max(max, interval.max);
+      end++;
+    }
+    intervals.splice(start, end - start, Range.create(min, max));
   }
 
   /** Remove `r`, splitting existing intervals when necessary. */

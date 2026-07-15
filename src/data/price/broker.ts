@@ -3,14 +3,16 @@
 import { PriceSeries, type PricePoint } from "../../domain.ts";
 import { Range } from "../../engine/range.ts";
 import { RangeSet } from "../rangeSet.ts";
-import { CoverageIndex, type ResolutionSegment } from "./coverage.ts";
+import { EmptyCoverageIndex, type ResolutionSegment } from "./coverage.ts";
 import type { Fetcher, FetchRangeResult } from "./fetcher.ts";
-import { evaluateStaircase, type StaircaseResult } from "./staircase.ts";
-import { ChunkedLevelStore } from "./store.ts";
+import { PriceSpanStore, type PriceSpanInput } from "./store.ts";
 
 export type QueryStatus = "complete" | "partial" | "empty";
 
-export interface QueryResult extends StaircaseResult {
+export interface QueryResult {
+  readonly value: Float64Array;
+  readonly leadingNaN: number;
+  readonly trailingNaN: number;
   readonly status: QueryStatus;
   /** Renderer-requested maximum sample spacing. */
   readonly targetResolutionMs: number;
@@ -73,8 +75,8 @@ const LIVE_PUBLICATION_GRACE_MS = 250;
 const DEFAULT_RETRY = (attempt: number): number => Math.min(30_000, 2_000 * 2 ** (attempt - 1));
 
 export class Broker {
-  private readonly stores = new Map<number, ChunkedLevelStore>();
-  private readonly coverage = new CoverageIndex();
+  private readonly store = new PriceSpanStore();
+  private readonly emptyCoverage = new EmptyCoverageIndex();
   private readonly subscribers = new Set<() => void>();
   private readonly demandSubscriptions = new Set<DemandSubscription>();
   private readonly inFlight = new Map<string, RequestState>();
@@ -87,7 +89,8 @@ export class Broker {
   private readonly onWarning: (message: string) => void;
   private generation = 0;
   private revision = 0;
-  private wantedResolution: Float64Array = new Float64Array(0);
+  private valueBuffer: Float64Array<ArrayBufferLike> = new Float64Array(0);
+  private resolutionBuffer: Float64Array<ArrayBufferLike> = new Float64Array(0);
 
   constructor(
     private readonly fetcher: Fetcher,
@@ -109,9 +112,12 @@ export class Broker {
       throw new Error(`Broker.read: invalid maxDeltaTMs ${maxDeltaTMs}`);
     }
 
-    const value = new Float64Array(evalTime.length);
-    value.fill(NaN);
     if (evalTime.length < 2) {
+      const value =
+        this.valueBuffer.length === evalTime.length
+          ? this.valueBuffer
+          : (this.valueBuffer = new Float64Array(evalTime.length));
+      value.fill(NaN);
       return {
         value,
         leadingNaN: evalTime.length,
@@ -126,22 +132,10 @@ export class Broker {
     const queryRange = Range.create(evalTime[0]!, evalTime[evalTime.length - 1]!);
     const wallNow = this.now();
     const historicalRange = clampToNow(queryRange, wallNow);
-
-    this.wantedResolution = this.coverage.resolve(evalTime, maxDeltaTMs, this.wantedResolution);
-    const wantedResolution = this.wantedResolution;
-    for (const [resolutionMs, store] of this.stores) {
-      const sampled = evaluateStaircase(store.chunks, evalTime).value;
-      for (let i = 0; i < evalTime.length; i++) {
-        if (
-          evalTime[i]! > wallNow ||
-          wantedResolution[i] !== resolutionMs ||
-          !Number.isFinite(sampled[i]!)
-        ) {
-          continue;
-        }
-        value[i] = sampled[i]!;
-      }
-    }
+    const sampled = this.store.sample(evalTime, wallNow, this.valueBuffer, this.resolutionBuffer);
+    this.valueBuffer = sampled.value;
+    this.resolutionBuffer = sampled.resolutionMs;
+    const value = sampled.value;
 
     let finiteCount = 0;
     let leadingNaN = 0;
@@ -153,17 +147,18 @@ export class Broker {
     ) {
       trailingNaN++;
     }
-    for (const item of value) if (Number.isFinite(item)) finiteCount++;
+    for (let index = 0; index < value.length; index++) {
+      if (Number.isFinite(value[index]!)) finiteCount++;
+    }
 
-    const unresolved =
-      historicalRange === null ? [] : this.unresolved(historicalRange, maxDeltaTMs);
-    const status: QueryStatus =
-      finiteCount === 0 ? "empty" : unresolved.length === 0 ? "complete" : "partial";
+    const resolved = historicalRange === null || this.isResolved(historicalRange, maxDeltaTMs);
+    const status: QueryStatus = finiteCount === 0 ? "empty" : resolved ? "complete" : "partial";
     const resolution =
       historicalRange === null
         ? []
         : [
-            ...this.coverage.segments(historicalRange, maxDeltaTMs),
+            ...this.readySegments(evalTime, wallNow),
+            ...this.emptyCoverage.segments(historicalRange, maxDeltaTMs),
             ...this.transientSegments(historicalRange),
           ].sort((a, b) => b.resolutionMs - a.resolutionMs || a.range.min - b.range.min);
 
@@ -245,8 +240,10 @@ export class Broker {
   clearCache(): void {
     this.generation++;
     this.fetcher.clearCache?.();
-    this.stores.clear();
-    this.coverage.clear();
+    this.store.clear();
+    this.emptyCoverage.clear();
+    this.valueBuffer = new Float64Array(0);
+    this.resolutionBuffer = new Float64Array(0);
     this.inFlight.clear();
     for (const failure of this.failures.values()) clearTimeout(failure.timer);
     this.clearLiveRefresh();
@@ -258,15 +255,7 @@ export class Broker {
   }
 
   cachedRange(): Range | null {
-    let min = Infinity;
-    let max = -Infinity;
-    for (const store of this.stores.values()) {
-      const range = store.timeRange();
-      if (range === null) continue;
-      min = Math.min(min, range.min);
-      max = Math.max(max, range.max);
-    }
-    return min < max ? Range.create(min, max) : null;
+    return this.store.timeRange();
   }
 
   private ensure(demand: BrokerDemand): void {
@@ -282,7 +271,11 @@ export class Broker {
     // The overwhelmingly common steady-state path is already answered by one
     // ready level. Avoid constructing and merging a temporary RangeSet on
     // every animation frame in that case.
-    if (this.coverage.answers(range, maxDeltaTMs) || this.transientlyBlocks(range, maxDeltaTMs)) {
+    if (
+      this.store.answers(range, maxDeltaTMs) ||
+      this.emptyCoverage.answers(range, maxDeltaTMs) ||
+      this.transientlyBlocks(range, maxDeltaTMs)
+    ) {
       return;
     }
     const blocked = this.blockers(range, maxDeltaTMs);
@@ -303,8 +296,8 @@ export class Broker {
 
   private blockers(range: Range, maxDeltaTMs: number): RangeSet {
     const blocked = new RangeSet();
-    this.coverage.addReadyBlockers(blocked, maxDeltaTMs, range);
-    this.coverage.addEmptyBlockers(blocked, maxDeltaTMs, range);
+    this.store.addReadyBlockers(blocked, maxDeltaTMs, range);
+    this.emptyCoverage.addBlockers(blocked, maxDeltaTMs, range);
     const liveRefresh = this.liveRefresh;
     if (
       liveRefresh !== null &&
@@ -339,12 +332,14 @@ export class Broker {
     return blocked;
   }
 
-  private unresolved(range: Range, maxDeltaTMs: number): readonly Range[] {
-    if (this.coverage.answers(range, maxDeltaTMs)) return [];
+  private isResolved(range: Range, maxDeltaTMs: number): boolean {
+    if (this.store.answers(range, maxDeltaTMs) || this.emptyCoverage.answers(range, maxDeltaTMs)) {
+      return true;
+    }
     const answered = new RangeSet();
-    this.coverage.addReadyBlockers(answered, maxDeltaTMs, range);
-    this.coverage.addEmptyBlockers(answered, maxDeltaTMs, range);
-    return answered.gaps(range);
+    this.store.addReadyBlockers(answered, maxDeltaTMs, range);
+    this.emptyCoverage.addBlockers(answered, maxDeltaTMs, range);
+    return answered.covers(range);
   }
 
   private async requestFetch(range: Range, maxDeltaTMs: number): Promise<void> {
@@ -445,9 +440,9 @@ export class Broker {
     // Only portions not actually supported by observations are empty, and
     // only for this exact requested quality.
     const observed = new RangeSet();
-    this.coverage.addReadyBlockers(observed, request.maxDeltaTMs, searched);
+    this.store.addReadyBlockers(observed, request.maxDeltaTMs, searched);
     for (const gap of observed.gaps(searched)) {
-      this.coverage.addEmpty(request.maxDeltaTMs, gap);
+      this.emptyCoverage.add(request.maxDeltaTMs, gap);
     }
     return this.liveRefreshAfter(
       request,
@@ -520,17 +515,27 @@ export class Broker {
     observedThroughMs: number,
     searchedThroughRequestEnd: boolean,
   ): void {
-    const buckets = new Map<number, PricePoint[]>();
-    for (let i = 1; i < points.length; i++) {
-      const previous = points[i - 1]!;
-      const current = points[i]!;
+    const spans: PriceSpanInput[] = [];
+    for (let index = 1; index < points.length; index++) {
+      const previous = points[index - 1]!;
+      const current = points[index]!;
       const observedDelta = current.t - previous.t;
-      if (observedDelta > 0) {
-        this.coverage.addReady(observedDelta, Range.create(previous.t, current.t));
-        appendPoint(buckets, observedDelta, previous);
-        appendPoint(buckets, observedDelta, current);
-      }
+      if (!(observedDelta > 0)) continue;
+      const range = Range.create(previous.t, current.t);
+      spans.push({
+        startTime: previous.t,
+        endTime: current.t,
+        startLogPrice: Math.log(previous.price),
+        endLogPrice: Math.log(current.price),
+        // Quality describes the cadence that was searched, not the wall-clock
+        // distance to the next returned candle. Otherwise every overnight or
+        // weekend closure becomes a fake coarse interval and an intermediate
+        // zoom produces thousands of alternating ready/missing fragments.
+        resolutionMs: nominalResolutionMs,
+      });
+      this.emptyCoverage.removeSatisfied(nominalResolutionMs, range);
     }
+
     const last = points[points.length - 1];
     if (last !== undefined) {
       const expectedUntil = last.t + nominalResolutionMs;
@@ -538,29 +543,28 @@ export class Broker {
         ? expectedUntil
         : Math.min(expectedUntil, observedThroughMs);
       if (last.t < heldUntil) {
-        this.coverage.addReady(nominalResolutionMs, Range.create(last.t, heldUntil));
+        const range = Range.create(last.t, heldUntil);
+        const logPrice = Math.log(last.price);
+        spans.push({
+          startTime: last.t,
+          endTime: heldUntil,
+          startLogPrice: logPrice,
+          endLogPrice: logPrice,
+          resolutionMs: nominalResolutionMs,
+        });
+        this.emptyCoverage.removeSatisfied(nominalResolutionMs, range);
       }
-      appendPoint(buckets, nominalResolutionMs, last);
     }
 
-    for (const [resolutionMs, bucket] of buckets) {
-      const time = new Float64Array(bucket.length);
-      const logPrice = new Float64Array(bucket.length);
-      for (let i = 0; i < bucket.length; i++) {
-        time[i] = bucket[i]!.t;
-        logPrice[i] = Math.log(bucket[i]!.price);
-      }
-      this.levelStore(resolutionMs).insertBatch(time, logPrice);
-    }
+    this.store.insertBatch(spans);
   }
 
-  private levelStore(resolutionMs: number): ChunkedLevelStore {
-    let store = this.stores.get(resolutionMs);
-    if (store === undefined) {
-      store = new ChunkedLevelStore();
-      this.stores.set(resolutionMs, store);
-    }
-    return store;
+  private readySegments(evalTime: Float64Array, wallNow: number): ResolutionSegment[] {
+    return this.store.segments(evalTime, wallNow).map((span) => ({
+      range: Range.create(span.startTime, span.endTime),
+      resolutionMs: span.resolutionMs,
+      state: "ready" as const,
+    }));
   }
 
   private transientSegments(range: Range): ResolutionSegment[] {
@@ -616,21 +620,6 @@ function sameDemand(a: BrokerDemand, b: BrokerDemand): boolean {
   return (
     a.range.min === b.range.min && a.range.max === b.range.max && a.maxDeltaTMs === b.maxDeltaTMs
   );
-}
-
-function appendPoint(
-  buckets: Map<number, PricePoint[]>,
-  resolutionMs: number,
-  point: PricePoint,
-): void {
-  let bucket = buckets.get(resolutionMs);
-  if (bucket === undefined) {
-    bucket = [];
-    buckets.set(resolutionMs, bucket);
-  }
-  const last = bucket[bucket.length - 1];
-  if (last?.t === point.t) bucket[bucket.length - 1] = point;
-  else bucket.push(point);
 }
 
 function clampToNow(range: Range, now: number): Range | null {
