@@ -133,8 +133,7 @@ body {
   color: var(--accent);
 }
 
-.chart-add,
-.chart-remove {
+.chart-add {
   margin-left: 8px;
   background: transparent;
   border: 1px solid #2a2f3a;
@@ -144,8 +143,7 @@ body {
   cursor: pointer;
   font-size: 12px;
 }
-.chart-add:hover,
-.chart-remove:hover {
+.chart-add:hover {
   border-color: var(--accent);
   color: var(--accent);
 }
@@ -792,7 +790,7 @@ select {
     background: var(--bg);
     color: var(--accent);
 
-    :hover {
+    &:hover {
       background: var(--accent);
       color: var(--fg);
     }
