@@ -18,13 +18,6 @@ export function maxSigmaFor(numPx: number): number {
   return Math.max(MIN_SIGMA, Math.min(MAX_SIGMA_CAP, numPx / 4));
 }
 
-/** Keep a vertically-panned fixed-height field covering its row viewport. */
-export function clampHeatmapOffset(offset: number, viewportHeight: number): number {
-  const min = Math.min(0, viewportHeight - HEATMAP_FIELD_HEIGHT);
-  const max = Math.max(0, viewportHeight - HEATMAP_FIELD_HEIGHT);
-  return clamp(offset, min, max);
-}
-
 export interface StackLayout {
   readonly newsHeight: number;
   readonly rowHeights: readonly number[];

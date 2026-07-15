@@ -24,7 +24,6 @@ import {
   MIN_PRICE_ROW_HEIGHT,
   RESIZE_HANDLE_RADIUS,
   RESOLUTION_BAR_HEIGHT,
-  clampHeatmapOffset,
   maxSigmaFor,
 } from "./gfx/layout.ts";
 
@@ -89,6 +88,9 @@ interface TimelineState {
   waveletMode: WaveletMode;
   hovered: number | null;
   newsHeight: number;
+
+  followNow: boolean;
+  nowAnchor: number;
 }
 
 export interface TimelineConfig {
@@ -520,11 +522,7 @@ export class Timeline {
       const row = this.priceRows[index]!;
       const rowHeight = this.rowHeights[index]!;
       const heatHeight = Math.max(2, rowHeight - RESOLUTION_BAR_HEIGHT);
-      const verticalOffset = clampHeatmapOffset(this.rowVerticalOffsets[index]!, heatHeight);
-      if (verticalOffset !== this.rowVerticalOffsets[index]) {
-        this.rowVerticalOffsets[index] = verticalOffset;
-        row.onVerticalOffsetChange?.(verticalOffset);
-      }
+      const verticalOffset = this.rowVerticalOffsets[index]!;
       const result = row.read({ evalTime: evalView, maxDeltaTMs: timePerPx });
       this.latestPriceValues[index] = result.value;
       frame.heatmap(row.id).drawWaveletField(
@@ -716,8 +714,7 @@ export class Timeline {
 
   private panRowVertically(index: number | null, delta: number): void {
     if (index === null || delta === 0) return;
-    const viewportHeight = Math.max(2, this.rowHeights[index]! - RESOLUTION_BAR_HEIGHT);
-    const next = clampHeatmapOffset(this.rowVerticalOffsets[index]! + delta, viewportHeight);
+    const next = this.rowVerticalOffsets[index]! + delta;
     if (next === this.rowVerticalOffsets[index]) return;
     this.rowVerticalOffsets[index] = next;
     this.priceRows[index]?.onVerticalOffsetChange?.(next);
@@ -1110,9 +1107,9 @@ export class Timeline {
     const previous = this.state.hovered;
     const index =
       this.pointerInside &&
-      !this.dragging &&
-      this.resizingBoundary === null &&
-      this.boundaryAt(this.pointerPy) === null
+        !this.dragging &&
+        this.resizingBoundary === null &&
+        this.boundaryAt(this.pointerPy) === null
         ? nearestEventIndex(this.state.events, tx, this.pointerPx)
         : null;
     this.state.hovered = index;
@@ -1122,7 +1119,7 @@ export class Timeline {
     }
 
     const event = this.eventAt(index);
-    const anchorX = Math.max(0, Math.min(width, this.pointerPx));
+    const anchorX = Math.max(0, Math.min(width, tx.timeToX(event.t)));
     const changed =
       index !== this.notifiedHoverIndex ||
       event.t !== this.notifiedHoverT ||
