@@ -1,9 +1,9 @@
 /** Range-capable Binance kline adapter. */
 
-import type { PricePoint } from "../../../../domain.ts";
 import { Range } from "../../../../engine/range.ts";
-import { createPollingSignalSource, type PriceAdapter } from "../../fetcher.ts";
+import { createPollingSignalSource, type SignalAdapter } from "../../fetcher.ts";
 import { pickResolution } from "../../resolution.ts";
+import { logPriceSamples, type PricePoint } from "../price.ts";
 
 const BINANCE_KLINES = "https://api.binance.com/api/v3/klines";
 const LIMIT = 1_000;
@@ -32,7 +32,7 @@ export interface BinanceAdapterOptions {
   readonly timeoutMs?: number;
 }
 
-export function createBinanceAdapter(opts: BinanceAdapterOptions): PriceAdapter {
+export function createBinanceAdapter(opts: BinanceAdapterOptions): SignalAdapter {
   const symbol = opts.symbol.trim().toUpperCase();
   if (!/^[A-Z0-9]{4,30}$/.test(symbol)) {
     throw new Error(`Invalid Binance symbol: ${opts.symbol}`);
@@ -86,7 +86,7 @@ export function createBinanceAdapter(opts: BinanceAdapterOptions): PriceAdapter 
           const searchedMax = Math.min(range.max, last.t + periodMs);
           if (range.min < searchedMax) searchedRange = Range.create(range.min, searchedMax);
         }
-        return { points, searchedRange };
+        return { samples: logPriceSamples(points), searchedRange };
       } finally {
         clearTimeout(timer);
         signal.removeEventListener("abort", abort);

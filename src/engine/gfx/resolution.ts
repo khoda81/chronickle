@@ -18,7 +18,7 @@ export const CoverageBar = {
 };
 
 class ResolutionImpl implements ResolutionLayer {
-  constructor(private readonly frame: Frame) { }
+  constructor(private readonly frame: Frame) {}
 
   draw(segments: readonly CoverageSegment[], targetResolutionMs: number, y: number): void {
     const { frame } = this;

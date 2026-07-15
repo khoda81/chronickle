@@ -4,8 +4,12 @@ import { EventBroker, fetchFeed, defaultProxy } from "./data/index.ts";
 import { FeedRegistry } from "./data/events/feeds.ts";
 import { idToColor } from "./data/events/color.ts";
 import { Broker } from "./data/signal/broker.ts";
-import { MARKET_SOURCES, marketSource, type MarketSourceId } from "./data/signal/market/market.ts";
-import { filterMarketSymbols, type MarketSymbol } from "./data/signal/symbols.ts";
+import {
+  PRICE_SIGNAL_SOURCES,
+  priceSignalSource,
+  type PriceSignalSourceId,
+} from "./data/signal/market/market.ts";
+import { filterMarketSymbols, type MarketSymbol } from "./data/signal/market/symbols.ts";
 import type { RssFeed } from "./domain.ts";
 import { DEFAULT_PALETTE, PALETTES, type PaletteName } from "./engine/ramp.ts";
 import { Range } from "./engine/range.ts";
@@ -73,7 +77,7 @@ interface AppElements {
 
 interface ChartInstance {
   readonly key: string;
-  readonly sourceId: MarketSourceId;
+  readonly sourceId: PriceSignalSourceId;
   readonly sourceLabel: string;
   readonly symbol: string;
   readonly broker: Broker;
@@ -116,7 +120,7 @@ function buildApp(): AppElements {
 
   const marketControls = el<HTMLDivElement>("div", "market-controls");
   const source = el<HTMLSelectElement>("select", "market-source");
-  for (const market of MARKET_SOURCES) {
+  for (const market of PRICE_SIGNAL_SOURCES) {
     const option = el<HTMLOptionElement>("option");
     option.value = market.id;
     option.textContent = market.label;
@@ -236,7 +240,7 @@ function main(): void {
       id: chart.key,
       label: `${chart.sourceLabel} · ${chart.symbol}`,
       read: (request) => chart.broker.read(request),
-      readLogPriceAt: (time) => chart.broker.valueAtOrBefore(time),
+      readValueAt: (time) => chart.broker.valueAtOrBefore(time),
       subscribe: (demand, onChange) => chart.broker.subscribe(demand, onChange),
       palette: chart.palette,
       verticalOffset: chart.verticalOffset,
@@ -280,7 +284,7 @@ function main(): void {
     persist = true,
     initial?: { readonly palette?: string; readonly verticalOffset?: number },
   ): boolean {
-    const source = marketSource(sourceId);
+    const source = priceSignalSource(sourceId);
     if (source === null) {
       setStatus(app.status, `Unknown market source: ${sourceId}`, "error");
       return false;
@@ -390,7 +394,7 @@ function main(): void {
   }
 
   async function updateSymbolSuggestions(): Promise<void> {
-    const source = marketSource(app.source.value);
+    const source = priceSignalSource(app.source.value);
     if (source === null) return;
     const generation = ++symbolLoadGeneration;
     symbolOptions = source.examples;

@@ -23,12 +23,6 @@ export class SettledCoverageIndex {
     this.level(requestResolutionMs).add(range);
   }
 
-  answers(range: Range, requestResolutionMs: number): boolean {
-    const covered = new RangeSet();
-    this.addBlockers(covered, requestResolutionMs, range);
-    return covered.covers(range);
-  }
-
   addBlockers(out: RangeSet, requestResolutionMs: number, range: Range): void {
     // A finer completed search is also valid evidence for a coarser viewport.
     // Exact floating-point zoom resolutions must not create distinct islands.

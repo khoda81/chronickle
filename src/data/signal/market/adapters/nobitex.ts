@@ -1,43 +1,9 @@
-/**
- * Nobitex market data fetcher.
- *
- * Uses the public trades endpoint (`GET /v2/trades/SYMBOL`) to fetch raw
- * trade history. Trades are returned as-is (irregularly spaced, duplicate
- * timestamps allowed) and wrapped into a PriceSeries — no resampling.
- *
- * Endpoint: https://apiv2.nobitex.ir/v2/trades/SYMBOL
- *   Response: { status: "ok", trades: [{ time, price, volume, type }, ...] }
- *   - time:  epoch milliseconds
- *   - price: string
- *   - type:  "buy" | "sell"
- *
- * Note: the public trades endpoint returns only recent trades (no historical
- * pagination). For longer history, the OHLC endpoint should be used instead.
- */
+/** Nobitex OHLC wire types, range fetch, and log-price conversion. */
 
-import { PricePoint, PriceSeries } from "../../../../domain.ts";
+import type { Sample } from "../../sample.ts";
+import { logPriceSamples, type PricePoint } from "../price.ts";
 
 const NOBITEX_OHLC = "https://apiv2.nobitex.ir/market/udf/history";
-
-export interface NobitexTrade {
-  /** Epoch milliseconds. */
-  readonly time: number;
-  readonly price: string;
-  readonly volume: string;
-  readonly type: "buy" | "sell";
-}
-
-export interface NobitexTradesResponse {
-  readonly status: string;
-  readonly trades: readonly NobitexTrade[];
-}
-
-export interface FetchPriceOptions {
-  /** Symbol, e.g. "USDTIRT" (USD/IRT). Defaults to "USDTIRT". */
-  readonly symbol?: string;
-  /** Per-request timeout in ms. */
-  readonly timeoutMs?: number;
-}
 
 /** Nobitex OHLC (UDF history) response. Times are epoch **seconds**. */
 export interface NobitexOhlcResponse {
@@ -63,7 +29,6 @@ export interface FetchOhlcOptions {
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
 }
-
 
 export async function fetchOhlc(opts: FetchOhlcOptions): Promise<NobitexOhlcResponse | null> {
   const symbol = opts.symbol ?? "USDTIRT";
@@ -114,15 +79,15 @@ export async function fetchOhlc(opts: FetchOhlcOptions): Promise<NobitexOhlcResp
 }
 
 /**
- * Convert OHLC candles into a PriceSeries using only the `open` of each
+ * Convert OHLC candles into a log-price signal using only the `open` of each
  * candle. The close of candle k is implied by the open of candle k+1, so we
  * drop `h`/`l`/`c`/`v`. Times are converted from epoch seconds to ms.
  */
-export function ohlcToPriceSeries(res: NobitexOhlcResponse | null): PriceSeries {
-  if (res === null) return PriceSeries.EMPTY;
+export function ohlcToLogPriceSamples(res: NobitexOhlcResponse | null): readonly Sample[] {
+  if (res === null) return [];
   const points: PricePoint[] = res.t.map((sec, i) => ({
     t: sec * 1000,
     price: res.o[i]!,
   }));
-  return PriceSeries.from(points);
+  return logPriceSamples(points);
 }

@@ -49,7 +49,7 @@ export function pickResolution(nativePeriodsMs: readonly number[], maxDeltaTMs: 
     prev = p;
   }
 
-  // Find the largest period that is <= maxDeltaTMs (finest satisfying).
+  // Find the largest period that is <= maxDeltaTMs (coarsest satisfying).
   // nativePeriodsMs is ascending, so walk from the end.
   for (let i = nativePeriodsMs.length - 1; i >= 0; i--) {
     const p = nativePeriodsMs[i]!;

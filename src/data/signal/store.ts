@@ -2,7 +2,11 @@ import { Range } from "../../engine/range.ts";
 
 const BLOCK_CAPACITY = 512;
 
-/** One observed zero-order-hold interval. */
+/**
+ * A reconstruction span derived from observed samples at a source cadence.
+ * It supports zero-order-hold rendering; it is not evidence that every value
+ * inside the interval was directly observed.
+ */
 export interface SignalSpan {
   readonly startTime: number;
   readonly endTime: number;
@@ -11,21 +15,21 @@ export interface SignalSpan {
   readonly resolutionMs: number;
 }
 
-export interface PriceResolutionSpan {
+export interface ResolutionSpan {
   readonly startTime: number;
   readonly endTime: number;
   readonly resolutionMs: number;
 }
 
-export interface PriceSampleResult {
+export interface SampleResult {
   readonly value: Float64Array;
 }
 
 interface SpanBlock {
   readonly startTime: Float64Array;
   readonly endTime: Float64Array;
-  readonly startLogPrice: Float64Array;
-  readonly endLogPrice: Float64Array;
+  readonly startValue: Float64Array;
+  readonly endValue: Float64Array;
   readonly resolutionMs: Float64Array;
   readonly length: number;
   readonly minTime: number;
@@ -41,13 +45,12 @@ interface SpanLocation {
 }
 
 /**
- * Selected price history in a shallow, cache-friendly B+ tree.
+ * Selected signal reconstruction in sorted, cache-friendly typed-array blocks.
  *
  * Only the finest evidence seen at each interval is retained. Equal-quality
  * incoming evidence wins, while a late coarse response cannot overwrite fine
- * history. Leaf blocks are structure-of-arrays typed buffers. Backfills touch
- * only overlapping leaves plus their neighbors; the block directory and its
- * compact quality tree are rebuilt in O(number of blocks), not O(points).
+ * history. Blocks are structure-of-arrays typed buffers. Backfills touch only
+ * overlapping blocks plus their neighbors.
  *
  * Sampling performs one block binary search and one <=512-element binary
  * search per requested screen edge. It never walks observations skipped by a
@@ -78,29 +81,29 @@ export class SignalSpanStore {
       : null;
   }
 
-  /** Latest observed log price at or before `time`, including after the final span. */
-  logPriceAtOrBefore(time: number): number | null {
+  /** Latest reconstructed value at or before `time`, including after the final span. */
+  valueAtOrBefore(time: number): number | null {
     if (!Number.isFinite(time)) {
-      throw new Error(`PriceSpanStore.logPriceAtOrBefore: invalid time ${time}`);
+      throw new Error(`SignalSpanStore.valueAtOrBefore: invalid time ${time}`);
     }
     const location = this.findSpanStartingAtOrBefore(time);
     if (location === null) return null;
     const selected = this.selectBoundaryOwner(location, time);
     const block = this.blocks[selected.blockIndex]!;
     return time >= block.endTime[selected.spanIndex]!
-      ? block.endLogPrice[selected.spanIndex]!
-      : block.startLogPrice[selected.spanIndex]!;
+      ? block.endValue[selected.spanIndex]!
+      : block.startValue[selected.spanIndex]!;
   }
 
   /** Overlay a sorted, internally non-overlapping batch. */
-  insertBatch(incoming: readonly SignalSpan[]): void {
-    if (incoming.length === 0) return;
+  insertBatch(incoming: readonly SignalSpan[]): boolean {
+    if (incoming.length === 0) return false;
     validateIncoming(incoming);
 
     if (this.blocks.length === 0) {
       this.blocks.push(...chunkSpans(incoming));
       this.totalSpanCount = incoming.length;
-      return;
+      return true;
     }
 
     const incomingMin = incoming[0]!.startTime;
@@ -114,6 +117,7 @@ export class SignalSpanStore {
     const spliceEnd = Math.min(this.blocks.length, Math.max(firstOverlap, firstAfter) + 1);
     const existing = flattenBlocks(this.blocks, spliceStart, spliceEnd);
     const merged = overlay(existing, incoming);
+    if (spansEqual(existing, merged)) return false;
     const replacement = chunkSpans(merged);
 
     let removedCount = 0;
@@ -122,17 +126,36 @@ export class SignalSpanStore {
     }
     this.blocks.splice(spliceStart, spliceEnd - spliceStart, ...replacement);
     this.totalSpanCount += merged.length - removedCount;
+    return true;
   }
 
-  sample(
-    evalTime: Float64Array,
-    wallNow: number,
-    reuseValue?: Float64Array,
-  ): PriceSampleResult {
-    if (!Number.isFinite(wallNow)) throw new Error(`PriceSpanStore.sample: invalid now ${wallNow}`);
+  sample(evalTime: Float64Array, wallNow: number, reuseValue?: Float64Array): SampleResult {
+    if (!Number.isFinite(wallNow))
+      throw new Error(`SignalSpanStore.sample: invalid now ${wallNow}`);
     const value =
       reuseValue?.length === evalTime.length ? reuseValue : new Float64Array(evalTime.length);
 
+    for (let index = 0; index < evalTime.length; index++) {
+      const t = evalTime[index]!;
+      if (!Number.isFinite(t)) {
+        throw new Error(`SignalSpanStore.sample: non-finite time at ${index}`);
+      }
+      if (t > wallNow) {
+        value[index] = NaN;
+        continue;
+      }
+      const location = this.findContainingSpan(t);
+      if (location === null) {
+        value[index] = NaN;
+        continue;
+      }
+      const selected = this.selectBoundaryOwner(location, t);
+      const block = this.blocks[selected.blockIndex]!;
+      value[index] =
+        t === block.endTime[selected.spanIndex]!
+          ? block.endValue[selected.spanIndex]!
+          : block.startValue[selected.spanIndex]!;
+    }
     return { value };
   }
 
@@ -148,7 +171,7 @@ export class SignalSpanStore {
     let runMax = NaN;
     const append = (min: number, max: number): void => {
       if (!(min < max)) return;
-      if (Number.isFinite(runMax) && min <= runMax + 1) {
+      if (Number.isFinite(runMax) && min <= runMax) {
         runMax = Math.max(runMax, max);
         return;
       }
@@ -176,8 +199,8 @@ export class SignalSpanStore {
   }
 
   /** Resolution at cell midpoints, coalesced to at most one segment per cell. */
-  segments(evalTime: Float64Array, wallNow: number): PriceResolutionSpan[] {
-    const out: PriceResolutionSpan[] = [];
+  segments(evalTime: Float64Array, wallNow: number): ResolutionSpan[] {
+    const out: ResolutionSpan[] = [];
     if (evalTime.length < 2) return out;
     for (let index = 0; index + 1 < evalTime.length; index++) {
       const min = evalTime[index]!;
@@ -251,7 +274,6 @@ export class SignalSpanStore {
     return { blockIndex, spanIndex: this.blocks[blockIndex]!.length - 1 };
   }
 
-
   private firstBlockEndingAfter(t: number): number {
     let lo = 0;
     let hi = this.blocks.length;
@@ -303,8 +325,8 @@ function chunkSpans(spans: readonly SignalSpan[]): SpanBlock[] {
     const length = Math.min(BLOCK_CAPACITY, spans.length - offset);
     const startTime = new Float64Array(length);
     const endTime = new Float64Array(length);
-    const startLogPrice = new Float64Array(length);
-    const endLogPrice = new Float64Array(length);
+    const startValue = new Float64Array(length);
+    const endValue = new Float64Array(length);
     const resolutionMs = new Float64Array(length);
     let maxResolutionMs = Number.NEGATIVE_INFINITY;
     let internalGapCount = 0;
@@ -312,8 +334,8 @@ function chunkSpans(spans: readonly SignalSpan[]): SpanBlock[] {
       const span = spans[offset + index]!;
       startTime[index] = span.startTime;
       endTime[index] = span.endTime;
-      startLogPrice[index] = span.startValue;
-      endLogPrice[index] = span.endValue;
+      startValue[index] = span.startValue;
+      endValue[index] = span.endValue;
       resolutionMs[index] = span.resolutionMs;
       maxResolutionMs = Math.max(maxResolutionMs, span.resolutionMs);
       if (index > 0 && endTime[index - 1]! < span.startTime) internalGapCount++;
@@ -321,8 +343,8 @@ function chunkSpans(spans: readonly SignalSpan[]): SpanBlock[] {
     blocks.push({
       startTime,
       endTime,
-      startLogPrice,
-      endLogPrice,
+      startValue,
+      endValue,
       resolutionMs,
       length,
       minTime: startTime[0]!,
@@ -342,8 +364,8 @@ function flattenBlocks(blocks: readonly SpanBlock[], start: number, end: number)
       out.push({
         startTime: block.startTime[spanIndex]!,
         endTime: block.endTime[spanIndex]!,
-        startValue: block.startLogPrice[spanIndex]!,
-        endValue: block.endLogPrice[spanIndex]!,
+        startValue: block.startValue[spanIndex]!,
+        endValue: block.endValue[spanIndex]!,
         resolutionMs: block.resolutionMs[spanIndex]!,
       });
     }
@@ -351,10 +373,7 @@ function flattenBlocks(blocks: readonly SpanBlock[], start: number, end: number)
   return out;
 }
 
-function overlay(
-  existing: readonly SignalSpan[],
-  incoming: readonly SignalSpan[],
-): SignalSpan[] {
+function overlay(existing: readonly SignalSpan[], incoming: readonly SignalSpan[]): SignalSpan[] {
   const out: SignalSpan[] = [];
   let existingIndex = 0;
   let incomingIndex = 0;
@@ -381,7 +400,7 @@ function overlay(
       next = Math.min(next, incoming[incomingIndex]!.startTime);
     if (!Number.isFinite(next)) break;
     if (!(next > cursor))
-      throw new Error(`PriceSpanStore.overlay: stalled at ${cursor} -> ${next}`);
+      throw new Error(`SignalSpanStore.overlay: stalled at ${cursor} -> ${next}`);
 
     if (existingActive || incomingActive) {
       const useIncoming =
@@ -417,6 +436,23 @@ function appendSlice(out: SignalSpan[], span: SignalSpan): void {
   }
 }
 
+function spansEqual(a: readonly SignalSpan[], b: readonly SignalSpan[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let index = 0; index < a.length; index++) {
+    const left = a[index]!;
+    const right = b[index]!;
+    if (
+      left.startTime !== right.startTime ||
+      left.endTime !== right.endTime ||
+      left.startValue !== right.startValue ||
+      left.endValue !== right.endValue ||
+      left.resolutionMs !== right.resolutionMs
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
 
 function validateIncoming(spans: readonly SignalSpan[]): void {
   let previousEnd = Number.NEGATIVE_INFINITY;
@@ -427,14 +463,14 @@ function validateIncoming(spans: readonly SignalSpan[]): void {
       !Number.isFinite(span.endTime) ||
       !(span.startTime < span.endTime)
     ) {
-      throw new Error(`PriceSpanStore.insertBatch: invalid span at ${index}`);
+      throw new Error(`SignalSpanStore.insertBatch: invalid span at ${index}`);
     }
     if (!Number.isFinite(span.startValue) || !Number.isFinite(span.endValue)) {
-      throw new Error(`PriceSpanStore.insertBatch: non-finite price at ${index}`);
+      throw new Error(`SignalSpanStore.insertBatch: non-finite value at ${index}`);
     }
     validateResolution(span.resolutionMs);
     if (span.startTime < previousEnd) {
-      throw new Error(`PriceSpanStore.insertBatch: overlapping incoming spans at ${index}`);
+      throw new Error(`SignalSpanStore.insertBatch: overlapping incoming spans at ${index}`);
     }
     previousEnd = span.endTime;
   }
@@ -442,6 +478,6 @@ function validateIncoming(spans: readonly SignalSpan[]): void {
 
 function validateResolution(resolutionMs: number): void {
   if (!(resolutionMs > 0) || !Number.isFinite(resolutionMs)) {
-    throw new Error(`PriceSpanStore: invalid resolution ${resolutionMs}`);
+    throw new Error(`SignalSpanStore: invalid resolution ${resolutionMs}`);
   }
 }

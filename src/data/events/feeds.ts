@@ -59,7 +59,7 @@ export class FeedRegistry {
   private readonly freeIndices: number[] = [];
   private nextIndex = 0;
 
-  private constructor() { }
+  private constructor() {}
 
   /**
    * Seed a registry from an explicit default feed list (owned by `main.ts`).

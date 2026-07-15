@@ -1,17 +1,18 @@
-import type { PriceAdapter } from "../fetcher.ts";
+import type { SignalAdapter } from "../fetcher.ts";
 import { createBinanceAdapter } from "./adapters/binanceFetcher.ts";
 import { createNobitexAdapter } from "./adapters/nobitexFetcher.ts";
-import { createYahooAdapter } from "./adapters//yahoo.ts";
-import { fetchBinanceSymbols, fetchNobitexSymbols, type MarketSymbol } from "../symbols.ts";
+import { createYahooAdapter } from "./adapters/yahoo.ts";
+import { fetchBinanceSymbols, fetchNobitexSymbols, type MarketSymbol } from "./symbols.ts";
 
-export type MarketSourceId = "nobitex" | "binance" | "yahoo";
+export type PriceSignalSourceId = "nobitex" | "binance" | "yahoo";
 
-export interface MarketSource {
-  readonly id: MarketSourceId;
+/** UI-facing description of a market that produces a log-price signal. */
+export interface PriceSignalSource {
+  readonly id: PriceSignalSourceId;
   readonly label: string;
   readonly examples: readonly MarketSymbol[];
   normalizeSymbol(value: string): string;
-  createAdapter(symbol: string): PriceAdapter;
+  createAdapter(symbol: string): SignalAdapter;
   loadSymbols(): Promise<readonly MarketSymbol[]>;
 }
 
@@ -75,7 +76,7 @@ function loadBinanceSymbols(): Promise<readonly MarketSymbol[]> {
   return binanceSymbols;
 }
 
-export const MARKET_SOURCES: readonly MarketSource[] = [
+export const PRICE_SIGNAL_SOURCES: readonly PriceSignalSource[] = [
   {
     id: "nobitex",
     label: "Nobitex",
@@ -102,6 +103,6 @@ export const MARKET_SOURCES: readonly MarketSource[] = [
   },
 ];
 
-export function marketSource(id: string): MarketSource | null {
-  return MARKET_SOURCES.find((source) => source.id === id) ?? null;
+export function priceSignalSource(id: string): PriceSignalSource | null {
+  return PRICE_SIGNAL_SOURCES.find((source) => source.id === id) ?? null;
 }

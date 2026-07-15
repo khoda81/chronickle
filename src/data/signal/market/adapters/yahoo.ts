@@ -1,7 +1,8 @@
 /** Range-aware Yahoo Finance chart adapter for futures, equities, and indices. */
 
-import type { PricePoint } from "../../../../domain.ts";
-import { createPollingSignalSource, type AdapterBatch, type PriceAdapter } from "../../fetcher.ts";
+import type { Sample } from "../../sample.ts";
+import { createPollingSignalSource, type AdapterBatch, type SignalAdapter } from "../../fetcher.ts";
+import { logPriceSamples, type PricePoint } from "../price.ts";
 
 const YAHOO_CHART_API = "https://query2.finance.yahoo.com/v8/finance/chart";
 const CORS_PROXY = "https://corsproxy.io/?url=";
@@ -33,7 +34,7 @@ export interface YahooAdapterOptions {
   readonly now?: () => number;
 }
 
-export function createYahooAdapter(opts: YahooAdapterOptions): PriceAdapter {
+export function createYahooAdapter(opts: YahooAdapterOptions): SignalAdapter {
   const symbol = opts.symbol.trim().toUpperCase();
   if (!/^[A-Z0-9.^=_-]{1,40}$/.test(symbol)) {
     throw new Error(`Invalid Yahoo Finance symbol: ${opts.symbol}`);
@@ -61,8 +62,8 @@ export function createYahooAdapter(opts: YahooAdapterOptions): PriceAdapter {
       pending.clear();
     },
 
-    resolve({ range, maxDeltaTMs, requestedAtMs }) {
-      return chooseInterval(maxDeltaTMs, range.min, requestedAtMs).periodMs;
+    resolve({ range, maxDeltaTMs }) {
+      return chooseInterval(maxDeltaTMs, range.min, now()).periodMs;
     },
 
     async fetchRange({ range, resolutionMs }, signal) {
@@ -142,7 +143,7 @@ async function fetchYahooWindow(
     const timestamps = result?.timestamp;
     const opens = result?.indicators?.quote?.[0]?.open;
     if (!Array.isArray(timestamps) || !Array.isArray(opens)) {
-      return { points: [] };
+      return { samples: [] };
     }
 
     const points: PricePoint[] = [];
@@ -160,7 +161,7 @@ async function fetchYahooWindow(
         points.push({ t: seconds * 1_000, price });
       }
     }
-    return { points };
+    return { samples: logPriceSamples(points) };
   } finally {
     clearTimeout(timer);
     signal.removeEventListener("abort", abort);
@@ -168,7 +169,7 @@ async function fetchYahooWindow(
 }
 
 interface CachedYahooResult {
-  readonly points: readonly PricePoint[];
+  readonly samples: readonly Sample[];
 }
 
 class YahooHttpError extends Error {
@@ -230,13 +231,13 @@ function chooseInterval(maxDeltaTMs: number, rangeMin: number, now: number): Yah
 interface YahooChartResponse {
   readonly chart?: {
     readonly result?:
-    | readonly {
-      readonly timestamp?: readonly number[];
-      readonly indicators?: {
-        readonly quote?: readonly { readonly open?: readonly (number | null)[] }[];
-      };
-    }[]
-    | null;
+      | readonly {
+          readonly timestamp?: readonly number[];
+          readonly indicators?: {
+            readonly quote?: readonly { readonly open?: readonly (number | null)[] }[];
+          };
+        }[]
+      | null;
     readonly error?: { readonly code?: string; readonly description?: string } | null;
   };
 }

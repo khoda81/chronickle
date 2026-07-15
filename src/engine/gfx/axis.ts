@@ -87,7 +87,7 @@ export const Axis = {
 };
 
 class AxisImpl implements AxisLayer {
-  constructor(private readonly frame: Frame) { }
+  constructor(private readonly frame: Frame) {}
 
   drawTimeAxis(y: number, minTickPx: number = DEFAULT_MIN_TICK_PX): void {
     if (!(minTickPx > 0)) {

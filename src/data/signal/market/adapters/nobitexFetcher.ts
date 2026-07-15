@@ -13,10 +13,9 @@
  *   43200 ("720"), 86400 ("D"), 172800 ("2D"), 259200 ("3D")
  */
 
-import { createPollingSignalSource, type PriceAdapter } from "../../fetcher.ts";
+import { createPollingSignalSource, type SignalAdapter } from "../../fetcher.ts";
 import { pickResolution } from "../../resolution.ts";
-import { fetchOhlc, ohlcToPriceSeries } from "./nobitex.ts";
-import { PricePoint } from "../../../../domain.ts";
+import { fetchOhlc, ohlcToLogPriceSamples } from "./nobitex.ts";
 
 const MS = 1000;
 
@@ -45,7 +44,7 @@ export interface NobitexAdapterOptions {
   readonly timeoutMs?: number;
 }
 
-export function createNobitexAdapter(opts: NobitexAdapterOptions = {}): PriceAdapter {
+export function createNobitexAdapter(opts: NobitexAdapterOptions = {}): SignalAdapter {
   const symbol = opts.symbol ?? "USDTIRT";
   const timeoutMs = opts.timeoutMs;
 
@@ -85,20 +84,20 @@ export function createNobitexAdapter(opts: NobitexAdapterOptions = {}): PriceAda
       // is exhausted and the broker should not retry it.
       if (res === null) {
         return {
-          points: [],
+          samples: [],
           searchedRange: req.range,
         };
       }
 
-      const points = ohlcToPriceSeries(res).observations as PricePoint[];
-      if (points.length === 0) {
+      const samples = ohlcToLogPriceSamples(res);
+      if (samples.length === 0) {
         return {
-          points: [],
+          samples: [],
           searchedRange: req.range,
         };
       }
 
-      const firstT = points[0]!.t;
+      const firstT = samples[0]!.t;
       // Nobitex caps OHLC responses at 1000 candles anchored at `to`. If the
       // first returned candle is strictly after `from`, the prefix
       // [from, firstT) was truncated and still needs to be fetched. We report
@@ -109,18 +108,18 @@ export function createNobitexAdapter(opts: NobitexAdapterOptions = {}): PriceAda
       // truncated on the left, so the whole request is exhausted.
       if (firstT <= req.range.min) {
         return {
-          points,
+          samples,
           searchedRange: req.range,
         };
       }
       if (firstT < req.range.max) {
         return {
-          points,
+          samples,
           searchedRange: { min: firstT, max: req.range.max },
         };
       }
       return {
-        points,
+        samples,
         searchedRange: req.range,
       };
     },

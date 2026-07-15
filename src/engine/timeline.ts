@@ -3,12 +3,7 @@
 import type { EventSet, NewsEvent } from "../domain.ts";
 import { LocateFixed, Pause, Play, createElement } from "lucide";
 import type { EventQueryResult } from "../data/events/broker.ts";
-import type {
-  BrokerDemand,
-  Subscription,
-  ReadRequest,
-  SignalView,
-} from "../data/signal/broker.ts";
+import type { BrokerDemand, Subscription, ReadRequest, SignalView } from "../data/signal/broker.ts";
 import { Range } from "./range.ts";
 import { DataTransform } from "./transform.ts";
 import { transformTouchRange } from "./gesture.ts";
@@ -29,7 +24,7 @@ import {
 } from "./gfx/layout.ts";
 
 export type DataReader = (request: ReadRequest) => SignalView;
-export type PriceAtReader = (time: number) => number | null;
+export type ValueAtReader = (time: number) => number | null;
 export type DataSubscriber = (demand: BrokerDemand, onChange: () => void) => Subscription;
 export type EventSource = (range: Range) => EventQueryResult;
 
@@ -37,7 +32,7 @@ export interface SignalRow {
   readonly id: string;
   readonly label: string;
   readonly read: DataReader;
-  readonly readValueAt: PriceAtReader;
+  readonly readValueAt: ValueAtReader;
   readonly subscribe: DataSubscriber;
   readonly palette: PaletteName;
   readonly verticalOffset: number;
@@ -602,7 +597,7 @@ export class Timeline {
           padLeft,
           padRight,
           visibleCells,
-          revision: result.revision,
+          revision: result.sampleRevision,
         },
         priceScale,
         waveletMode,
@@ -612,7 +607,7 @@ export class Timeline {
         maxScaleMs,
         this.rowPalettes[index]!,
       );
-      frame.resolution().draw(result.coverage, result.targetResolutionMs, rowY + heatHeight);
+      frame.resolution().draw(result.coverage, gridStepMs, rowY + heatHeight);
       this.positionRowChrome(row, rowY);
       rowY += rowHeight;
       frame.fillRectPx(0, rowY - 1, width, 1, "rgba(255,255,255,0.18)");
@@ -689,8 +684,8 @@ export class Timeline {
     for (let index = 0; index < this.signalRows.length; index++) {
       const rowHeight = this.rowHeights[index]!;
       const heatHeight = Math.max(2, rowHeight - COVERAGE_BAR_HEIGHT);
-      const logPrice = this.signalRows[index]!.readValueAt(hoverTime);
-      const text = logPrice === null ? "loading…" : formatPrice(Math.exp(logPrice));
+      const value = this.signalRows[index]!.readValueAt(hoverTime);
+      const text = value === null ? "loading…" : formatPrice(Math.exp(value));
       drawSignalTooltip(frame, x, rowY + heatHeight / 2, text);
       rowY += rowHeight;
     }
@@ -1244,9 +1239,9 @@ export class Timeline {
     const previous = this.state.hovered;
     const index =
       this.pointerInside &&
-        !this.dragging &&
-        this.resizingBoundary === null &&
-        this.boundaryAt(this.pointerPy) === null
+      !this.dragging &&
+      this.resizingBoundary === null &&
+      this.boundaryAt(this.pointerPy) === null
         ? nearestEventIndex(this.state.events, tx, this.pointerPx)
         : null;
     this.state.hovered = index;

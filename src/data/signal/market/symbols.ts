@@ -1,4 +1,4 @@
-/** Public market-symbol discovery and autocomplete helpers. */
+/** Symbol discovery and autocomplete for market-backed price signals. */
 
 export interface MarketSymbol {
   readonly symbol: string;

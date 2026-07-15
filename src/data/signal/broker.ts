@@ -1,19 +1,17 @@
-/** Evidence-backed, resolution-aware price broker. */
+/** Evidence-backed cache and subscription boundary for a sampled signal. */
 
-import { PriceSeries, type PricePoint } from "../../domain.ts";
 import { Range } from "../../engine/range.ts";
 import { RangeSet } from "../rangeSet.ts";
 import { SettledCoverageIndex, type CoverageSegment } from "./coverage.ts";
-import type { AcquisitionActivity, AdapterDelivery as SignalDelivery, AdapterSession, PriceAdapter as SignalSource } from "./fetcher.ts";
+import type { AcquisitionActivity, AdapterDelivery as SignalDelivery, AdapterSession, SignalAdapter, } from "./fetcher.ts";
+import { normalizeSamples, type Sample } from "./sample.ts";
 import { SignalSpanStore, type SignalSpan } from "./store.ts";
-
-
 
 export interface SignalView {
   readonly value: Float64Array;
-  /** Renderer-requested maximum sample spacing. */
   readonly coverage: readonly CoverageSegment[];
-  readonly revision: number;
+  /** Changes only when cached sample values change, never for status-only updates. */
+  readonly sampleRevision: number;
 }
 
 export interface ReadRequest {
@@ -54,23 +52,21 @@ export class Broker {
   private readonly now: () => number;
   private readonly onError: (message: string, error?: unknown) => void;
   private readonly onWarning: (message: string) => void;
-  private revision = 0;
+  private sampleRevision = 0;
   private adapterActivities: readonly AcquisitionActivity[] = [];
   private valueBuffer: Float64Array<ArrayBufferLike> = new Float64Array(0);
 
-  constructor(adapter: SignalSource, opts: BrokerOptions = {}) {
+  constructor(adapter: SignalAdapter, opts: BrokerOptions = {}) {
     this.now = opts.now ?? Date.now;
     this.onError = opts.onError ?? ((message, error) => console.error(message, error));
     this.onWarning = opts.onWarning ?? ((message) => console.warn(message));
     this.adapterSession = adapter.connect({
       next: (batch) => {
-        this.ingest(batch);
-        this.revision++;
+        if (this.ingest(batch)) this.sampleRevision++;
         this.notify();
       },
       status: (activities) => {
         this.adapterActivities = activities;
-        this.revision++;
         this.notify();
       },
       error: (error, activity) => {
@@ -101,7 +97,7 @@ export class Broker {
       return {
         value,
         coverage: [],
-        revision: this.revision,
+        sampleRevision: this.sampleRevision,
       };
     }
 
@@ -112,38 +108,28 @@ export class Broker {
     this.valueBuffer = sampled.value;
     const value = sampled.value;
 
-    let leadingNaN = 0;
-    while (leadingNaN < value.length && !Number.isFinite(value[leadingNaN]!)) leadingNaN++;
-    let trailingNaN = 0;
-    while (
-      trailingNaN < value.length - leadingNaN &&
-      !Number.isFinite(value[value.length - 1 - trailingNaN]!)
-    ) {
-      trailingNaN++;
-    }
-
     const readyCoverage = new RangeSet();
     if (historicalRange !== null) {
       this.store.addReadyBlockers(readyCoverage, maxDeltaTMs, historicalRange);
     }
-    const resolution =
-      historicalRange === null
+    const coverage = [
+      ...this.readySegments(evalTime, wallNow),
+      ...(historicalRange === null
         ? []
-        : [
-          ...this.readySegments(evalTime, wallNow),
-          ...this.fetchedCoverage.emptySegments(historicalRange, maxDeltaTMs, readyCoverage),
-          ...this.transientSegments(historicalRange),
-        ].sort(
-          (a, b) =>
-            a.range.min - b.range.min ||
-            coverageLabelRank(b.state) - coverageLabelRank(a.state) ||
-            a.range.max - b.range.max,
-        );
+        : this.fetchedCoverage.emptySegments(historicalRange, maxDeltaTMs, readyCoverage)),
+      ...this.transientSegments(queryRange),
+      ...this.futureSegments(queryRange, wallNow, maxDeltaTMs),
+    ].sort(
+      (a, b) =>
+        a.range.min - b.range.min ||
+        coverageLabelRank(b.state) - coverageLabelRank(a.state) ||
+        a.range.max - b.range.max,
+    );
 
     return {
       value,
-      coverage: resolution,
-      revision: this.revision,
+      coverage,
+      sampleRevision: this.sampleRevision,
     };
   }
 
@@ -184,7 +170,7 @@ export class Broker {
     this.adapterActivities = [];
     this.valueBuffer = new Float64Array(0);
     this.adapterSession.clearCache();
-    this.revision++;
+    this.sampleRevision++;
     this.notify();
   }
 
@@ -192,26 +178,25 @@ export class Broker {
     return this.store.timeRange();
   }
 
-  /** Latest cached log price at or before `time`, clamped to the live wall clock. */
+  /** Latest reconstructed signal value at or before `time`, clamped to now. */
   valueAtOrBefore(time: number): number | null {
     if (!Number.isFinite(time)) {
-      throw new Error(`Broker.logPriceAtOrBefore: invalid time ${time}`);
+      throw new Error(`Broker.valueAtOrBefore: invalid time ${time}`);
     }
-    return this.store.logPriceAtOrBefore(Math.min(time, this.now()));
+    return this.store.valueAtOrBefore(Math.min(time, this.now()));
   }
 
   private syncAdapterDemands(): void {
-    const requestedAtMs = this.now();
     this.adapterSession.setDemands(
       [...this.demandSubscriptions]
         .filter((subscription) => !subscription.disposed)
-        .map((subscription) => ({ ...subscription.demand, requestedAtMs })),
+        .map((subscription) => ({ ...subscription.demand })),
     );
   }
 
-  private ingest(result: SignalDelivery): void {
-    const clipped = clipPoints(PriceSeries.from(result.points).observations, result.searchedRange);
-    const points = clipped.points;
+  private ingest(result: SignalDelivery): boolean {
+    const clipped = clipSamples(normalizeSamples(result.samples), result.searchedRange);
+    const samples = clipped.samples;
     if (clipped.discardedFutureCount > 0) {
       this.onWarning(
         `[Broker] discarded ${clipped.discardedFutureCount} future point(s); ` +
@@ -219,33 +204,32 @@ export class Broker {
         `latest returned timestamp was ${clipped.latestFutureT}`,
       );
     }
-    if (points.length > 0) {
+    let changed = false;
+    if (samples.length > 0) {
       // A sample represents its zero-order-held value for one native sample
       // period. In particular, an OHLC candle open is already known at the
       // candle boundary and remains the displayed value until the next open.
       // Extending that final step to its expected lifetime prevents the moving
       // wall clock from manufacturing millisecond-sized "uncovered" tails.
-      this.ingestObserved(points, result.resolutionMs);
+      changed = this.ingestObserved(samples, result.resolutionMs);
     }
     this.fetchedCoverage.add(result.requestedMaxDeltaTMs, result.searchedRange);
+    return changed;
   }
 
-  private ingestObserved(
-    points: readonly PricePoint[],
-    nominalResolutionMs: number,
-  ): void {
+  private ingestObserved(samples: readonly Sample[], nominalResolutionMs: number): boolean {
     const spans: SignalSpan[] = [];
-    for (let index = 1; index < points.length; index++) {
-      const previous = points[index - 1]!;
-      const current = points[index]!;
+    for (let index = 1; index < samples.length; index++) {
+      const previous = samples[index - 1]!;
+      const current = samples[index]!;
       const observedDelta = current.t - previous.t;
       if (!(observedDelta > 0)) continue;
 
       spans.push({
         startTime: previous.t,
         endTime: current.t,
-        startValue: Math.log(previous.price),
-        endValue: Math.log(current.price),
+        startValue: previous.value,
+        endValue: current.value,
         // Quality describes the cadence that was searched, not the wall-clock
         // distance to the next returned candle. Otherwise every overnight or
         // weekend closure becomes a fake coarse interval and an intermediate
@@ -254,22 +238,21 @@ export class Broker {
       });
     }
 
-    const last = points[points.length - 1];
+    const last = samples[samples.length - 1];
     if (last !== undefined) {
       const expectedUntil = last.t + nominalResolutionMs;
       if (last.t < expectedUntil) {
-        const logPrice = Math.log(last.price);
         spans.push({
           startTime: last.t,
           endTime: expectedUntil,
-          startValue: logPrice,
-          endValue: logPrice,
+          startValue: last.value,
+          endValue: last.value,
           resolutionMs: nominalResolutionMs,
         });
       }
     }
 
-    this.store.insertBatch(spans);
+    return this.store.insertBatch(spans);
   }
 
   private readySegments(evalTime: Float64Array, wallNow: number): CoverageSegment[] {
@@ -299,6 +282,20 @@ export class Broker {
       });
     }
     return out;
+  }
+
+  private futureSegments(range: Range, wallNow: number, maxSampleGapMs: number): CoverageSegment[] {
+    const min = Math.max(range.min, wallNow);
+    if (!(min < range.max)) return [];
+    return [
+      {
+        range: Range.create(min, range.max),
+        samplePeriodMs: maxSampleGapMs,
+        state: this.adapterActivities.some((activity) => activity.state === "watching")
+          ? "watching"
+          : "pending",
+      },
+    ];
   }
 
   private notify(): void {
@@ -340,26 +337,26 @@ function coverageLabelRank(state: CoverageSegment["state"]): number {
 }
 
 interface ClippedPoints {
-  readonly points: readonly PricePoint[];
+  readonly samples: readonly Sample[];
   readonly discardedFutureCount: number;
   readonly latestFutureT: number | null;
 }
 
-function clipPoints(points: readonly PricePoint[], range: Range): ClippedPoints {
-  let predecessor: PricePoint | undefined;
-  const inside: PricePoint[] = [];
+function clipSamples(samples: readonly Sample[], range: Range): ClippedPoints {
+  let predecessor: Sample | undefined;
+  const inside: Sample[] = [];
   let discardedFutureCount = 0;
   let latestFutureT: number | null = null;
-  for (const point of points) {
-    if (point.t < range.min) predecessor = point;
-    else if (point.t <= range.max) inside.push(point);
+  for (const sample of samples) {
+    if (sample.t < range.min) predecessor = sample;
+    else if (sample.t <= range.max) inside.push(sample);
     else {
       discardedFutureCount++;
-      latestFutureT = point.t;
+      latestFutureT = sample.t;
     }
   }
   return {
-    points: predecessor === undefined ? inside : [predecessor, ...inside],
+    samples: predecessor === undefined ? inside : [predecessor, ...inside],
     discardedFutureCount,
     latestFutureT,
   };

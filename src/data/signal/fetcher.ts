@@ -1,8 +1,8 @@
-/** Demand-aware adapter scheduling for sampled price time series. */
+/** Demand-aware adapter scheduling for sampled real-valued time series. */
 
-import type { PricePoint } from "../../domain.ts";
 import { Range } from "../../engine/range.ts";
 import { RangeSet } from "../rangeSet.ts";
+import type { Sample } from "./sample.ts";
 
 export interface AdapterDemand {
   readonly range: Range;
@@ -17,7 +17,7 @@ export interface AdapterPlan extends AdapterDemand {
 
 export interface AdapterBatch {
   /** Canonical observations in epoch milliseconds. */
-  readonly points: readonly PricePoint[];
+  readonly samples: readonly Sample[];
   /** Everything searched by the source, which may be wider than requested. */
   readonly searchedRange: Range;
 }
@@ -55,10 +55,8 @@ export interface AdapterSession {
  * The broker describes current interest. The adapter owns request expansion,
  * deduplication, cancellation, retries, and the lifetime of live transports.
  */
-export interface PriceAdapter {
-  plan(demand: AdapterDemand): AdapterPlan;
+export interface SignalAdapter {
   connect(sink: SignalSink): AdapterSession;
-  clearCache?(): void;
 }
 
 /** Low-level HTTP implementation used by the generic polling coordinator. */
@@ -105,19 +103,18 @@ const DEFAULT_LIVE_RETENTION_MS = 15_000;
  * Turn a range fetcher into a demand-aware adapter. There is one bounded work
  * lane and at most one live lease, so redraws cannot multiply polling loops.
  */
-export function createPollingSignalSource(fetcher: RangeLoader): PriceAdapter {
+export function createPollingSignalSource(fetcher: RangeLoader): SignalAdapter {
   const now = fetcher.now ?? Date.now;
+  const planDemand = (demand: AdapterDemand): AdapterPlan => {
+    validateDemand(demand);
+    const resolutionMs = fetcher.resolve(demand);
+    if (!(resolutionMs > 0 && Number.isFinite(resolutionMs))) {
+      throw new Error(`SignalAdapter: invalid native resolution ${resolutionMs}`);
+    }
+    return { ...demand, resolutionMs };
+  };
 
-  const adapter: PriceAdapter = {
-    plan(demand) {
-      validateDemand(demand);
-      const resolutionMs = fetcher.resolve(demand);
-      if (!(resolutionMs > 0) || !Number.isFinite(resolutionMs)) {
-        throw new Error(`PriceAdapter: invalid native resolution ${resolutionMs}`);
-      }
-      return { ...demand, resolutionMs };
-    },
-
+  const adapter: SignalAdapter = {
     connect(sink) {
       let disposed = false;
       let demands: readonly AdapterDemand[] = [];
@@ -158,7 +155,7 @@ export function createPollingSignalSource(fetcher: RangeLoader): PriceAdapter {
           const message = active.failureMessage ?? undefined;
           activities.push({
             state: active.retryAtMs === null ? "fetching" : "failed",
-            range: active.fetchRange,
+            range: active.plan.range,
             resolutionMs: active.plan.resolutionMs,
             ...(message === undefined ? {} : { message, retryAtMs: active.retryAtMs! }),
           });
@@ -206,9 +203,8 @@ export function createPollingSignalSource(fetcher: RangeLoader): PriceAdapter {
 
       const currentPlans = (): AdapterPlan[] =>
         demands
-          .map((demand) => adapter.plan({ ...demand }))
-          .sort((a, b) => a.resolutionMs - b.resolutionMs || b.range.max - a.range.max)
-        ;
+          .map((demand) => planDemand({ ...demand }))
+          .sort((a, b) => a.resolutionMs - b.resolutionMs || b.range.max - a.range.max);
 
       const desiredLivePlan = (plans: readonly AdapterPlan[]): AdapterPlan | null => {
         const wallNow = now();
@@ -333,7 +329,7 @@ export function createPollingSignalSource(fetcher: RangeLoader): PriceAdapter {
 
         if (work.kind === "live" && live !== null) {
           const wallNow = now();
-          const last = batch.points[batch.points.length - 1];
+          const last = batch.samples[batch.samples.length - 1];
           live.cursorMs = Math.max(
             batch.searchedRange.max,
             last === undefined ? -Infinity : last.t + work.plan.resolutionMs,
@@ -375,7 +371,7 @@ export function createPollingSignalSource(fetcher: RangeLoader): PriceAdapter {
             }
             const activity: AcquisitionActivity = {
               state: "failed",
-              range: work.fetchRange,
+              range: work.plan.range,
               resolutionMs: work.plan.resolutionMs,
               message: error instanceof Error ? error.message : String(error),
               retryAtMs: work.retryAtMs,
@@ -436,14 +432,14 @@ export function createPollingSignalSource(fetcher: RangeLoader): PriceAdapter {
 
       return {
         setDemands(nextDemands) {
-          if (disposed) throw new Error("Price adapter session is disposed");
+          if (disposed) throw new Error("Signal adapter session is disposed");
           for (const demand of nextDemands) validateDemand(demand);
           demands = nextDemands.map((demand) => ({ ...demand }));
           reconcile();
         },
 
         clearCache() {
-          if (disposed) throw new Error("Price adapter session is disposed");
+          if (disposed) throw new Error("Signal adapter session is disposed");
           active?.controller.abort();
           active = null;
           live = null;
@@ -453,7 +449,7 @@ export function createPollingSignalSource(fetcher: RangeLoader): PriceAdapter {
           timer = null;
           timerAtMs = Number.POSITIVE_INFINITY;
           statusKey = "";
-          adapter.clearCache?.();
+          fetcher.clearCache?.();
           emitStatus();
           reconcile();
         },
@@ -471,10 +467,6 @@ export function createPollingSignalSource(fetcher: RangeLoader): PriceAdapter {
         },
       };
     },
-
-    clearCache() {
-      fetcher.clearCache?.();
-    },
   };
 
   return adapter;
@@ -488,7 +480,7 @@ function expandRange(
 ): Range {
   const minPoints = configuredMinPoints ?? DEFAULT_MIN_FETCH_POINTS;
   if (!(minPoints >= 1) || !Number.isFinite(minPoints)) {
-    throw new Error(`PriceAdapter: invalid minFetchPoints ${minPoints}`);
+    throw new Error(`SignalAdapter: invalid minFetchPoints ${minPoints}`);
   }
   const minSpan = Math.ceil(minPoints) * resolutionMs;
   let min = Math.floor(required.min / resolutionMs) * resolutionMs;
@@ -507,19 +499,19 @@ function expandRange(
       }
     }
   }
-  if (!(min < max)) throw new Error("PriceAdapter: could not construct a non-empty fetch range");
+  if (!(min < max)) throw new Error("SignalAdapter: could not construct a non-empty fetch range");
   return Range.create(min, max);
 }
 
 function validateDemand(demand: AdapterDemand): void {
   if (!(demand.maxDeltaTMs > 0) || !Number.isFinite(demand.maxDeltaTMs)) {
-    throw new Error(`PriceAdapter: invalid requested resolution ${demand.maxDeltaTMs}`);
+    throw new Error(`SignalAdapter: invalid requested resolution ${demand.maxDeltaTMs}`);
   }
 }
 
 function validateBatch(requiredRange: Range, batch: AdapterBatch): void {
   if (intersect(requiredRange, batch.searchedRange) === null) {
-    throw new Error("PriceAdapter: searched range made no progress on the required range");
+    throw new Error("SignalAdapter: searched range made no progress on the required range");
   }
 }
 

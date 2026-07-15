@@ -13,7 +13,6 @@
 import type { EventSet } from "../domain.ts";
 import type { DataTransform } from "./transform.ts";
 
-
 /** Find the visible event nearest to a vertical crosshair. */
 export function nearestEventIndex(events: EventSet, tx: DataTransform, px: number): number | null {
   const xs = events.events;

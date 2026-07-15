@@ -1,11 +1,11 @@
 /**
- * A set of disjoint, sorted closed ranges [min, max].
+ * A set of disjoint, sorted half-open ranges [min, max).
  *
  * Used by the broker to track which time ranges have been fetched (at any
  * resolution) so it can detect gaps and avoid re-issuing in-flight requests.
  *
  * Invariant: `intervals` is ascending by `min`, and consecutive intervals
- * are *non-overlapping and non-adjacent* (adjacent ranges are merged on
+ * are *non-overlapping and non-touching* (touching ranges are merged on
  * insert). `min < max` for every interval, enforced by `Range.create`.
  */
 
@@ -28,7 +28,7 @@ export class RangeSet {
     return this.intervals;
   }
 
-  /** True if every point in `r` lies inside some covered interval. */
+  /** True if the complete half-open interval `r` is covered. */
   covers(r: Range): boolean {
     let lo = 0;
     let hi = this.intervals.length;
@@ -49,7 +49,7 @@ export class RangeSet {
       const mid = (lo + hi) >>> 1;
       const iv = this.intervals[mid]!;
       if (t < iv.min) hi = mid - 1;
-      else if (t > iv.max) lo = mid + 1;
+      else if (t >= iv.max) lo = mid + 1;
       else return true;
     }
     return false;
@@ -86,15 +86,15 @@ export class RangeSet {
       intervals.push(r);
       return;
     }
-    if (last.max < min - 1) {
+    if (last.max < min) {
       intervals.push(r);
       return;
     }
-    if (last.min <= max + 1) {
+    if (last.min <= max) {
       // The new range reaches the tail. It can only merge with a suffix, but
       // may bridge several suffix intervals as its bounds expand.
       let start = intervals.length - 1;
-      while (start > 0 && intervals[start - 1]!.max >= min - 1) start--;
+      while (start > 0 && intervals[start - 1]!.max >= min) start--;
       for (let index = start; index < intervals.length; index++) {
         const interval = intervals[index]!;
         min = Math.min(min, interval.min);
@@ -109,17 +109,17 @@ export class RangeSet {
     let hi = intervals.length;
     while (lo < hi) {
       const mid = (lo + hi) >>> 1;
-      if (intervals[mid]!.max < min - 1) lo = mid + 1;
+      if (intervals[mid]!.max < min) lo = mid + 1;
       else hi = mid;
     }
     const start = lo;
-    if (start === intervals.length || intervals[start]!.min > max + 1) {
+    if (start === intervals.length || intervals[start]!.min > max) {
       intervals.splice(start, 0, r);
       return;
     }
 
     let end = start;
-    while (end < intervals.length && intervals[end]!.min <= max + 1) {
+    while (end < intervals.length && intervals[end]!.min <= max) {
       const interval = intervals[end]!;
       min = Math.min(min, interval.min);
       max = Math.max(max, interval.max);

@@ -38,7 +38,6 @@ export interface FeedWalkerOptions {
   readonly timeoutMs?: number;
 }
 
-
 export class FeedWalker {
   private readonly feed: RssFeed;
   private readonly proxy: string;
