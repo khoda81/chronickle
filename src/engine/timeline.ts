@@ -1,7 +1,7 @@
 /** One shared, vertically-resizable news and market timeline. */
 
 import type { EventSet, NewsEvent } from "../domain.ts";
-import { AlignEndHorizontal, LockKeyhole, createElement } from "lucide";
+import { LocateFixed, Play, createElement } from "lucide";
 import type { EventQueryResult } from "../data/events/broker.ts";
 import type {
   BrokerDemand,
@@ -208,15 +208,14 @@ export class Timeline {
     this.followLock = document.createElement("button");
     this.followLock.type = "button";
     this.followLock.className = "timeline-icon-button timeline-follow-lock";
-    this.followLock.append(createTimelineIcon(LockKeyhole));
-    this.followLock.title = "Return to live time";
-    this.followLock.setAttribute("aria-label", "Return to live time");
-    this.followLock.hidden = true;
+    this.followLock.append(createTimelineIcon(Play));
+    this.followLock.title = "Follow current time from here";
+    this.followLock.setAttribute("aria-label", "Follow current time from here");
     this.followLock.addEventListener("click", this.onFollowLockClick);
     this.rightEdgeButton = document.createElement("button");
     this.rightEdgeButton.type = "button";
     this.rightEdgeButton.className = "timeline-icon-button timeline-right-edge";
-    this.rightEdgeButton.append(createTimelineIcon(AlignEndHorizontal));
+    this.rightEdgeButton.append(createTimelineIcon(LocateFixed));
     this.rightEdgeButton.addEventListener("click", this.onRightEdgeClick);
     this.nowControls.append(this.followLock, this.rightEdgeButton);
     this.hoverLine = document.createElement("div");
@@ -300,7 +299,6 @@ export class Timeline {
   private setFollowNow(followNow: boolean): void {
     if (followNow === this.state.followNow) return;
     this.state.followNow = followNow;
-    this.followLock.hidden = followNow;
     this.reqDraw();
   }
 
@@ -836,6 +834,15 @@ export class Timeline {
   }
 
   private onFollowLockClick = (): void => {
+    const now = Date.now();
+    const { min, max } = this.state.timeRange;
+    const span = max - min;
+
+    if (span > 0) {
+      this.state.nowAnchor = (now - min) / span;
+      this.syncRightEdgeButton();
+    }
+
     this.setFollowNow(true);
   };
 
@@ -843,7 +850,6 @@ export class Timeline {
     this.state.nowAnchor =
       this.state.nowAnchor === RIGHT_EDGE_NOW_ANCHOR ? DEFAULT_NOW_ANCHOR : RIGHT_EDGE_NOW_ANCHOR;
     this.syncRightEdgeButton();
-    this.setFollowNow(true);
     this.reqDraw();
   };
 
@@ -1224,9 +1230,9 @@ export class Timeline {
     const previous = this.state.hovered;
     const index =
       this.pointerInside &&
-      !this.dragging &&
-      this.resizingBoundary === null &&
-      this.boundaryAt(this.pointerPy) === null
+        !this.dragging &&
+        this.resizingBoundary === null &&
+        this.boundaryAt(this.pointerPy) === null
         ? nearestEventIndex(this.state.events, tx, this.pointerPx)
         : null;
     this.state.hovered = index;
