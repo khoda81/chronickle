@@ -246,30 +246,67 @@ export class Timeline {
   }
 
   setSignalRows(rows: readonly SignalRow[]): void {
-    this.disposeSignalSubscriptions();
-    const hadPriceRows = this.signalRows.length > 0;
-    const oldHeight = new Map(
-      this.signalRows.map((row, index) => [row.id, this.rowHeights[index]!]),
-    );
+    const previousRows = this.signalRows;
+    const previousIndexById = new Map(previousRows.map((row, index) => [row.id, index]));
+    const nextIds = new Set(rows.map((row) => row.id));
+    const hadSignalRows = previousRows.length > 0;
+
+    // A row identity owns its broker subscription and render scratch state.
+    // Reordering/removing one row must not tear down every other row's demand.
+    for (let index = 0; index < previousRows.length; index++) {
+      if (!nextIds.has(previousRows[index]!.id)) this.signalSubscriptions[index]?.dispose();
+    }
+
+    const positiveHeights = this.rowHeights.filter((height) => height > 0);
     const fallback =
-      this.rowHeights.length > 0
-        ? this.rowHeights.reduce((sum, height) => sum + height, 0) / this.rowHeights.length
+      positiveHeights.length > 0
+        ? positiveHeights.reduce((sum, height) => sum + height, 0) / positiveHeights.length
         : DEFAULT_SIGNAL_ROW_HEIGHT;
+
+    const previousHeights = this.rowHeights;
+    const previousEvalTime = this.rowEvalTime;
+    const previousHoverSamples = this.rowHoverSamples;
+    const previousSubscriptions = this.signalSubscriptions;
+    const previousDemands = this.subscribedDemands;
+
     this.signalRows = [...rows];
-    this.rowHeights = rows.map(
-      (row) => oldHeight.get(row.id) ?? restoredRowHeight(row.height, fallback),
-    );
+    this.rowHeights = rows.map((row) => {
+      const previousIndex = previousIndexById.get(row.id);
+      const previousHeight =
+        previousIndex === undefined ? undefined : previousHeights[previousIndex];
+      // Zero is valid only while a resize gesture is in progress. Once rows are
+      // reconciled, every active row must have a positive recoverable height.
+      return restoredRowHeight(previousHeight, restoredRowHeight(row.height, fallback));
+    });
     this.rowPalettes = rows.map((row) => row.palette);
     this.rowWaveletModes = rows.map((row) => row.waveletMode);
     this.rowVerticalOffsets = rows.map((row) => row.verticalOffset);
-    this.rowHoverSamples = rows.map(() => ({ t: Number.NaN, value: Number.NaN }));
-    if (!hadPriceRows && rows.length > 0) {
+    this.rowEvalTime = rows.map((row) => {
+      const previousIndex = previousIndexById.get(row.id);
+      return previousIndex === undefined
+        ? new Float64Array(0)
+        : (previousEvalTime[previousIndex] ?? new Float64Array(0));
+    });
+    this.rowHoverSamples = rows.map((row) => {
+      const previousIndex = previousIndexById.get(row.id);
+      return previousIndex === undefined
+        ? { t: Number.NaN, value: Number.NaN }
+        : (previousHoverSamples[previousIndex] ?? { t: Number.NaN, value: Number.NaN });
+    });
+    this.signalSubscriptions = rows.map((row) => {
+      const previousIndex = previousIndexById.get(row.id);
+      return previousIndex === undefined ? undefined : previousSubscriptions[previousIndex];
+    });
+    this.subscribedDemands = rows.map((row) => {
+      const previousIndex = previousIndexById.get(row.id);
+      return previousIndex === undefined ? null : (previousDemands[previousIndex] ?? null);
+    });
+
+    if (!hadSignalRows && rows.length > 0) {
       if (!this.restoreNewsHeightOnFirstRows) this.state.newsHeight = DEFAULT_NEWS_HEIGHT;
       this.restoreNewsHeightOnFirstRows = false;
     }
     this.fitLayout();
-    this.rowEvalTime = rows.map(() => new Float64Array(0));
-    this.subscribedDemands = rows.map(() => null);
     this.state.hovered = null;
     this.reqDraw();
   }

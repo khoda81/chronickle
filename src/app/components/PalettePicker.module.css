@@ -56,14 +56,17 @@
 }
 
 .deck {
+  --palette-item-height: 1.25rem;
+  --palette-item-gap: 0.1875rem;
+  --palette-deck-padding: var(--space-1);
+  --palette-deck-offset: -50%;
+
   position: absolute;
   z-index: var(--layer-menu);
   top: 50%;
   left: calc(-1 * var(--space-1));
   width: calc(100% + 2 * var(--space-1));
-  height: 7.25rem;
-  overflow: hidden;
-  padding: var(--space-1);
+  padding: var(--palette-deck-padding);
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-md);
   background:
@@ -72,37 +75,27 @@
   -webkit-backdrop-filter: var(--glass-blur);
   backdrop-filter: var(--glass-blur);
   box-shadow: var(--glass-shadow);
-  transform: translateY(-50%);
+  transform: translateY(var(--palette-deck-offset));
+  transition: transform var(--duration-fast) var(--ease-out);
   animation: deckIn var(--duration-fast) var(--ease-out);
+  will-change: transform;
 }
 
 .listbox {
-  height: 100%;
-  overflow-y: auto;
-  padding-block: 2.5rem;
+  display: grid;
+  gap: var(--palette-item-gap);
   outline: none;
-  scrollbar-width: none;
-  scroll-snap-type: y mandatory;
-}
-
-.listbox::-webkit-scrollbar {
-  display: none;
 }
 
 .item {
   display: block;
   width: 100%;
-  height: 1.25rem;
+  height: var(--palette-item-height);
   padding: 0.1875rem;
   border: 1px solid transparent;
   border-radius: var(--radius-xs);
   background: transparent;
   cursor: pointer;
-  scroll-snap-align: center;
-}
-
-.item + .item {
-  margin-top: 0.1875rem;
 }
 
 .item:hover,
@@ -120,7 +113,7 @@
 @keyframes deckIn {
   from {
     opacity: 0;
-    transform: translateY(-50%) scale(0.96);
+    transform: translateY(var(--palette-deck-offset)) scale(0.96);
   }
 }
 

@@ -15,31 +15,34 @@ interface PalettePickerProps {
  * Compact palette scrubber for timeline rows.
  *
  * Unlike a general-purpose Select, this intentionally behaves like a deck:
- * hover or wheel expands it, the selected swatch stays centered over the
- * trigger, and leaving collapses the deck back to the selected swatch.
+ * hover or wheel expands it, the selected swatch stays aligned with the
+ * trigger, and the whole deck moves as the selection changes. Leaving
+ * collapses it back to the selected swatch.
  */
 export function PalettePicker(props: PalettePickerProps) {
   const [open, setOpen] = createSignal(false);
   let root!: HTMLDivElement;
-  let listbox: HTMLDivElement | undefined;
+  let deck: HTMLDivElement | undefined;
   let wheelDelta = 0;
 
   const selectedIndex = () => Math.max(0, PALETTE_NAMES.indexOf(props.value));
 
-  const centerSelected = (): void => {
+  const alignSelected = (): void => {
     if (!open()) return;
     queueMicrotask(() => {
-      const box = listbox;
-      const selected = box?.querySelector<HTMLElement>("[aria-selected='true']");
-      if (box === undefined || selected === null || selected === undefined) return;
-      const top = selected.offsetTop - (box.clientHeight - selected.offsetHeight) / 2;
-      box.scrollTo({ top, behavior: "smooth" });
+      const currentDeck = deck;
+      const selected = currentDeck?.querySelector<HTMLElement>("[aria-selected='true']");
+      if (currentDeck === undefined || selected === null || selected === undefined || !open())
+        return;
+      const selectedCenter = selected.offsetTop + selected.offsetHeight / 2;
+      currentDeck.style.setProperty("--palette-deck-offset", `${-selectedCenter}px`);
     });
   };
 
   createEffect(() => {
     props.value;
-    centerSelected();
+    open();
+    alignSelected();
   });
 
   createEffect(() => {
@@ -59,7 +62,7 @@ export function PalettePicker(props: PalettePickerProps) {
     const next = Math.max(0, Math.min(PALETTE_NAMES.length - 1, selectedIndex() + delta));
     choose(PALETTE_NAMES[next]!);
     setOpen(true);
-    centerSelected();
+    alignSelected();
   };
 
   const onWheel = (event: WheelEvent): void => {
@@ -112,7 +115,7 @@ export function PalettePicker(props: PalettePickerProps) {
       class={styles.root}
       onPointerEnter={() => {
         setOpen(true);
-        centerSelected();
+        alignSelected();
       }}
       onPointerLeave={() => {
         wheelDelta = 0;
@@ -129,7 +132,7 @@ export function PalettePicker(props: PalettePickerProps) {
         aria-expanded={open()}
         onClick={() => {
           setOpen(true);
-          centerSelected();
+          alignSelected();
         }}
         onKeyDown={onKeyDown}
       >
@@ -142,13 +145,8 @@ export function PalettePicker(props: PalettePickerProps) {
       </button>
 
       <Show when={open()}>
-        <div class={styles.deck}>
-          <div
-            ref={listbox}
-            class={styles.listbox}
-            role="listbox"
-            aria-label={`${props.label} color maps`}
-          >
+        <div ref={deck} class={styles.deck}>
+          <div class={styles.listbox} role="listbox" aria-label={`${props.label} color maps`}>
             <For each={PALETTE_NAMES}>
               {(palette) => (
                 <button

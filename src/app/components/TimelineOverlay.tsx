@@ -114,7 +114,7 @@ function TimelineRowChrome(props: TimelineRowChromeProps) {
   let header!: HTMLDivElement;
   let tooltip!: HTMLDivElement;
   const key = props.row().key;
-  const label = () => `${props.row().sourceLabel} · ${props.row().symbol}`;
+  const label = () => `${props.row().symbol} · ${props.row().sourceLabel}`;
 
   onMount(() => {
     props.controller.attachRow(key, header, tooltip);
@@ -130,7 +130,11 @@ function TimelineRowChrome(props: TimelineRowChromeProps) {
         title="Drag this heatmap vertically to move through its fixed scale field"
       >
         <span class={styles.rowLabel} title={label()}>
-          {label()}
+          <span class={styles.rowSymbol}>{props.row().symbol}</span>
+          <span class={styles.rowSeparator} aria-hidden="true">
+            ·
+          </span>
+          <span class={styles.rowSource}>{props.row().sourceLabel}</span>
         </span>
         <PalettePicker
           label={label()}

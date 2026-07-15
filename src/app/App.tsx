@@ -96,8 +96,8 @@ export function App() {
     persistence.schedule();
   };
 
-  const syncTimelineRows = (): void => {
-    if (timeline === null) return;
+  const syncTimelineRows = (): TimelineLayout | null => {
+    if (timeline === null) return null;
     const rows: SignalRow[] = charts().map((chart) => {
       const key = chartStateKey(chart);
       const broker = brokers.get(key);
@@ -114,25 +114,61 @@ export function App() {
       };
     });
     timeline.setSignalRows(rows);
+    return timeline.getLayout();
   };
 
-  const removeCharts = (keys: readonly string[]): void => {
-    if (keys.length === 0) return;
-    const removed = charts().filter((chart) => keys.includes(chartStateKey(chart)));
-    if (removed.length === 0) return;
-    const removedKeys = new Set(removed.map(chartStateKey));
-    setCharts((current) => current.filter((chart) => !removedKeys.has(chartStateKey(chart))));
-    for (const key of removedKeys) {
+  const storeTimelineLayout = (layout: TimelineLayout): void => {
+    const rows = new Map(layout.rows.map((row) => [row.id, row]));
+    setNewsHeight(layout.newsHeight);
+    setCharts((current) =>
+      current.map((chart) => {
+        const layoutRow = rows.get(chartStateKey(chart));
+        return layoutRow === undefined
+          ? chart
+          : {
+              ...chart,
+              height: layoutRow.height,
+              verticalOffset: layoutRow.verticalOffset,
+            };
+      }),
+    );
+  };
+
+  const disposeRemovedCharts = (removed: readonly ChartState[]): void => {
+    for (const chart of removed) {
+      const key = chartStateKey(chart);
       brokers.get(key)?.dispose();
       brokers.delete(key);
     }
-    syncTimelineRows();
-    persistence.schedule();
-    const labels = removed.map((chart) => {
-      const sourceLabel = priceSignalSource(chart.sourceId)?.label ?? chart.sourceId;
-      return `${sourceLabel} ${chart.symbol}`;
+  };
+
+  const removedChartLabels = (removed: readonly ChartState[]): string =>
+    removed
+      .map((chart) => {
+        const sourceLabel = priceSignalSource(chart.sourceId)?.label ?? chart.sourceId;
+        return `${chart.symbol} · ${sourceLabel}`;
+      })
+      .join(", ");
+
+  const removeCharts = (keys: readonly string[]): void => {
+    if (keys.length === 0) return;
+    const removedKeys = new Set(keys);
+    let removed: ChartState[] = [];
+    setCharts((current) => {
+      removed = current.filter((chart) => removedKeys.has(chartStateKey(chart)));
+      return removed.length === 0
+        ? current
+        : current.filter((chart) => !removedKeys.has(chartStateKey(chart)));
     });
-    setStatus(`Removed ${labels.join(", ")}`);
+    if (removed.length === 0) return;
+
+    // Detach Timeline subscriptions while their brokers are still alive. The
+    // remaining rows are reconciled by ID, so their demand and cached view stay warm.
+    const fittedLayout = syncTimelineRows();
+    if (fittedLayout !== null) storeTimelineLayout(fittedLayout);
+    disposeRemovedCharts(removed);
+    persistence.schedule();
+    setStatus(`Removed ${removedChartLabels(removed)}`);
   };
 
   const removeChart = (key: string): void => removeCharts([key]);
@@ -196,7 +232,8 @@ export function App() {
     };
     brokers.set(key, broker);
     setCharts((current) => [...current, chart]);
-    syncTimelineRows();
+    const fittedLayout = syncTimelineRows();
+    if (fittedLayout !== null) storeTimelineLayout(fittedLayout);
     if (persist) persistence.schedule();
     setStatus(`Added ${source.label} ${symbol}`);
     return true;
@@ -204,22 +241,41 @@ export function App() {
 
   const applyLayout = (layout: TimelineLayout, collapsedRowIds: readonly string[]): void => {
     const rows = new Map(layout.rows.map((row) => [row.id, row]));
+    const collapsed = new Set(collapsedRowIds);
+    let removed: ChartState[] = [];
+
     setNewsHeight(layout.newsHeight);
-    setCharts((current) =>
-      current.map((chart) => {
-        const layoutRow = rows.get(chartStateKey(chart));
-        return layoutRow === undefined
-          ? chart
-          : {
-              ...chart,
-              height: layoutRow.height,
-              verticalOffset: layoutRow.verticalOffset,
-            };
-      }),
-    );
-    if (collapsedRowIds.length > 0) {
-      removeCharts(collapsedRowIds);
-      return;
+    setCharts((current) => {
+      const next: ChartState[] = [];
+      for (const chart of current) {
+        const key = chartStateKey(chart);
+        const layoutRow = rows.get(key);
+        // A committed zero-height row is invalid even if a pointer-cancellation
+        // path somehow failed to include it in collapsedRowIds.
+        if (collapsed.has(key) || layoutRow?.height === 0) {
+          removed.push(chart);
+          continue;
+        }
+        next.push(
+          layoutRow === undefined
+            ? chart
+            : {
+                ...chart,
+                height: layoutRow.height,
+                verticalOffset: layoutRow.verticalOffset,
+              },
+        );
+      }
+      return next;
+    });
+
+    if (removed.length > 0) {
+      // Reconcile first so removed subscriptions can detach cleanly and active
+      // rows keep their existing subscriptions instead of flashing empty.
+      const fittedLayout = syncTimelineRows();
+      if (fittedLayout !== null) storeTimelineLayout(fittedLayout);
+      disposeRemovedCharts(removed);
+      setStatus(`Removed ${removedChartLabels(removed)}`);
     }
     persistence.schedule();
   };
