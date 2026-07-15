@@ -23,9 +23,12 @@ import {
 } from "../src/data/signal/fetcher.ts";
 import { priceSignalSource } from "../src/data/signal/market/market.ts";
 import { filterMarketSymbols, parseNobitexMarketKey } from "../src/data/signal/market/symbols.ts";
-import { SignalSpanStore } from "../src/data/signal/store.ts";
+import { SignalSegmentStore } from "../src/data/signal/store.ts";
 import { Range } from "../src/engine/range.ts";
 import { fitStackLayout, heatmapScaleWindow } from "../src/engine/gfx/layout.ts";
+import { formatResolution } from "../src/engine/gfx/resolution.ts";
+import { eventIndexAtOrBefore, eventIndexNearPoint } from "../src/engine/hittest.ts";
+import { DataTransform } from "../src/engine/transform.ts";
 import { placeTooltip } from "../src/ui/tooltip.ts";
 import {
   computeCenteredGaussianReference,
@@ -160,6 +163,25 @@ function approx(actual: number, expected: number, tolerance = 1e-12): void {
   }
 }
 
+function heldSegment(
+  rangeStart: number,
+  rangeEnd: number,
+  sampleTime: number,
+  value: number,
+  resolutionMs: number,
+) {
+  return { rangeStart, rangeEnd, sampleTime, value, resolutionMs } as const;
+}
+
+function assertPoint(
+  sample: { readonly t: number; readonly value: number },
+  expectedT: number,
+  expectedValue: number,
+  message: string,
+): void {
+  assert(sample.t === expectedT && sample.value === expectedValue, message);
+}
+
 function count(items: readonly unknown[]): number {
   return items.length;
 }
@@ -222,81 +244,133 @@ test("vertical heatmap pan selects scale-aware sampling density", () => {
   );
 });
 
-test("hover labels flip around their anchor and remain inside the viewport", () => {
-  const nearTopRight = placeTooltip({
-    anchorX: 292,
-    anchorY: 18,
+test("event tooltips prefer the left and remain vertically centered", () => {
+  const left = placeTooltip({
+    anchorX: 220,
+    anchorY: 90,
     width: 120,
     height: 80,
     viewportWidth: 300,
     viewportHeight: 180,
+    gap: 4,
   });
-  assert(nearTopRight.placement === "below-left", "top-right label did not flip both axes");
-  assert(nearTopRight.x >= 8 && nearTopRight.x + 120 <= 292, "label lost its node anchor");
-  assert(nearTopRight.y >= 8 && nearTopRight.y + 80 <= 172, "label escaped vertically");
 
-  const cramped = placeTooltip({
-    anchorX: 50,
-    anchorY: 25,
-    width: 140,
-    height: 90,
-    viewportWidth: 100,
-    viewportHeight: 60,
+  assert(left.placement === "left", "tooltip did not prefer the left side");
+  assert(left.x === 96, "left tooltip x-position was incorrect");
+  assert(left.y === 50, "tooltip was not vertically centered");
+
+  const right = placeTooltip({
+    anchorX: 20,
+    anchorY: 90,
+    width: 120,
+    height: 80,
+    viewportWidth: 300,
+    viewportHeight: 180,
+    gap: 4,
   });
-  assert(cramped.x === 8 && cramped.y === 8, "oversized label was not clamped to the viewport");
+
+  assert(right.placement === "right", "tooltip did not flip near the left edge");
+  assert(right.x === 24, "right tooltip x-position was incorrect");
+  assert(right.y === 50, "flipped tooltip was not vertically centered");
 });
 
-test("price span store returns NaN outside coverage and holds ZOH values", () => {
+test("resolution labels promote large millisecond values to readable units", () => {
+  assert(formatResolution(999) === "999ms", "sub-second resolution lost milliseconds");
+  assert(formatResolution(19_459) === "19.5s", "seconds were not promoted or rounded");
+  assert(formatResolution(90_000) === "1.5m", "minutes were not promoted");
+  assert(formatResolution(5_400_000) === "1.5h", "hours were not promoted");
+  assert(formatResolution(129_600_000) === "1.5d", "days were not promoted");
+});
+
+test("event hover selects the last visible event at or before the pointer", () => {
+  const events = {
+    events: [
+      { t: 10, title: "a", link: "a", summary: "", feedId: "feed" },
+      { t: 30, title: "b", link: "b", summary: "", feedId: "feed" },
+      { t: 70, title: "c", link: "c", summary: "", feedId: "feed" },
+    ],
+  } satisfies { readonly events: readonly NewsEvent[] };
+  const tx = new DataTransform(Range.create(0, 100), Range.create(0, 100), Range.create(0, 40));
+  assert(eventIndexAtOrBefore(events, tx, 5) === null, "hover invented a leading event");
+  assert(eventIndexAtOrBefore(events, tx, 29) === 0, "hover selected a future event");
+  assert(eventIndexAtOrBefore(events, tx, 30) === 1, "hover missed an exact event");
+  assert(eventIndexAtOrBefore(events, tx, 100) === 2, "hover missed the final event");
+  assert(eventIndexNearPoint(events, tx, 31, 20, 20) === 1, "click hit-test missed a marker");
+  assert(
+    eventIndexNearPoint(events, tx, 31, 35, 20) === null,
+    "click hit-test ignored row distance",
+  );
+
+  const coincident = {
+    events: [events.events[0]!, events.events[1]!, { ...events.events[1]!, title: "latest" }],
+  };
+  assert(
+    eventIndexNearPoint(coincident, tx, 30, 20, 20) === 2,
+    "click hit-test did not choose the last coincident event",
+  );
+});
+
+test("signal segment store returns NaN outside coverage and holds ZOH values", () => {
   const evalTime = new Float64Array([0, 10, 15, 20]);
-  const store = new SignalSpanStore();
+  const store = new SignalSegmentStore();
   const empty = store.sample(evalTime, 20);
-  assert(empty.value.every(Number.isNaN), "empty store did not return NaN");
+  assert(empty.every(Number.isNaN), "empty store did not return NaN");
 
   store.insertBatch([
-    {
-      startTime: 5,
-      endTime: 15,
-      startValue: 1,
-      endValue: 2,
-      resolutionMs: 10,
-    },
-    {
-      startTime: 15,
-      endTime: 25,
-      startValue: 2,
-      endValue: 2,
-      resolutionMs: 10,
-    },
+    heldSegment(5, 15, 5, 1, 10),
+    heldSegment(15, 25, 15, 2, 10),
   ]);
-  const sampled = store.sample(evalTime, 20).value;
+  const sampled = store.sample(evalTime, 20);
   assert(Number.isNaN(sampled[0]!), "value before first observation was defined");
   assert(sampled[1] === 1 && sampled[2] === 2 && sampled[3] === 2, "ZOH evaluation is incorrect");
-  assert(store.valueAtOrBefore(4) === null, "predecessor lookup invented a leading value");
-  assert(store.valueAtOrBefore(10) === 1, "predecessor lookup missed an interior value");
-  assert(store.valueAtOrBefore(15) === 2, "predecessor lookup missed a boundary value");
-  assert(store.valueAtOrBefore(30) === 2, "predecessor lookup did not hold the latest value");
+
+  const selected = { t: Number.NaN, value: Number.NaN };
+  assert(!store.readPointAtOrBefore(4, selected), "predecessor lookup invented a leading value");
+  assert(store.readPointAtOrBefore(10, selected), "predecessor lookup missed an interior value");
+  assertPoint(selected, 5, 1, "interior point lost its observation");
+  assert(store.readPointAtOrBefore(15, selected), "predecessor lookup missed a boundary value");
+  assertPoint(selected, 15, 2, "boundary point selected the prior segment");
+  assert(store.readPointAtOrBefore(30, selected), "held point lookup failed");
+  assertPoint(selected, 15, 2, "held value lost its observation timestamp");
 });
 
-test("price predecessor lookup holds across uncovered gaps", () => {
-  const store = new SignalSpanStore();
+test("segment coverage is half-open while predecessor lookup keeps the observation", () => {
+  const store = new SignalSegmentStore();
+  store.insertBatch([heldSegment(5, 15, 5, 1, 10)]);
+  assert(
+    Number.isNaN(store.sample(new Float64Array([15]), 15)[0]!),
+    "segment end leaked into coverage",
+  );
+
+  const selected = { t: Number.NaN, value: Number.NaN };
+  assert(store.readPointAtOrBefore(15, selected), "predecessor lookup lost the final observation");
+  assertPoint(selected, 5, 1, "predecessor lookup changed the final observation");
+});
+
+test("signal predecessor lookup holds across uncovered gaps", () => {
+  const store = new SignalSegmentStore();
   store.insertBatch([
-    {
-      startTime: 10,
-      endTime: 20,
-      startValue: 1,
-      endValue: 2,
-      resolutionMs: 10,
-    },
-    {
-      startTime: 40,
-      endTime: 50,
-      startValue: 3,
-      endValue: 4,
-      resolutionMs: 10,
-    },
+    heldSegment(10, 20, 10, 1, 10),
+    heldSegment(20, 30, 20, 2, 10),
+    heldSegment(40, 50, 40, 3, 10),
+    heldSegment(50, 60, 50, 4, 10),
   ]);
-  assert(store.valueAtOrBefore(30) === 2, "gap lookup did not use the preceding observation");
-  assert(store.valueAtOrBefore(40) === 3, "new observation did not take effect at its timestamp");
+  const selected = { t: Number.NaN, value: Number.NaN };
+  assert(store.readPointAtOrBefore(35, selected), "gap lookup failed");
+  assertPoint(selected, 20, 2, "gap lookup did not use the preceding observation");
+  assert(store.readPointAtOrBefore(40, selected), "new observation lookup failed");
+  assertPoint(selected, 40, 3, "new observation did not take effect at its timestamp");
+});
+
+test("equal-valued observations retain their distinct timestamps", () => {
+  const store = new SignalSegmentStore();
+  store.insertBatch([
+    heldSegment(0, 10, 0, 1, 10),
+    heldSegment(10, 20, 10, 1, 10),
+  ]);
+  const selected = { t: Number.NaN, value: Number.NaN };
+  assert(store.readPointAtOrBefore(15, selected), "equal-value point lookup failed");
+  assert(selected.t === 10, "equal values erased the newer observation time");
 });
 
 test("broker read is side-effect-free and viewport subscriptions drive fetching", async () => {
@@ -448,45 +522,24 @@ test("future coverage is pending or watching without invalidating cached samples
   broker.dispose();
 });
 
-test("an empty price span store has no invalid cached range", () => {
-  const store = new SignalSpanStore();
+test("an empty signal segment store has no invalid cached range", () => {
+  const store = new SignalSegmentStore();
   assert(store.timeRange() === null, "empty store exposed a cached range");
 });
 
-test("finer price spans replace coarse history and reject late coarse overwrites", () => {
-  const store = new SignalSpanStore();
+test("finer signal segments replace coarse history and reject late coarse overwrites", () => {
+  const store = new SignalSegmentStore();
+  store.insertBatch([heldSegment(0, 20, 0, 1, 20)]);
   store.insertBatch([
-    {
-      startTime: 0,
-      endTime: 20,
-      startValue: 1,
-      endValue: 2,
-      resolutionMs: 20,
-    },
+    heldSegment(5, 15, 5, 10, 10),
+    heldSegment(15, 25, 15, 11, 10),
   ]);
-  store.insertBatch([
-    {
-      startTime: 5,
-      endTime: 15,
-      startValue: 10,
-      endValue: 11,
-      resolutionMs: 10,
-    },
-  ]);
-  store.insertBatch([
-    {
-      startTime: 0,
-      endTime: 20,
-      startValue: -1,
-      endValue: -2,
-      resolutionMs: 30,
-    },
-  ]);
-  const sampled = store.sample(new Float64Array([2, 7, 15, 18]), 20).value;
+  store.insertBatch([heldSegment(0, 20, 0, -1, 30)]);
+  const sampled = store.sample(new Float64Array([2, 7, 15, 18, 24]), 25);
   assert(sampled[0] === 1, "late coarse response overwrote leading history");
   assert(sampled[1] === 10, "fine history was not selected");
-  assert(sampled[2] === 11, "fine endpoint did not own the shared boundary");
-  assert(sampled[3] === 1, "late coarse response overwrote trailing history");
+  assert(sampled[2] === 11, "new fine observation did not own its boundary");
+  assert(sampled[3] === 11 && sampled[4] === 11, "fine final observation was not held");
 });
 
 test("centered Gaussian is symmetric and crop invariant away from boundaries", () => {
@@ -840,23 +893,28 @@ test("returned future points are discarded while the last valid sample is held",
     "presented coverage entered the future",
   );
   assert(Number.isNaN(result.value[2]!), "future value was rendered");
-  approx(Math.exp(broker.valueAtOrBefore(10_000)!), 11, 1e-12);
+  const latest = { t: Number.NaN, value: Number.NaN };
+  assert(broker.readPointAtOrBefore(10_000, latest), "latest cached observation was missing");
+  assert(latest.t === 5_000, "future clamp selected the wrong timestamp");
+  approx(Math.exp(latest.value), 11, 1e-12);
   assert(
     warnings.some((message) => message.includes("10000")),
     "future API point was silent",
   );
 });
 
-test("large span stores expose ready coverage without a redundant summary API", () => {
-  const store = new SignalSpanStore();
-  const spans = Array.from({ length: 2_000 }, (_, index) => ({
-    startTime: index * 1_000,
-    endTime: (index + 1) * 1_000,
-    startValue: index,
-    endValue: index + 1,
-    resolutionMs: index === 1_000 ? 5_000 : 1_000,
-  }));
-  store.insertBatch(spans);
+test("large segment stores expose ready coverage without a redundant summary API", () => {
+  const store = new SignalSegmentStore();
+  const segments = Array.from({ length: 2_000 }, (_, index) =>
+    heldSegment(
+      index * 1_000,
+      (index + 1) * 1_000,
+      index * 1_000,
+      index,
+      index === 1_000 ? 5_000 : 1_000,
+    ),
+  );
+  store.insertBatch(segments);
   const coarse = new RangeSet();
   store.addReadyBlockers(coarse, 5_000, Range.create(0, 2_000_000));
   assert(coarse.covers(Range.create(0, 2_000_000)), "coarse coverage was incomplete");
@@ -866,18 +924,13 @@ test("large span stores expose ready coverage without a redundant summary API", 
 });
 
 test("ready coverage isolates gaps at leaf-block boundaries", () => {
-  const store = new SignalSpanStore();
-  const spans = Array.from({ length: 1_024 }, (_, index) => {
+  const store = new SignalSegmentStore();
+  const segments = Array.from({ length: 1_024 }, (_, index) => {
     const gap = index >= 512 ? 10_000 : 0;
-    return {
-      startTime: index * 1_000 + gap,
-      endTime: (index + 1) * 1_000 + gap,
-      startValue: index,
-      endValue: index + 1,
-      resolutionMs: 1_000,
-    };
+    const start = index * 1_000 + gap;
+    return heldSegment(start, start + 1_000, start, index, 1_000);
   });
-  store.insertBatch(spans);
+  store.insertBatch(segments);
   const ready = new RangeSet();
   store.addReadyBlockers(ready, 1_000, Range.create(0, 1_034_000));
   assert(ready.covers(Range.create(522_000, 1_034_000)), "post-gap coverage was rejected");

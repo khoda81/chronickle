@@ -32,6 +32,7 @@
 import type { NewsEvent, RssFeed } from "../../domain.ts";
 import { Range } from "../../engine/range.ts";
 import { FeedWalker, type FeedWalkerOptions, type WalkOutcome } from "./walker.ts";
+import { lowerBoundTime, upperBoundTime } from "../../timeSearch.ts";
 
 /** Algebraic query status — mirrors the price broker's contract. */
 export type EventQueryStatus = "complete" | "partial" | "empty";
@@ -321,29 +322,7 @@ function keyOf(e: NewsEvent): string {
  */
 function sliceByTime(events: readonly NewsEvent[], tMin: number, tMax: number): NewsEvent[] {
   if (events.length === 0) return [];
-  const lo = lowerBound(events, tMin);
-  const hi = upperBound(events, tMax, lo);
+  const lo = lowerBoundTime(events, tMin);
+  const hi = upperBoundTime(events, tMax, lo);
   return events.slice(lo, hi);
-}
-
-function lowerBound(xs: readonly { readonly t: number }[], t: number): number {
-  let lo = 0;
-  let hi = xs.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (xs[mid]!.t < t) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-}
-
-function upperBound(xs: readonly { readonly t: number }[], t: number, from: number): number {
-  let lo = from;
-  let hi = xs.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (xs[mid]!.t <= t) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
 }

@@ -81,7 +81,7 @@ export class RangeSet {
 
     // Coverage producers sweep forward in time. Keep that overwhelmingly
     // common path allocation-free and O(1), rather than rebuilding/sorting the
-    // complete set for every accepted price span.
+    // complete set for every accepted signal segment.
     if (last === undefined) {
       intervals.push(r);
       return;

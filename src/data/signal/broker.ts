@@ -3,9 +3,14 @@
 import { Range } from "../../engine/range.ts";
 import { RangeSet } from "../rangeSet.ts";
 import { SettledCoverageIndex, type CoverageSegment } from "./coverage.ts";
-import type { AcquisitionActivity, AdapterDelivery as SignalDelivery, AdapterSession, SignalAdapter, } from "./fetcher.ts";
-import { normalizeSamples, type Sample } from "./sample.ts";
-import { SignalSpanStore, type SignalSpan } from "./store.ts";
+import type {
+  AcquisitionActivity,
+  AdapterDelivery as SignalDelivery,
+  AdapterSession,
+  SignalAdapter,
+} from "./fetcher.ts";
+import { normalizeSamples, type MutableSample, type Sample } from "./sample.ts";
+import { SignalSegmentStore, type HeldSignalSegment } from "./store.ts";
 
 export interface SignalView {
   readonly value: Float64Array;
@@ -45,7 +50,7 @@ interface DemandSubscription {
 }
 
 export class Broker {
-  private readonly store = new SignalSpanStore();
+  private readonly store = new SignalSegmentStore();
   private readonly fetchedCoverage = new SettledCoverageIndex();
   private readonly demandSubscriptions = new Set<DemandSubscription>();
   private readonly adapterSession: AdapterSession;
@@ -104,9 +109,8 @@ export class Broker {
     const queryRange = Range.create(evalTime[0]!, evalTime[evalTime.length - 1]!);
     const wallNow = this.now();
     const historicalRange = clampToNow(queryRange, wallNow);
-    const sampled = this.store.sample(evalTime, wallNow, this.valueBuffer);
-    this.valueBuffer = sampled.value;
-    const value = sampled.value;
+    const value = this.store.sample(evalTime, wallNow, this.valueBuffer);
+    this.valueBuffer = value;
 
     const readyCoverage = new RangeSet();
     if (historicalRange !== null) {
@@ -178,12 +182,9 @@ export class Broker {
     return this.store.timeRange();
   }
 
-  /** Latest reconstructed signal value at or before `time`, clamped to now. */
-  valueAtOrBefore(time: number): number | null {
-    if (!Number.isFinite(time)) {
-      throw new Error(`Broker.valueAtOrBefore: invalid time ${time}`);
-    }
-    return this.store.valueAtOrBefore(Math.min(time, this.now()));
+  /** Write the latest selected observation at or before `time`, clamped to now. */
+  readPointAtOrBefore(time: number, out: MutableSample): boolean {
+    return this.store.readPointAtOrBefore(Math.min(time, this.now()), out);
   }
 
   private syncAdapterDemands(): void {
@@ -218,18 +219,18 @@ export class Broker {
   }
 
   private ingestObserved(samples: readonly Sample[], nominalResolutionMs: number): boolean {
-    const spans: SignalSpan[] = [];
-    for (let index = 1; index < samples.length; index++) {
-      const previous = samples[index - 1]!;
-      const current = samples[index]!;
-      const observedDelta = current.t - previous.t;
-      if (!(observedDelta > 0)) continue;
+    const segments: HeldSignalSegment[] = [];
+    for (let index = 0; index < samples.length; index++) {
+      const sample = samples[index]!;
+      const next = samples[index + 1];
+      const rangeEnd = next?.t ?? sample.t + nominalResolutionMs;
+      if (!(sample.t < rangeEnd)) continue;
 
-      spans.push({
-        startTime: previous.t,
-        endTime: current.t,
-        startValue: previous.value,
-        endValue: current.value,
+      segments.push({
+        rangeStart: sample.t,
+        rangeEnd,
+        sampleTime: sample.t,
+        value: sample.value,
         // Quality describes the cadence that was searched, not the wall-clock
         // distance to the next returned candle. Otherwise every overnight or
         // weekend closure becomes a fake coarse interval and an intermediate
@@ -238,21 +239,7 @@ export class Broker {
       });
     }
 
-    const last = samples[samples.length - 1];
-    if (last !== undefined) {
-      const expectedUntil = last.t + nominalResolutionMs;
-      if (last.t < expectedUntil) {
-        spans.push({
-          startTime: last.t,
-          endTime: expectedUntil,
-          startValue: last.value,
-          endValue: last.value,
-          resolutionMs: nominalResolutionMs,
-        });
-      }
-    }
-
-    return this.store.insertBatch(spans);
+    return this.store.insertBatch(segments);
   }
 
   private readySegments(evalTime: Float64Array, wallNow: number): CoverageSegment[] {

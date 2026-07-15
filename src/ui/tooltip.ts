@@ -1,7 +1,7 @@
 import type { RssFeed } from "../domain.ts";
 import type { HoverInfo } from "../engine/timeline.ts";
 
-export type TooltipPlacement = "above-right" | "above-left" | "below-right" | "below-left";
+export type TooltipPlacement = "left" | "right";
 
 export interface TooltipPosition {
   readonly x: number;
@@ -25,42 +25,31 @@ export interface TooltipPlacementInput {
  * The preferred position matches the old UI (above-right), then flips before clamping.
  */
 export function placeTooltip(input: TooltipPlacementInput): TooltipPosition {
-  const gap = input.gap ?? 12;
   const margin = input.margin ?? 8;
+
   const maxX = Math.max(margin, input.viewportWidth - margin - input.width);
   const maxY = Math.max(margin, input.viewportHeight - margin - input.height);
 
-  const rightFits = input.anchorX + gap + input.width <= input.viewportWidth - margin;
-  const leftFits = input.anchorX - gap - input.width >= margin;
-  const horizontal: "right" | "left" = rightFits
-    ? "right"
-    : leftFits
-      ? "left"
-      : input.anchorX <= input.viewportWidth / 2
-        ? "right"
-        : "left";
+  const leftX = input.anchorX - input.width;
+  const rightX = input.anchorX;
 
-  const aboveFits = input.anchorY - gap - input.height >= margin;
-  const belowFits = input.anchorY + gap + input.height <= input.viewportHeight - margin;
-  const vertical: "above" | "below" = aboveFits
-    ? "above"
-    : belowFits
-      ? "below"
-      : input.anchorY >= input.viewportHeight / 2
-        ? "above"
-        : "below";
+  const leftFits = leftX >= margin;
+  const rightFits = rightX + input.width <= input.viewportWidth - margin;
 
-  const preferredX =
-    horizontal === "right" ? input.anchorX + gap : input.anchorX - gap - input.width;
-  const preferredY =
-    vertical === "above" ? input.anchorY - gap - input.height : input.anchorY + gap;
+  // Time flows leftward from the event, so left is always preferred.
+  // Right is only used when left does not fit and right does.
+  const placement: TooltipPlacement = leftFits || !rightFits ? "left" : "right";
+
+  const preferredX = placement === "left" ? leftX : rightX;
+  const preferredY = input.anchorY - input.height / 2;
 
   return {
     x: clamp(preferredX, margin, maxX),
-    y: clamp(preferredY, margin, maxY),
-    placement: `${vertical}-${horizontal}`,
+    y: clamp(preferredY, 3 * margin + 15, maxY),
+    placement,
   };
 }
+
 
 /** DOM owner for the event hover label. Content changes are rare; positioning is immediate. */
 export class EventTooltip {
@@ -76,7 +65,7 @@ export class EventTooltip {
   private measuredViewportWidth = Number.NaN;
   private measuredViewportHeight = Number.NaN;
 
-  constructor(private readonly element: HTMLDivElement) {}
+  constructor(private readonly element: HTMLDivElement) { }
 
   show(event: HoverInfo, feed: RssFeed): void {
     const contentChanged =
@@ -101,7 +90,6 @@ export class EventTooltip {
       this.measuredHeight = 0;
     }
 
-    this.element.classList.remove("hidden");
     if (
       this.measuredWidth === 0 ||
       this.measuredHeight === 0 ||
@@ -122,9 +110,14 @@ export class EventTooltip {
       height: this.measuredHeight,
       viewportWidth: event.viewportWidth,
       viewportHeight: event.viewportHeight,
+      gap: 4,
     });
+    const wasHidden = this.element.classList.contains("hidden");
     this.element.dataset.placement = position.placement;
-    this.element.style.transform = `translate3d(${position.x}px, ${position.y}px, 0)`;
+    this.element.style.setProperty("--tooltip-x", `${position.x}px`);
+    this.element.style.setProperty("--tooltip-y", `${position.y}px`);
+    if (wasHidden) void this.element.offsetWidth;
+    this.element.classList.remove("hidden");
   }
 
   hide(): void {
@@ -133,15 +126,10 @@ export class EventTooltip {
 
   private renderContent(event: HoverInfo, feed: RssFeed): void {
     this.element.replaceChildren();
+    this.element.style.setProperty("--outlet-color", feed.color);
     const source = document.createElement("span");
     source.className = "tooltip-source";
-    const swatch = document.createElement("span");
-    swatch.className = "tooltip-swatch";
-    swatch.style.background = feed.color;
-    source.append(
-      swatch,
-      document.createTextNode(`${feed.source} · ${new Date(event.t).toLocaleString()}`),
-    );
+    source.textContent = `${feed.source} · ${new Date(event.t).toLocaleString()}`;
 
     const link = document.createElement("a");
     link.className = "tooltip-link";

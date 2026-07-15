@@ -60,7 +60,6 @@ const DEFAULT_FEEDS: readonly RssFeed[] = [
 
 interface AppElements {
   readonly status: HTMLDivElement;
-  readonly reload: HTMLButtonElement;
   readonly wavelet: HTMLSelectElement;
   readonly source: HTMLSelectElement;
   readonly symbolPicker: HTMLDivElement;
@@ -114,9 +113,7 @@ function buildApp(): AppElements {
     option.textContent = entry.label;
     wavelet.append(option);
   }
-  const reload = el<HTMLButtonElement>("button", "reload");
-  reload.textContent = "Reload data";
-  header.append(title, github, wavelet, reload);
+  header.append(title, github, wavelet);
 
   const marketControls = el<HTMLDivElement>("div", "market-controls");
   const source = el<HTMLSelectElement>("select", "market-source");
@@ -168,7 +165,6 @@ function buildApp(): AppElements {
   app.append(header, dataControls, feedList, wrap, status);
   return {
     status,
-    reload,
     wavelet,
     source,
     symbolPicker,
@@ -221,6 +217,16 @@ function main(): void {
         sharedRange = Range.create(viewport.min, viewport.max);
         saveUiState({ viewport, waveletMode });
       },
+      onReload: () => {
+        eventBroker.clearCache();
+        for (const chart of charts) chart.broker.clearCache();
+        timeline.refreshEvents();
+        timeline.reqDraw();
+        setStatus(
+          app.status,
+          `Cleared signal and event caches; reloading ${charts.length} market row(s)…`,
+        );
+      },
     },
   });
   timeline.setWaveletMode(waveletMode);
@@ -240,7 +246,7 @@ function main(): void {
       id: chart.key,
       label: `${chart.sourceLabel} · ${chart.symbol}`,
       read: (request) => chart.broker.read(request),
-      readValueAt: (time) => chart.broker.valueAtOrBefore(time),
+      readSampleAt: (time, out) => chart.broker.readPointAtOrBefore(time, out),
       subscribe: (demand, onChange) => chart.broker.subscribe(demand, onChange),
       palette: chart.palette,
       verticalOffset: chart.verticalOffset,
@@ -561,16 +567,6 @@ function main(): void {
       event.preventDefault();
       void addFeedFromInput();
     }
-  });
-  app.reload.addEventListener("click", () => {
-    eventBroker.clearCache();
-    for (const chart of charts) chart.broker.clearCache();
-    timeline.refreshEvents();
-    timeline.reqDraw();
-    setStatus(
-      app.status,
-      `Cleared price and event caches; reloading ${charts.length} market row(s)…`,
-    );
   });
   app.wavelet.addEventListener("change", () => {
     waveletMode = app.wavelet.value as WaveletMode;

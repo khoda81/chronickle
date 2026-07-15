@@ -4,6 +4,12 @@ export interface Sample {
   readonly value: number;
 }
 
+/** Reusable output buffer for allocation-free predecessor lookups. */
+export interface MutableSample {
+  t: number;
+  value: number;
+}
+
 /**
  * Validate, sort, and deduplicate samples at the acquisition boundary.
  * Duplicate timestamps use last-write-wins semantics.

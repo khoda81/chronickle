@@ -7,14 +7,14 @@ prices and converts them to log-price samples before crossing this boundary.
 
 ## Roles
 
-- `Broker` owns subscriptions, cached reconstruction spans, settled-search
+- `Broker` owns subscriptions, cached reconstruction segments, settled-search
   diagnostics, and pure reads for the renderer.
 - `SignalAdapter` owns acquisition policy: native sample-period selection,
   request expansion, deduplication, cancellation, retry/backoff, and live
   transport lifetime.
 - `RangeLoader` is the adapter's low-level range fetch operation. It knows the
   exchange/API wire format but not the broker or renderer.
-- `SignalSpanStore` retains the finest reconstruction evidence for each cached
+- `SignalSegmentStore` retains the finest reconstruction evidence for each cached
   interval and evaluates the signal on the renderer's time grid.
 
 ## Core contracts
@@ -23,8 +23,9 @@ prices and converts them to log-price samples before crossing this boundary.
    is epoch milliseconds. A batch is normalized to strictly increasing `t`;
    duplicate timestamps are last-write-wins.
 2. Samples say nothing by themselves about unobserved instants. The current
-   renderer uses zero-order-hold reconstruction. `SignalSpan` is that derived
-   reconstruction plus source cadence, not a claim of continuous observation.
+   renderer uses zero-order-hold reconstruction. `HeldSignalSegment` is that
+   derived reconstruction: one observation held over a half-open range plus its
+   source cadence, not a claim of continuous observation.
 3. Smaller sample periods are finer. Fine cached or settled evidence satisfies
    a coarser demand; coarse evidence never satisfies a finer demand.
 4. All coverage ranges are half-open `[min, max)`. Touching ranges may merge;

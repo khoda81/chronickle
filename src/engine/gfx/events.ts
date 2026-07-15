@@ -3,7 +3,7 @@
  *
  * Draws news-event nodes as dots on the event row, culling to the visible time
  * window. Each dot is colored by its feed's identity color (resolved via the
- * `colorOf` callback); hover styling overrides with a neutral highlight.
+ * `colorOf` callback); hover grows the node and adds a pale focus ring.
  */
 
 import type { EventSet } from "../../domain.ts";
@@ -11,7 +11,6 @@ import type { Frame } from "./context.ts";
 
 const RADIUS = 5;
 const HOVER_RADIUS = 8;
-const NODE_FILL_HOVER = "#ffffff";
 const HOVER_STROKE_WIDTH = 2;
 
 export interface EventLayer {
@@ -50,15 +49,15 @@ class EventsImpl implements EventLayer {
       const e = events.events[i]!;
       if (!tx.containsTime(e.t)) continue;
       const isHover = i === hovered;
-      const fill = isHover ? NODE_FILL_HOVER : colorOf(e.feedId);
+      const fill = colorOf(e.feedId);
       frame.dotAt(
         e.t,
         y,
         isHover ? HOVER_RADIUS : RADIUS,
         fill,
-        // Hover gets a stroke in the feed's own color so the highlight still
-        // encodes identity; non-hover dots are strokeless for speed.
-        isHover ? colorOf(e.feedId) : undefined,
+        // The DOM tooltip redraws this outlet-colored node at the card origin.
+        // A pale ring keeps the canvas marker legible during the transition.
+        isHover ? "rgba(255,255,255,0.9)" : undefined,
         isHover ? HOVER_STROKE_WIDTH : undefined,
       );
     }

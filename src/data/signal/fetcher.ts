@@ -211,22 +211,26 @@ export function createPollingSignalSource(fetcher: RangeLoader): SignalAdapter {
         return plans.find((plan) => includes(plan.range, wallNow)) ?? null;
       };
 
+      const createLiveLease = (plan: AdapterPlan, wallNow: number): LiveLease => {
+        const cursorMs = Math.max(plan.range.min, wallNow - 2 * plan.resolutionMs);
+        return {
+          plan,
+          cursorMs,
+          nextAtMs: wallNow,
+          retainedUntilMs: Number.POSITIVE_INFINITY,
+          statusRange: Range.create(
+            Math.min(cursorMs, wallNow - plan.resolutionMs),
+            wallNow,
+          ),
+        };
+      };
+
       const updateLiveLease = (plans: readonly AdapterPlan[]): void => {
         const wallNow = now();
         const desired = desiredLivePlan(plans);
         if (desired !== null) {
           if (live === null || live.plan.resolutionMs > desired.resolutionMs) {
-            const cursorMs = Math.max(desired.range.min, wallNow - 2 * desired.resolutionMs);
-            live = {
-              plan: desired,
-              cursorMs,
-              nextAtMs: wallNow,
-              retainedUntilMs: Number.POSITIVE_INFINITY,
-              statusRange: Range.create(
-                Math.min(cursorMs, wallNow - desired.resolutionMs),
-                wallNow,
-              ),
-            };
+            live = createLiveLease(desired, wallNow);
           } else if (live.plan.resolutionMs === desired.resolutionMs) {
             live.plan = {
               ...live.plan,
@@ -239,17 +243,7 @@ export function createPollingSignalSource(fetcher: RangeLoader): SignalAdapter {
                 wallNow + (fetcher.liveRetentionMs ?? DEFAULT_LIVE_RETENTION_MS);
             }
             if (wallNow >= live.retainedUntilMs) {
-              const cursorMs = Math.max(desired.range.min, wallNow - 2 * desired.resolutionMs);
-              live = {
-                plan: desired,
-                cursorMs,
-                nextAtMs: wallNow,
-                retainedUntilMs: Number.POSITIVE_INFINITY,
-                statusRange: Range.create(
-                  Math.min(cursorMs, wallNow - desired.resolutionMs),
-                  wallNow,
-                ),
-              };
+              live = createLiveLease(desired, wallNow);
             } else {
               live.plan = {
                 ...live.plan,
