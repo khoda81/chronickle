@@ -2,6 +2,7 @@ import { Show, createEffect, onCleanup, onMount } from "solid-js";
 import type { RssFeed } from "../../domain.ts";
 import type { HoverInfo } from "../../engine/timeline.ts";
 import type { TimelineOverlayController } from "../timeline/TimelineOverlayController.ts";
+import styles from "./EventTooltip.module.css";
 
 export interface EventTooltipModel {
   readonly event: HoverInfo;
@@ -29,8 +30,8 @@ export function EventTooltip(props: EventTooltipProps) {
   return (
     <div
       ref={element}
-      class="tooltip"
-      classList={{ hidden: props.value === null }}
+      class={styles.tooltip}
+      classList={{ [styles.hidden!]: props.value === null }}
       style={{
         "--outlet-color": props.value?.feed.color ?? "rgba(148, 163, 184, 0.9)",
       }}
@@ -38,11 +39,11 @@ export function EventTooltip(props: EventTooltipProps) {
       <Show when={props.value}>
         {(value) => (
           <>
-            <span class="tooltip-source">
+            <span class={styles.source}>
               {value().feed.source} · {new Date(value().event.t).toLocaleString()}
             </span>
             <a
-              class="tooltip-link"
+              class={styles.link}
               href={value().event.link}
               target="_blank"
               rel="noopener noreferrer"
@@ -50,7 +51,7 @@ export function EventTooltip(props: EventTooltipProps) {
               {value().event.title}
             </a>
             <Show when={value().event.summary.length > 0}>
-              <p class="tooltip-summary">{value().event.summary}</p>
+              <p class={styles.summary}>{value().event.summary}</p>
             </Show>
           </>
         )}

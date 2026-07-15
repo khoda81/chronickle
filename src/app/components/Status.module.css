@@ -1,0 +1,10 @@
+.status {
+  min-height: 1em;
+  color: var(--color-muted);
+  font-family: var(--font-data);
+  font-size: var(--text-sm);
+}
+
+.error {
+  color: var(--color-error);
+}

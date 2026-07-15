@@ -17,7 +17,7 @@
  *    excluded from fetching/rendering via `active()`.
  *
  * Persistence: the registry serializes to `localStorage` under
- * `STORAGE_KEY`. The seed list (application defaults, owned by `main.ts`)
+ * `STORAGE_KEY`. The seed list (application defaults, owned by `app/defaultFeeds.ts`)
  * is used only when storage is empty or absent. All feeds (including
  * defaults) are removable and the full list is persisted.
  */
@@ -62,7 +62,7 @@ export class FeedRegistry {
   private constructor() {}
 
   /**
-   * Seed a registry from an explicit default feed list (owned by `main.ts`).
+   * Seed a registry from an explicit default feed list (owned by `app/defaultFeeds.ts`).
    * The registry itself holds no default policy.
    */
   static withDefaults(seed: readonly RssFeed[]): FeedRegistry {

@@ -1,43 +1,30 @@
-import { For, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { Combobox } from "@kobalte/core/combobox";
+import { ChevronDown } from "lucide-solid";
+import { createEffect, createMemo, createSignal, on, Show } from "solid-js";
 import {
   PRICE_SIGNAL_SOURCES,
   priceSignalSource,
   type PriceSignalSourceId,
 } from "../../data/signal/market/market.ts";
 import { filterMarketSymbols, type MarketSymbol } from "../../data/signal/market/symbols.ts";
+import controlStyles from "./ui/Control.module.css";
+import { SelectField, type SelectOption } from "./ui/SelectField.tsx";
+import styles from "./MarketControls.module.css";
 
 interface MarketControlsProps {
   readonly onAdd: (sourceId: PriceSignalSourceId, symbol: string) => boolean;
   readonly onLoadError: (message: string) => void;
 }
 
+const SOURCE_OPTIONS: readonly SelectOption<PriceSignalSourceId>[] = PRICE_SIGNAL_SOURCES.map(
+  (source) => ({ value: source.id, label: source.label }),
+);
+
 export function MarketControls(props: MarketControlsProps) {
   const initialSource = PRICE_SIGNAL_SOURCES[0]!;
   const [sourceId, setSourceId] = createSignal<PriceSignalSourceId>(initialSource.id);
-  const [symbol, setSymbol] = createSignal(initialSource.examples[0]?.symbol ?? "");
   const [options, setOptions] = createSignal<readonly MarketSymbol[]>(initialSource.examples);
-  const [open, setOpen] = createSignal(false);
-  const [highlighted, setHighlighted] = createSignal(-1);
-  let picker!: HTMLDivElement;
-  let input!: HTMLInputElement;
   let loadGeneration = 0;
-
-  const matches = createMemo(() => filterMarketSymbols(options(), symbol()));
-
-  const close = (): void => {
-    setOpen(false);
-    setHighlighted(-1);
-  };
-
-  const select = (option: MarketSymbol): void => {
-    setSymbol(option.symbol);
-    close();
-    input.focus();
-  };
-
-  const add = (): void => {
-    if (props.onAdd(sourceId(), symbol())) input.select();
-  };
 
   createEffect(
     on(sourceId, (nextSourceId) => {
@@ -45,8 +32,6 @@ export function MarketControls(props: MarketControlsProps) {
       if (source === null) return;
       const generation = ++loadGeneration;
       setOptions(source.examples);
-      setHighlighted(-1);
-      setSymbol(source.examples[0]?.symbol ?? "");
       void source
         .loadSymbols()
         .then((loaded) => {
@@ -65,132 +50,127 @@ export function MarketControls(props: MarketControlsProps) {
     }),
   );
 
-  onMount(() => {
-    const onDocumentPointerDown = (event: PointerEvent): void => {
-      if (!picker.contains(event.target as Node)) close();
-    };
-    document.addEventListener("pointerdown", onDocumentPointerDown);
-    onCleanup(() => document.removeEventListener("pointerdown", onDocumentPointerDown));
-  });
+  return (
+    <section class={styles.controls} aria-labelledby="market-controls-label">
+      <span id="market-controls-label" class={controlStyles.sectionLabel}>
+        Charts
+      </span>
+      <SelectField
+        ariaLabel="Market source"
+        value={sourceId()}
+        options={SOURCE_OPTIONS}
+        triggerClass={styles.sourceTrigger}
+        onChange={setSourceId}
+      />
+      <Show when={priceSignalSource(sourceId())} keyed>
+        {(source) => (
+          <SymbolCombobox
+            sourceLabel={source.label}
+            initialSymbol={source.examples[0]?.symbol ?? ""}
+            options={options()}
+            onAdd={(symbol) => props.onAdd(source.id, symbol)}
+          />
+        )}
+      </Show>
+    </section>
+  );
+}
+
+interface SymbolComboboxProps {
+  readonly sourceLabel: string;
+  readonly initialSymbol: string;
+  readonly options: readonly MarketSymbol[];
+  readonly onAdd: (symbol: string) => boolean;
+}
+
+function SymbolCombobox(props: SymbolComboboxProps) {
+  const initialOption = () =>
+    props.options.find((option) => option.symbol === props.initialSymbol) ??
+    ({ symbol: props.initialSymbol, label: props.initialSymbol } satisfies MarketSymbol);
+  const [symbol, setSymbol] = createSignal(props.initialSymbol);
+  const [open, setOpen] = createSignal(false);
+  const matches = createMemo(() => filterMarketSymbols(props.options, symbol()));
+  let input!: HTMLInputElement;
+
+  const add = (): void => {
+    if (props.onAdd(symbol())) input.select();
+  };
 
   return (
-    <div class="market-controls">
-      <select
-        class="market-source"
-        value={sourceId()}
-        onChange={(event) => {
-          setSourceId(event.currentTarget.value as PriceSignalSourceId);
-          close();
+    <form
+      class={styles.symbolForm}
+      onSubmit={(event) => {
+        event.preventDefault();
+        add();
+      }}
+    >
+      <Combobox<MarketSymbol>
+        class={styles.symbolRoot}
+        open={open()}
+        onOpenChange={setOpen}
+        options={[...props.options]}
+        defaultValue={initialOption()}
+        optionValue="symbol"
+        optionLabel="symbol"
+        optionTextValue={(option) => `${option.symbol} ${option.label}`}
+        defaultFilter={(option, inputValue) => filterMarketSymbols([option], inputValue).length > 0}
+        onInputChange={setSymbol}
+        onChange={(option) => {
+          if (option !== null) setSymbol(option.symbol);
         }}
+        triggerMode="focus"
+        allowsEmptyCollection
+        noResetInputOnBlur
+        gutter={6}
+        sameWidth={false}
+        fitViewport
+        itemComponent={(itemProps) => (
+          <Combobox.Item item={itemProps.item} class={styles.symbolItem}>
+            <Combobox.ItemLabel class={styles.symbolTicker}>
+              {itemProps.item.rawValue.symbol}
+            </Combobox.ItemLabel>
+            <Combobox.ItemDescription class={styles.symbolLabel}>
+              {itemProps.item.rawValue.label}
+            </Combobox.ItemDescription>
+          </Combobox.Item>
+        )}
       >
-        <For each={PRICE_SIGNAL_SOURCES}>
-          {(source) => <option value={source.id}>{source.label}</option>}
-        </For>
-      </select>
-      <div
-        ref={picker}
-        class="symbol-picker"
-        onFocusOut={() => {
-          queueMicrotask(() => {
-            if (!picker.contains(document.activeElement)) close();
-          });
-        }}
-      >
-        <input
-          ref={input}
-          class="market-symbol"
-          role="combobox"
-          aria-autocomplete="list"
-          aria-expanded={open()}
-          aria-controls="market-symbol-menu"
-          aria-activedescendant={
-            highlighted() >= 0 ? `market-symbol-option-${highlighted()}` : undefined
-          }
-          placeholder="Ticker, e.g. BTCUSDT"
-          spellcheck={false}
-          value={symbol()}
-          onInput={(event) => {
-            setSymbol(event.currentTarget.value);
-            setHighlighted(-1);
-            setOpen(true);
-          }}
-          onFocus={() => setOpen(true)}
-          onKeyDown={(event) => {
-            const visible = matches();
-            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-              event.preventDefault();
-              const direction = event.key === "ArrowDown" ? 1 : -1;
-              setHighlighted((current) =>
-                visible.length === 0 ? -1 : (current + direction + visible.length) % visible.length,
-              );
-              setOpen(true);
-              queueMicrotask(() =>
-                picker.querySelector(".highlighted")?.scrollIntoView({ block: "nearest" }),
-              );
-              return;
-            }
-            if (event.key === "Escape") {
-              close();
-              return;
-            }
-            if (event.key === "Enter") {
-              event.preventDefault();
-              const option = visible[highlighted()];
-              if (option === undefined) add();
-              else select(option);
-            }
-          }}
-        />
-        <button
-          type="button"
-          class="symbol-toggle"
-          title="Show available tickers"
-          aria-label="Show available tickers"
-          onClick={() => {
-            if (open()) close();
-            else {
-              input.focus();
-              setOpen(true);
-            }
-          }}
-        >
-          ▾
-        </button>
-        <div
-          id="market-symbol-menu"
-          class="symbol-menu"
-          classList={{ hidden: !open() }}
-          role="listbox"
-        >
-          <For
-            each={matches()}
-            fallback={
-              <div class="symbol-empty">No listed match — you can still add the typed ticker</div>
-            }
+        <Combobox.Control class={styles.symbolControl} aria-label={`${props.sourceLabel} ticker`}>
+          <Combobox.Input
+            ref={input}
+            class={styles.symbolInput}
+            placeholder="Ticker, e.g. BTCUSDT"
+            onKeyDown={(event) => {
+              // Kobalte suppresses form submission while the popup is open.
+              // With no selectable match, close it so Enter submits the
+              // user's free-form ticker instead.
+              if (event.key === "Enter" && matches().length === 0) setOpen(false);
+            }}
+          />
+          <Combobox.Trigger
+            class={styles.symbolTrigger}
+            title="Show available tickers"
+            aria-label="Show available tickers"
           >
-            {(option, index) => (
-              <button
-                type="button"
-                id={`market-symbol-option-${index()}`}
-                class="symbol-option"
-                classList={{ highlighted: index() === highlighted() }}
-                role="option"
-                aria-selected={index() === highlighted()}
-                onPointerDown={(event) => {
-                  event.preventDefault();
-                  select(option);
-                }}
-              >
-                <span class="symbol-option-ticker">{option.symbol}</span>
-                <span class="symbol-option-label">{option.label}</span>
-              </button>
-            )}
-          </For>
-        </div>
-      </div>
-      <button class="chart-add" onClick={add}>
+            <Combobox.Icon class={styles.symbolIcon}>
+              <ChevronDown aria-hidden="true" />
+            </Combobox.Icon>
+          </Combobox.Trigger>
+        </Combobox.Control>
+        <Combobox.Portal>
+          <Combobox.Content class={styles.symbolContent}>
+            <Combobox.Listbox class={styles.symbolListbox} />
+            <Show when={matches().length === 0}>
+              <div class={styles.symbolEmpty}>
+                No listed match — the typed ticker can still be added
+              </div>
+            </Show>
+          </Combobox.Content>
+        </Combobox.Portal>
+      </Combobox>
+      <button type="submit" class={controlStyles.button}>
         Add row
       </button>
-    </div>
+    </form>
   );
 }

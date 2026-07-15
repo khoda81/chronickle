@@ -1,0 +1,48 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+.dataControls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2-5) var(--space-5);
+}
+
+.canvasWrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.timeline {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.timeline:active {
+  cursor: grabbing;
+}
+
+@media (max-width: 40rem) {
+  .app {
+    gap: var(--space-2);
+    padding: var(--space-2);
+  }
+
+  .dataControls {
+    gap: var(--space-2);
+  }
+}

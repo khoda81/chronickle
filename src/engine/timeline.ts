@@ -1,6 +1,7 @@
 /** One shared, vertically-resizable news and market timeline. */
 
 import type { EventSet, NewsEvent } from "../domain.ts";
+import { TIMELINE_OVERLAY_METRICS } from "../ui/timelineOverlayMetrics.ts";
 import type { EventQueryResult } from "../data/events/broker.ts";
 import type { BrokerDemand, Subscription, ReadRequest, SignalView } from "../data/signal/broker.ts";
 import type { MutableSample } from "../data/signal/sample.ts";
@@ -393,8 +394,6 @@ export class Timeline {
     this.canvas.addEventListener("pointerleave", this.onHoverLeave, { signal });
     this.canvas.addEventListener("click", this.onClick, { signal });
     this.canvas.addEventListener("dblclick", this.onDoubleClick, { signal });
-
-    window.addEventListener("resize", this.onResize, { signal });
   }
 
   private unbindEvents(): void {
@@ -417,8 +416,6 @@ export class Timeline {
     this.state.newsHeight = fitted.newsHeight;
     this.rowHeights = [...fitted.rowHeights];
   }
-
-  private onResize = (): void => this.resize();
 
   private syncPriceSubscription(index: number, demand: BrokerDemand): void {
     const previous = this.subscribedDemands[index];
@@ -1124,9 +1121,9 @@ export class Timeline {
     const previous = this.state.hovered;
     const index =
       this.pointerInside &&
-        !this.dragging &&
-        this.resizingBoundary === null &&
-        this.boundaryAt(this.pointerPy) === null
+      !this.dragging &&
+      this.resizingBoundary === null &&
+      this.boundaryAt(this.pointerPy) === null
         ? eventIndexAtOrBefore(this.state.events, tx, this.pointerPx)
         : null;
     this.state.hovered = index;
@@ -1218,14 +1215,14 @@ function positionSignalTooltip(
   text: string,
 ): void {
   const ctx = frame.ctx;
-  const font = "600 11px ui-monospace, monospace";
-  const paddingX = 7;
-  const height = 23;
-  const gap = 9;
-  const margin = 5;
+  const metrics = TIMELINE_OVERLAY_METRICS.signalTooltip;
   ctx.save();
-  ctx.font = font;
-  const width = Math.ceil(ctx.measureText(text).width) + paddingX * 2 + 2;
+  ctx.font = metrics.font;
+  const width =
+    Math.ceil(ctx.measureText(text).width) + metrics.paddingXPx * 2 + metrics.borderWidthPx * 2;
+  const height = metrics.heightPx;
+  const gap = metrics.gapPx;
+  const margin = metrics.marginPx;
   const fitsLeft = anchorX - gap - width >= margin;
   const x = fitsLeft
     ? anchorX - gap - width

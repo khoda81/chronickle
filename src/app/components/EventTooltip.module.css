@@ -1,0 +1,96 @@
+.tooltip {
+  --tooltip-x: 0px;
+  --tooltip-y: 0px;
+  --outlet-color: rgba(148, 163, 184, 0.9);
+  position: absolute;
+  z-index: 10;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(20rem, calc(100% - 1rem));
+  max-height: calc(100% - 1rem);
+  overflow: visible;
+  padding: var(--space-2-5) var(--space-3) var(--space-3);
+  border: 1px solid var(--outlet-color);
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.16), rgba(124, 196, 255, 0.045)),
+    var(--glass-fill-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--outlet-color) 24%, transparent),
+    0 1.125rem 2.75rem rgba(0, 0, 0, 0.34),
+    0 0.375rem 1.5rem color-mix(in oklab, var(--outlet-color) 18%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.17);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: none;
+  transform: translate3d(var(--tooltip-x), var(--tooltip-y), 0) scale(1);
+  transition:
+    opacity 110ms ease-out,
+    transform var(--duration-normal) var(--ease-out),
+    visibility 0s linear;
+  will-change: transform, opacity;
+}
+
+.tooltip[data-placement="left"] {
+  transform-origin: 100% 0%;
+}
+
+.tooltip[data-placement="right"] {
+  transform-origin: 0 0%;
+}
+
+.hidden {
+  opacity: 0;
+  visibility: hidden;
+  transform: translate3d(var(--tooltip-x), var(--tooltip-y), 0) scale(0.08);
+  transition:
+    opacity 80ms ease-in,
+    transform var(--duration-fast) ease-in,
+    visibility 0s linear var(--duration-fast);
+}
+
+.source {
+  display: block;
+  margin-bottom: var(--space-1);
+  color: rgba(241, 245, 249, 0.9);
+  font-size: var(--text-xs);
+  font-weight: 550;
+  letter-spacing: 0.01em;
+}
+
+.link {
+  color: var(--outlet-color);
+  font-weight: 600;
+  pointer-events: auto;
+  text-decoration: none;
+  text-underline-offset: 0.1875rem;
+  word-break: break-word;
+}
+
+.link:hover,
+.link:focus-visible {
+  text-decoration-line: underline;
+}
+
+.link:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.summary {
+  display: -webkit-box;
+  margin: var(--space-2) 0 0;
+  overflow: hidden;
+  color: rgba(226, 232, 240, 0.88);
+  font-size: var(--text-xs);
+  line-height: var(--line-body);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}

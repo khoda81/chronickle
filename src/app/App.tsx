@@ -1,8 +1,8 @@
-import { createSignal, onCleanup, onMount } from "solid-js";
+import { createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { EventBroker, defaultProxy, fetchFeed } from "../data/index.ts";
 import { FeedRegistry } from "../data/events/feeds.ts";
 import { Broker } from "../data/signal/broker.ts";
-import { priceSignalSource, type PriceSignalSourceId } from "../data/signal/market/market.ts";
+import { priceSignalSource } from "../data/signal/market/market.ts";
 import type { RssFeed } from "../domain.ts";
 import { DEFAULT_PALETTE, PALETTES, type PaletteName } from "../engine/ramp.ts";
 import { Range } from "../engine/range.ts";
@@ -25,25 +25,13 @@ import { EventTooltip, type EventTooltipModel } from "./components/EventTooltip.
 import { FeedInput, FeedList } from "./components/FeedControls.tsx";
 import { Header } from "./components/Header.tsx";
 import { MarketControls } from "./components/MarketControls.tsx";
-import { TimelineOverlay } from "./components/TimelineOverlay.tsx";
+import { TimelineOverlay, type TimelineOverlayRowView } from "./components/TimelineOverlay.tsx";
 import { TimelineOverlayController } from "./timeline/TimelineOverlayController.ts";
+import { chartKey, chartStateKey, type ChartState } from "./chartState.ts";
+import { Status, type StatusKind } from "./components/Status.tsx";
+import styles from "./App.module.css";
 
 const DAY_MS = 86_400_000;
-
-interface ChartState {
-  readonly key: string;
-  readonly sourceId: PriceSignalSourceId;
-  readonly sourceLabel: string;
-  readonly symbol: string;
-  readonly palette: PaletteName;
-  readonly verticalOffset: number;
-  readonly height?: number;
-}
-
-interface StatusState {
-  readonly message: string;
-  readonly kind: "info" | "error";
-}
 
 export function App() {
   const saved = loadUiState();
@@ -56,7 +44,7 @@ export function App() {
   const eventBroker = new EventBroker({}, () => registry.active());
   const brokers = new Map<string, Broker>();
 
-  const [status, setStatusState] = createSignal<StatusState>({
+  const [status, setStatusState] = createSignal<{ message: string; kind: StatusKind }>({
     message: "Initializing…",
     kind: "info",
   });
@@ -67,13 +55,21 @@ export function App() {
   const [playback, setPlayback] = createSignal<TimelinePlayback>(saved.playback);
   const [newsHeight, setNewsHeight] = createSignal(saved.newsHeight);
   const [hover, setHover] = createSignal<EventTooltipModel | null>(null);
+  const overlayRows = createMemo<readonly TimelineOverlayRowView[]>(() =>
+    charts().map((chart) => ({
+      key: chartStateKey(chart),
+      sourceLabel: priceSignalSource(chart.sourceId)?.label ?? chart.sourceId,
+      symbol: chart.symbol,
+      palette: chart.palette,
+    })),
+  );
   const timelineOverlay = new TimelineOverlayController();
 
   let canvas!: HTMLCanvasElement;
   let timeline: Timeline | null = null;
   let unsubscribeEvents: (() => void) | null = null;
 
-  const setStatus = (message: string, kind: "info" | "error" = "info"): void => {
+  const setStatus = (message: string, kind: StatusKind = "info"): void => {
     setStatusState({ message, kind });
   };
 
@@ -95,7 +91,7 @@ export function App() {
 
   const updateChart = (key: string, update: Partial<ChartState>): void => {
     setCharts((current) =>
-      current.map((chart) => (chart.key === key ? { ...chart, ...update } : chart)),
+      current.map((chart) => (chartStateKey(chart) === key ? { ...chart, ...update } : chart)),
     );
     persistence.schedule();
   };
@@ -103,10 +99,11 @@ export function App() {
   const syncTimelineRows = (): void => {
     if (timeline === null) return;
     const rows: SignalRow[] = charts().map((chart) => {
-      const broker = brokers.get(chart.key);
-      if (broker === undefined) throw new Error(`Missing broker for chart ${chart.key}`);
+      const key = chartStateKey(chart);
+      const broker = brokers.get(key);
+      if (broker === undefined) throw new Error(`Missing broker for chart ${key}`);
       return {
-        id: chart.key,
+        id: key,
         read: (request) => broker.read(request),
         readSampleAt: (time, out) => broker.readPointAtOrBefore(time, out),
         subscribe: (demand, onChange) => broker.subscribe(demand, onChange),
@@ -119,14 +116,15 @@ export function App() {
   };
 
   const removeChart = (key: string): void => {
-    const chart = charts().find((candidate) => candidate.key === key);
+    const chart = charts().find((candidate) => chartStateKey(candidate) === key);
     if (chart === undefined) return;
-    setCharts((current) => current.filter((candidate) => candidate.key !== key));
+    setCharts((current) => current.filter((candidate) => chartStateKey(candidate) !== key));
     syncTimelineRows();
     brokers.get(key)?.dispose();
     brokers.delete(key);
     persistence.schedule();
-    setStatus(`Removed ${chart.sourceLabel} ${chart.symbol}`);
+    const sourceLabel = priceSignalSource(chart.sourceId)?.label ?? chart.sourceId;
+    setStatus(`Removed ${sourceLabel} ${chart.symbol}`);
   };
 
   const addChart = (
@@ -149,8 +147,8 @@ export function App() {
       return false;
     }
 
-    const key = `${source.id}:${symbol}`;
-    if (charts().some((chart) => chart.key === key)) {
+    const key = chartKey(source.id, symbol);
+    if (charts().some((chart) => chartStateKey(chart) === key)) {
       setStatus(`${source.label} ${symbol} is already visible`, "error");
       return false;
     }
@@ -173,9 +171,7 @@ export function App() {
         : (paletteNames[(defaultPaletteIndex + charts().length) % paletteNames.length] ??
           DEFAULT_PALETTE);
     const chart: ChartState = {
-      key,
       sourceId: source.id,
-      sourceLabel: source.label,
       symbol,
       palette,
       verticalOffset:
@@ -200,7 +196,7 @@ export function App() {
     setNewsHeight(layout.newsHeight);
     setCharts((current) =>
       current.map((chart) => {
-        const layoutRow = rows.get(chart.key);
+        const layoutRow = rows.get(chartStateKey(chart));
         return layoutRow === undefined
           ? chart
           : {
@@ -332,9 +328,9 @@ export function App() {
   };
 
   return (
-    <>
+    <main class={styles.app}>
       <Header waveletMode={waveletMode()} onWaveletModeChange={changeWaveletMode} />
-      <div class="data-controls">
+      <div class={styles.dataControls}>
         <MarketControls
           onAdd={(sourceId, symbol) => addChart(sourceId, symbol)}
           onLoadError={(message) => setStatus(message)}
@@ -354,11 +350,11 @@ export function App() {
           refreshFeeds();
         }}
       />
-      <div class="canvas-wrap">
-        <canvas ref={canvas} class="timeline" />
+      <div class={styles.canvasWrap}>
+        <canvas ref={canvas} class={styles.timeline} />
         <TimelineOverlay
           controller={timelineOverlay}
-          rows={charts()}
+          rows={overlayRows()}
           playback={playback()}
           onTogglePlayback={() => timeline?.togglePlayback()}
           onReload={reloadTimelineData}
@@ -367,7 +363,7 @@ export function App() {
         />
         <EventTooltip controller={timelineOverlay} value={hover()} />
       </div>
-      <div class={`status ${status().kind}`}>{status().message}</div>
-    </>
+      <Status message={status().message} kind={status().kind} />
+    </main>
   );
 }

@@ -1,5 +1,8 @@
+import { X } from "lucide-solid";
 import { For, createSignal } from "solid-js";
 import type { RssFeed } from "../../domain.ts";
+import controlStyles from "./ui/Control.module.css";
+import styles from "./FeedControls.module.css";
 
 interface FeedInputProps {
   readonly onAdd: (url: string) => Promise<boolean>;
@@ -15,10 +18,14 @@ export function FeedInput(props: FeedInputProps) {
   };
 
   return (
-    <div class="feed-controls">
+    <section class={styles.controls} aria-labelledby="feed-controls-label">
+      <span id="feed-controls-label" class={controlStyles.sectionLabel}>
+        News
+      </span>
       <input
-        class="feed-input"
+        class={`${controlStyles.input} ${styles.input}`}
         type="url"
+        aria-label="RSS feed URL"
         placeholder="Paste RSS feed URL…"
         spellcheck={false}
         value={url()}
@@ -29,10 +36,10 @@ export function FeedInput(props: FeedInputProps) {
           void add();
         }}
       />
-      <button class="feed-add" onClick={() => void add()}>
+      <button type="button" class={controlStyles.button} onClick={() => void add()}>
         Add feed
       </button>
-    </div>
+    </section>
   );
 }
 
@@ -44,29 +51,28 @@ interface FeedListProps {
 
 export function FeedList(props: FeedListProps) {
   return (
-    <div class="feed-list">
+    <div class={styles.list} aria-label="News feeds">
       <For each={props.feeds}>
         {(feed) => (
-          <div
-            class="feed-row"
-            classList={{ disabled: !feed.enabled }}
-            title={feed.enabled ? `Click to hide ${feed.source}` : `Click to show ${feed.source}`}
-            onClick={(event) => {
-              if ((event.target as HTMLElement).closest(".feed-remove")) return;
-              props.onToggle(feed);
-            }}
-          >
-            <span class="feed-swatch" style={{ background: feed.color }} />
-            <span class="feed-name">{feed.source}</span>
+          <div class={styles.chip} classList={{ [styles.chipDisabled!]: !feed.enabled }}>
             <button
-              class="feed-remove"
-              title={`Remove ${feed.source}`}
-              onClick={(event) => {
-                event.stopPropagation();
-                props.onRemove(feed);
-              }}
+              type="button"
+              class={styles.toggle}
+              aria-pressed={feed.enabled}
+              title={feed.enabled ? `Hide ${feed.source}` : `Show ${feed.source}`}
+              onClick={() => props.onToggle(feed)}
             >
-              ×
+              <span class={styles.swatch} style={{ background: feed.color }} aria-hidden="true" />
+              <span class={styles.name}>{feed.source}</span>
+            </button>
+            <button
+              type="button"
+              class={styles.remove}
+              title={`Remove ${feed.source}`}
+              aria-label={`Remove ${feed.source}`}
+              onClick={() => props.onRemove(feed)}
+            >
+              <X aria-hidden="true" />
             </button>
           </div>
         )}

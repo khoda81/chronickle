@@ -1,0 +1,75 @@
+:root {
+  color-scheme: dark;
+
+  /* Typography */
+  --font-ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-data: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --text-xs: 0.6875rem;
+  --text-sm: 0.75rem;
+  --text-md: 0.875rem;
+  --text-title: 1.25rem;
+  --line-tight: 1.2;
+  --line-body: 1.45;
+
+  /* Spacing */
+  --space-0-5: 0.125rem;
+  --space-1: 0.25rem;
+  --space-1-5: 0.375rem;
+  --space-2: 0.5rem;
+  --space-2-5: 0.625rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+
+  /* Sizing */
+  --control-height-sm: 2rem;
+  --control-height-touch: 2.75rem;
+  --icon-sm: 1rem;
+  --icon-md: 1.125rem;
+
+  /* Shape */
+  --radius-xs: 0.25rem;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-pill: 999rem;
+
+  /* Color */
+  --color-bg: #05070d;
+  --color-fg: #e6e9f0;
+  --color-fg-strong: #f8fafc;
+  --color-muted: #788190;
+  --color-accent: #7cc4ff;
+  --color-accent-soft: rgba(124, 196, 255, 0.12);
+  --color-success: #a7f3d0;
+  --color-error: #ff6b6b;
+  --color-error-soft: rgba(255, 107, 107, 0.12);
+  --color-border-subtle: #1a1d26;
+  --color-border-control: #2a2f3a;
+  --color-border-hover: rgba(124, 196, 255, 0.72);
+  --color-focus: rgba(125, 211, 252, 0.9);
+  --color-surface-subtle: rgba(255, 255, 255, 0.03);
+  --color-surface-hover: rgba(124, 196, 255, 0.08);
+
+  /* Floating surfaces */
+  --glass-fill: rgba(9, 15, 27, 0.34);
+  --glass-fill-strong: rgba(12, 20, 34, 0.94);
+  --glass-border: rgba(226, 232, 240, 0.24);
+  --glass-highlight: rgba(255, 255, 255, 0.14);
+  --glass-shadow: 0 0.875rem 2.25rem rgba(0, 0, 0, 0.28);
+  --glass-blur: blur(1rem) saturate(145%);
+
+  /* Motion and layers */
+  --duration-fast: 100ms;
+  --duration-normal: 160ms;
+  --ease-out: cubic-bezier(0.2, 0.9, 0.25, 1);
+  --layer-menu: 30;
+  --layer-tooltip: 40;
+}
+
+@media (pointer: coarse) {
+  :root {
+    --control-height-sm: var(--control-height-touch);
+  }
+}

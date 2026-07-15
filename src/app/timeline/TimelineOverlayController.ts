@@ -1,4 +1,5 @@
 import type { TimelineOverlaySink } from "../../engine/timeline.ts";
+import { TIMELINE_OVERLAY_METRICS } from "../../ui/timelineOverlayMetrics.ts";
 import { placeTooltip } from "../../ui/tooltip.ts";
 
 interface RowElements {
@@ -13,9 +14,6 @@ const HOVER_TIME_FORMAT = new Intl.DateTimeFormat(undefined, {
   minute: "2-digit",
   second: "2-digit",
 });
-
-const TIME_LABEL_MARGIN = 5;
-const TIME_LABEL_GAP = 9;
 
 /**
  * DOM-backed implementation of TimelineOverlaySink.
@@ -106,10 +104,11 @@ export class TimelineOverlayController implements TimelineOverlaySink {
     if (label.textContent !== text) label.textContent = text;
 
     const labelWidth = label.offsetWidth;
-    const leftX = x - labelWidth - TIME_LABEL_GAP;
-    const maxX = Math.max(TIME_LABEL_MARGIN, viewportWidth - labelWidth - TIME_LABEL_MARGIN);
-    const labelX = leftX >= TIME_LABEL_MARGIN ? leftX : Math.min(x + TIME_LABEL_GAP, maxX);
-    label.style.transform = `translate3d(${labelX}px, 10px, 0)`;
+    const { gapPx, marginPx, topPx } = TIMELINE_OVERLAY_METRICS.timeLabel;
+    const leftX = x - labelWidth - gapPx;
+    const maxX = Math.max(marginPx, viewportWidth - labelWidth - marginPx);
+    const labelX = leftX >= marginPx ? leftX : Math.min(x + gapPx, maxX);
+    label.style.transform = `translate3d(${labelX}px, ${topPx}px, 0)`;
   }
 
   setEventTooltipAnchor(
@@ -188,6 +187,7 @@ export class TimelineOverlayController implements TimelineOverlaySink {
 
   private positionRow(header: HTMLDivElement, top: number): void {
     header.hidden = false;
-    header.style.transform = `translate3d(5px, ${top + 5}px, 0)`;
+    const inset = TIMELINE_OVERLAY_METRICS.rowInsetPx;
+    header.style.transform = `translate3d(${inset}px, ${top + inset}px, 0)`;
   }
 }

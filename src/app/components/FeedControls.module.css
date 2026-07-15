@@ -1,0 +1,118 @@
+.controls {
+  display: flex;
+  flex: 1 1 22.5rem;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.input {
+  flex: 1 1 16.25rem;
+  max-width: 32.5rem;
+}
+
+.list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1-5);
+}
+
+.chip {
+  display: inline-flex;
+  min-height: 1.75rem;
+  align-items: stretch;
+  overflow: hidden;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-subtle);
+  transition:
+    border-color var(--duration-fast) ease,
+    opacity var(--duration-fast) ease;
+}
+
+.chip:hover,
+.chip:focus-within {
+  border-color: var(--color-border-control);
+}
+
+.chipDisabled {
+  opacity: 0.45;
+}
+
+.toggle,
+.remove {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.toggle {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-1-5);
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-1-5);
+  color: var(--color-fg);
+  font-size: var(--text-xs);
+}
+
+.toggle:focus-visible,
+.remove:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--color-focus) 52%, transparent);
+  outline-offset: -2px;
+}
+
+.swatch {
+  width: 0.625rem;
+  height: 0.625rem;
+  flex-shrink: 0;
+  border-radius: 50%;
+}
+
+.name {
+  overflow: hidden;
+  max-width: 16rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chipDisabled .name {
+  text-decoration: line-through;
+}
+
+.remove {
+  display: grid;
+  width: 1.75rem;
+  place-items: center;
+  padding: 0;
+  color: var(--color-muted);
+}
+
+.remove:hover {
+  background: var(--color-error-soft);
+  color: var(--color-error);
+}
+
+.remove svg {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
+@media (max-width: 40rem) {
+  .controls {
+    width: 100%;
+  }
+
+  .input {
+    min-width: 0;
+  }
+
+  .list {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: var(--space-0-5);
+  }
+
+  .chip {
+    flex: 0 0 auto;
+  }
+}

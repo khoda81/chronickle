@@ -28,7 +28,7 @@ src/
   app/
     App.tsx              # Solid composition root and application actions
     persistence.ts       # Versioned, debounced localStorage snapshot
-    components/          # Declarative controls, feed list, and timeline overlay DOM
+    components/          # Declarative controls, accessible UI primitives, and timeline overlay DOM
     timeline/            # Imperative DOM adapter for canvas-owned overlay geometry
   data/
     events/              # Feed registry, RSS loading, and event broker
@@ -37,8 +37,11 @@ src/
     timeline.ts          # Canvas controller: rAF, gestures, subscriptions, overlays
     plot.ts              # Canvas/frame lifecycle
     gfx/                 # Immediate-mode drawing primitives
+  styles/
+    tokens.css            # Design tokens: typography, spacing, color, shape, and motion
+    reset.css             # Element normalization only
+    global.css            # Document-level appearance only
   main.tsx               # Solid mount only
-  styles.css             # Transitional global stylesheet; split by component over time
 ```
 
 ### Ownership boundary
@@ -50,6 +53,12 @@ Solid creates and destroys timeline overlay nodes. `TimelineOverlayController` i
 The application persists one versioned snapshot containing viewport, wavelet mode, playback mode, news height, and per-row palette/offset/height. Runtime resources such as brokers, subscriptions, observers, timers, DOM refs, and typed-array scratch storage are never serialized.
 
 Canvas redraw invalidation remains explicit and coalesced through `Timeline.reqDraw()`. A framework effect must not call the renderer for every reactive dependency.
+
+General application dimensions belong in CSS design tokens and use relative units.
+Canvas-coupled overlay geometry lives in `ui/timelineOverlayMetrics.ts`; Solid
+exposes those pixel metrics to CSS as custom properties so renderer measurements
+and DOM dimensions have one source of truth. Do not duplicate those values in a
+component stylesheet.
 
 ### External APIs
 

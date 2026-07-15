@@ -1,8 +1,11 @@
-import { Pause, Play, RefreshCw } from "lucide-solid";
-import { For, createSignal, onCleanup, onMount, type Accessor } from "solid-js";
+import { Select } from "@kobalte/core/select";
+import { ChevronDown, Pause, Play, RefreshCw, X } from "lucide-solid";
+import { For, onCleanup, onMount, type Accessor, type JSX } from "solid-js";
 import { PALETTES, paletteCssGradient, type PaletteName } from "../../engine/ramp.ts";
 import type { TimelinePlayback } from "../../engine/timeline.ts";
+import { TIMELINE_OVERLAY_METRICS } from "../../ui/timelineOverlayMetrics.ts";
 import type { TimelineOverlayController } from "../timeline/TimelineOverlayController.ts";
+import styles from "./TimelineOverlay.module.css";
 
 export interface TimelineOverlayRowView {
   readonly key: string;
@@ -22,45 +25,32 @@ interface TimelineOverlayProps {
 }
 
 const PALETTE_NAMES = Object.keys(PALETTES) as PaletteName[];
+const OVERLAY_STYLE = {
+  "--timeline-row-inset": `${TIMELINE_OVERLAY_METRICS.rowInsetPx}px`,
+  "--timeline-row-inline-margin": `${TIMELINE_OVERLAY_METRICS.rowInsetPx * 2}px`,
+  "--timeline-signal-tooltip-padding-x": `${TIMELINE_OVERLAY_METRICS.signalTooltip.paddingXPx}px`,
+  "--timeline-signal-tooltip-border-width": `${TIMELINE_OVERLAY_METRICS.signalTooltip.borderWidthPx}px`,
+  "--timeline-signal-tooltip-font": TIMELINE_OVERLAY_METRICS.signalTooltip.font,
+} satisfies JSX.CSSProperties;
 
 export function TimelineOverlay(props: TimelineOverlayProps) {
-  const [openPaletteId, setOpenPaletteId] = createSignal<string | null>(null);
   let nowLine!: HTMLDivElement;
   let hoverLine!: HTMLDivElement;
   let timeHover!: HTMLDivElement;
 
   onMount(() => {
     props.controller.attachStaticElements(nowLine, hoverLine, timeHover);
-    const closePaletteOnOutsidePointer = (event: PointerEvent): void => {
-      const target = event.target;
-      if (
-        target instanceof Element &&
-        target.closest(".timeline-price-palette, .timeline-price-palette-menu") !== null
-      ) {
-        return;
-      }
-      setOpenPaletteId(null);
-    };
-    document.addEventListener("pointerdown", closePaletteOnOutsidePointer);
-    onCleanup(() => {
-      document.removeEventListener("pointerdown", closePaletteOnOutsidePointer);
-      props.controller.detachStaticElements();
-    });
+    onCleanup(() => props.controller.detachStaticElements());
   });
 
-  const choosePalette = (id: string, palette: PaletteName): void => {
-    props.onPaletteChange(id, palette);
-    setOpenPaletteId(null);
-  };
-
   return (
-    <>
-      <div ref={nowLine} class="timeline-now-line" hidden />
+    <div class={styles.root} style={OVERLAY_STYLE}>
+      <div ref={nowLine} class={styles.nowLine} hidden />
 
-      <div class="timeline-now-controls">
+      <div class={styles.nowControls}>
         <button
           type="button"
-          class="timeline-icon-button timeline-reload"
+          class={styles.timelineButton}
           title="Reload data"
           aria-label="Reload data"
           onClick={props.onReload}
@@ -69,7 +59,7 @@ export function TimelineOverlay(props: TimelineOverlayProps) {
         </button>
         <button
           type="button"
-          class="timeline-icon-button timeline-playback"
+          class={styles.timelineButton}
           aria-pressed={props.playback.mode === "following"}
           title={
             props.playback.mode === "following" ? "Pause current-time playback" : "Play from here"
@@ -87,8 +77,8 @@ export function TimelineOverlay(props: TimelineOverlayProps) {
         </button>
       </div>
 
-      <div ref={hoverLine} class="timeline-hover-line" hidden />
-      <div ref={timeHover} class="timeline-time-hover" hidden />
+      <div ref={hoverLine} class={styles.hoverLine} hidden />
+      <div ref={timeHover} class={styles.timeHover} hidden />
 
       <For each={props.rows.map((row) => row.key)}>
         {(key) => (
@@ -99,24 +89,18 @@ export function TimelineOverlay(props: TimelineOverlayProps) {
               if (row === undefined) throw new Error(`Missing timeline overlay row ${key}`);
               return row;
             }}
-            paletteOpen={openPaletteId() === key}
-            onTogglePalette={() => setOpenPaletteId(openPaletteId() === key ? null : key)}
-            onClosePalette={() => setOpenPaletteId(null)}
-            onChoosePalette={(palette) => choosePalette(key, palette)}
+            onChoosePalette={(palette) => props.onPaletteChange(key, palette)}
             onRemove={() => props.onRemoveRow(key)}
           />
         )}
       </For>
-    </>
+    </div>
   );
 }
 
 interface TimelineRowChromeProps {
   readonly controller: TimelineOverlayController;
   readonly row: Accessor<TimelineOverlayRowView>;
-  readonly paletteOpen: boolean;
-  readonly onTogglePalette: () => void;
-  readonly onClosePalette: () => void;
   readonly onChoosePalette: (palette: PaletteName) => void;
   readonly onRemove: () => void;
 }
@@ -136,78 +120,67 @@ function TimelineRowChrome(props: TimelineRowChromeProps) {
     <>
       <div
         ref={header}
-        class="timeline-price-header"
-        classList={{ "palette-open": props.paletteOpen }}
+        class={styles.rowHeader}
         hidden
         title="Drag this heatmap vertically to move through its fixed scale field"
       >
-        <span>{label()}</span>
-        <button
-          type="button"
-          class="timeline-price-palette"
-          title={`Change ${label()} color map`}
-          aria-label={`Change ${label()} color map`}
-          aria-haspopup="listbox"
-          aria-expanded={props.paletteOpen}
-          onClick={(event) => {
-            event.stopPropagation();
-            props.onTogglePalette();
+        <span class={styles.rowLabel}>{label()}</span>
+        <Select<PaletteName>
+          class={styles.paletteRoot}
+          options={PALETTE_NAMES}
+          value={props.row().palette}
+          onChange={(palette) => {
+            if (palette !== null) props.onChoosePalette(palette);
           }}
-          onKeyDown={(event) => {
-            if (event.key !== "Escape") return;
-            props.onClosePalette();
-            event.currentTarget.focus();
-          }}
-        >
-          <span
-            class="timeline-price-palette-bar"
-            style={{ "background-image": paletteCssGradient(props.row().palette) }}
-          />
-          <span class="timeline-price-palette-caret" aria-hidden="true">
-            ▾
-          </span>
-        </button>
-        <div
-          class="timeline-price-palette-menu"
-          role="listbox"
-          aria-label={`${label()} color maps`}
-          hidden={!props.paletteOpen}
-        >
-          <For each={PALETTE_NAMES}>
-            {(palette) => (
-              <button
-                type="button"
-                class="timeline-price-palette-option"
-                role="option"
-                aria-label={palette}
-                aria-selected={palette === props.row().palette}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  props.onChoosePalette(palette);
-                }}
-              >
+          itemComponent={(itemProps) => (
+            <Select.Item item={itemProps.item} class={styles.paletteItem}>
+              <Select.ItemLabel>
                 <span
-                  class="timeline-price-palette-option-bar"
-                  style={{ "background-image": paletteCssGradient(palette) }}
+                  class={styles.paletteOptionBar}
+                  style={{ "background-image": paletteCssGradient(itemProps.item.rawValue) }}
                 />
-              </button>
-            )}
-          </For>
-        </div>
+              </Select.ItemLabel>
+            </Select.Item>
+          )}
+          gutter={5}
+          placement="bottom-end"
+          sameWidth
+          fitViewport
+        >
+          <Select.Trigger
+            class={styles.paletteTrigger}
+            title={`Change ${label()} color map`}
+            aria-label={`Change ${label()} color map`}
+          >
+            <Select.Value<PaletteName>>
+              {(state) => (
+                <span
+                  class={styles.paletteBar}
+                  style={{ "background-image": paletteCssGradient(state.selectedOption()) }}
+                />
+              )}
+            </Select.Value>
+            <Select.Icon class={styles.paletteIcon}>
+              <ChevronDown aria-hidden="true" />
+            </Select.Icon>
+          </Select.Trigger>
+          <Select.Portal>
+            <Select.Content class={styles.paletteContent}>
+              <Select.Listbox class={styles.paletteListbox} />
+            </Select.Content>
+          </Select.Portal>
+        </Select>
         <button
           type="button"
-          class="timeline-price-remove"
+          class={styles.removeRow}
           title={`Remove ${label()}`}
           aria-label={`Remove ${label()}`}
-          onClick={(event) => {
-            event.stopPropagation();
-            props.onRemove();
-          }}
+          onClick={props.onRemove}
         >
-          ×
+          <X aria-hidden="true" />
         </button>
       </div>
-      <div ref={tooltip} class="timeline-signal-tooltip" hidden />
+      <div ref={tooltip} class={styles.signalTooltip} hidden />
     </>
   );
 }

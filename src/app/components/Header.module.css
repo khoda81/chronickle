@@ -1,0 +1,88 @@
+.header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.title {
+  margin: 0;
+  color: var(--color-fg-strong);
+  font-size: var(--text-title);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.repositoryLink {
+  position: relative;
+  display: grid;
+  width: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  place-items: center;
+  border: 1px solid var(--color-border-control);
+  border-radius: var(--radius-sm);
+  color: var(--color-muted);
+  text-decoration: none;
+  transition:
+    border-color var(--duration-fast) ease,
+    color var(--duration-fast) ease;
+}
+
+.repositoryLink svg {
+  width: var(--icon-md);
+  height: var(--icon-md);
+}
+
+.repositoryLink:hover,
+.repositoryLink:focus-visible {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  outline: none;
+}
+
+.repositoryLink:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--color-focus) 52%, transparent);
+  outline-offset: 2px;
+}
+
+.repositoryTooltip {
+  position: absolute;
+  z-index: var(--layer-tooltip);
+  top: calc(100% + var(--space-2));
+  left: 50%;
+  width: max-content;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  background:
+    linear-gradient(145deg, var(--glass-highlight), rgba(124, 196, 255, 0.035)),
+    var(--glass-fill-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow);
+  color: var(--color-fg);
+  font-size: var(--text-xs);
+  line-height: var(--line-tight);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -0.1875rem);
+  transition:
+    opacity var(--duration-fast) ease,
+    transform var(--duration-fast) ease;
+}
+
+.repositoryLink:hover .repositoryTooltip,
+.repositoryLink:focus-visible .repositoryTooltip {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.waveletSelect {
+  margin-left: auto;
+}
+
+@media (max-width: 40rem) {
+  .header {
+    gap: var(--space-2);
+  }
+}

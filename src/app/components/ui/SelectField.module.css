@@ -1,0 +1,119 @@
+.root {
+  position: relative;
+}
+
+.trigger {
+  display: inline-flex;
+  min-width: 8.5rem;
+  min-height: var(--control-height-sm);
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding-inline: var(--space-2-5);
+  border: 1px solid var(--color-border-control);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-fg);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition:
+    border-color var(--duration-fast) ease,
+    color var(--duration-fast) ease,
+    background-color var(--duration-fast) ease;
+}
+
+.trigger:hover,
+.trigger[data-expanded] {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.trigger:focus-visible {
+  border-color: var(--color-accent);
+  outline: 2px solid color-mix(in oklab, var(--color-focus) 52%, transparent);
+  outline-offset: 2px;
+}
+
+.value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.icon {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--color-muted);
+  transition: transform var(--duration-normal) var(--ease-out);
+}
+
+.icon[data-expanded] {
+  transform: rotate(180deg);
+}
+
+.icon svg,
+.indicator svg {
+  width: 1em;
+  height: 1em;
+}
+
+.content {
+  z-index: var(--layer-menu);
+  width: var(--kb-popper-anchor-width);
+  max-height: min(18rem, var(--kb-popper-available-height));
+  overflow: hidden;
+  padding: var(--space-1);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(145deg, var(--glass-highlight), rgba(124, 196, 255, 0.03)),
+    var(--glass-fill-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow);
+  transform-origin: var(--kb-select-content-transform-origin);
+  animation: selectIn var(--duration-fast) var(--ease-out);
+}
+
+.listbox {
+  max-height: inherit;
+  overflow-y: auto;
+  outline: none;
+}
+
+.item {
+  display: flex;
+  min-height: 1.875rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding-inline: var(--space-2);
+  border-radius: var(--radius-xs);
+  color: var(--color-fg);
+  font-size: var(--text-sm);
+  cursor: default;
+  outline: none;
+}
+
+.item[data-highlighted],
+.item[data-selected] {
+  background: var(--color-accent-soft);
+}
+
+.item[data-highlighted] {
+  color: var(--color-fg-strong);
+}
+
+.indicator {
+  display: inline-grid;
+  place-items: center;
+  color: var(--color-accent);
+}
+
+@keyframes selectIn {
+  from {
+    opacity: 0;
+    transform: scale(0.98) translateY(-0.125rem);
+  }
+}
