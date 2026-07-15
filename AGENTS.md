@@ -28,7 +28,8 @@ src/
   app/
     App.tsx              # Solid composition root and application actions
     persistence.ts       # Versioned, debounced localStorage snapshot
-    components/          # Declarative controls, feed list, and event tooltip
+    components/          # Declarative controls, feed list, and timeline overlay DOM
+    timeline/            # Imperative DOM adapter for canvas-owned overlay geometry
   data/
     events/              # Feed registry, RSS loading, and event broker
     signal/              # Generic signal broker/store and market adapters
@@ -44,7 +45,9 @@ src/
 
 Solid owns the DOM outside the timeline engine and all serializable application state. `Timeline` owns the canvas, pointer/gesture runtime, render scheduling, scratch buffers, and broker subscriptions. Do not put per-frame values or pointer coordinates in Solid signals merely to make them reactive.
 
-The application persists one versioned snapshot containing viewport, wavelet mode, playback mode, news height, and per-row palette/offset/height. Runtime resources such as brokers, subscriptions, observers, timers, and typed-array scratch storage are never serialized.
+Solid creates and destroys timeline overlay nodes. `TimelineOverlayController` is a DOM rendering adapter, not application state: `Timeline` communicates with it only through the primitive `TimelineOverlaySink` contract so crosshairs and tooltip geometry stay off the reactive hot path.
+
+The application persists one versioned snapshot containing viewport, wavelet mode, playback mode, news height, and per-row palette/offset/height. Runtime resources such as brokers, subscriptions, observers, timers, DOM refs, and typed-array scratch storage are never serialized.
 
 Canvas redraw invalidation remains explicit and coalesced through `Timeline.reqDraw()`. A framework effect must not call the renderer for every reactive dependency.
 

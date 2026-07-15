@@ -25,6 +25,8 @@ import { EventTooltip, type EventTooltipModel } from "./components/EventTooltip.
 import { FeedInput, FeedList } from "./components/FeedControls.tsx";
 import { Header } from "./components/Header.tsx";
 import { MarketControls } from "./components/MarketControls.tsx";
+import { TimelineOverlay } from "./components/TimelineOverlay.tsx";
+import { TimelineOverlayController } from "./timeline/TimelineOverlayController.ts";
 
 const DAY_MS = 86_400_000;
 
@@ -65,6 +67,7 @@ export function App() {
   const [playback, setPlayback] = createSignal<TimelinePlayback>(saved.playback);
   const [newsHeight, setNewsHeight] = createSignal(saved.newsHeight);
   const [hover, setHover] = createSignal<EventTooltipModel | null>(null);
+  const timelineOverlay = new TimelineOverlayController();
 
   let canvas!: HTMLCanvasElement;
   let timeline: Timeline | null = null;
@@ -104,20 +107,12 @@ export function App() {
       if (broker === undefined) throw new Error(`Missing broker for chart ${chart.key}`);
       return {
         id: chart.key,
-        label: `${chart.sourceLabel} · ${chart.symbol}`,
         read: (request) => broker.read(request),
         readSampleAt: (time, out) => broker.readPointAtOrBefore(time, out),
         subscribe: (demand, onChange) => broker.subscribe(demand, onChange),
         palette: chart.palette,
         verticalOffset: chart.verticalOffset,
         height: chart.height,
-        onRemove: () => removeChart(chart.key),
-        onPaletteChange: (palette) => updateChart(chart.key, { palette }),
-        onVerticalOffsetChange: (verticalOffset) => updateChart(chart.key, { verticalOffset }),
-        onDataChange: () => {
-          const cached = broker.cachedRange();
-          if (cached === null) return;
-        },
       };
     });
     timeline.setSignalRows(rows);
@@ -201,10 +196,19 @@ export function App() {
   };
 
   const applyLayout = (layout: TimelineLayout): void => {
-    const heights = new Map(layout.rows.map((row) => [row.id, row.height]));
+    const rows = new Map(layout.rows.map((row) => [row.id, row]));
     setNewsHeight(layout.newsHeight);
     setCharts((current) =>
-      current.map((chart) => ({ ...chart, height: heights.get(chart.key) ?? chart.height })),
+      current.map((chart) => {
+        const layoutRow = rows.get(chart.key);
+        return layoutRow === undefined
+          ? chart
+          : {
+              ...chart,
+              height: layoutRow.height,
+              verticalOffset: layoutRow.verticalOffset,
+            };
+      }),
     );
     persistence.schedule();
   };
@@ -259,6 +263,19 @@ export function App() {
   }
   if (charts().length === 0) addChart("nobitex", "USDTIRT", false);
 
+  const changeChartPalette = (key: string, palette: PaletteName): void => {
+    timeline?.setSignalRowPalette(key, palette);
+    updateChart(key, { palette });
+  };
+
+  const reloadTimelineData = (): void => {
+    eventBroker.clearCache();
+    for (const broker of brokers.values()) broker.clearCache();
+    timeline?.refreshEvents();
+    timeline?.reqDraw();
+    setStatus(`Cleared signal and event caches; reloading ${charts().length} market row(s)…`);
+  };
+
   onMount(() => {
     const range = Range.create(initialViewport.min, initialViewport.max);
     timeline = new Timeline({
@@ -268,6 +285,7 @@ export function App() {
       initialNewsHeight: newsHeight(),
       eventSource: (queryRange) => eventBroker.query(queryRange),
       feedColorOf: (feedId) => registry.colorOf(feedId),
+      overlay: timelineOverlay,
       callbacks: {
         onHover: (event) => {
           if (event === null) {
@@ -286,13 +304,6 @@ export function App() {
           persistence.schedule();
         },
         onLayoutChange: applyLayout,
-        onReload: () => {
-          eventBroker.clearCache();
-          for (const broker of brokers.values()) broker.clearCache();
-          timeline?.refreshEvents();
-          timeline?.reqDraw();
-          setStatus(`Cleared signal and event caches; reloading ${charts().length} market row(s)…`);
-        },
       },
     });
     timeline.setWaveletMode(waveletMode());
@@ -309,6 +320,7 @@ export function App() {
     persistence.dispose();
     unsubscribeEvents?.();
     timeline?.dispose();
+    timelineOverlay.dispose();
     for (const broker of brokers.values()) broker.dispose();
     brokers.clear();
   });
@@ -344,7 +356,16 @@ export function App() {
       />
       <div class="canvas-wrap">
         <canvas ref={canvas} class="timeline" />
-        <EventTooltip value={hover()} />
+        <TimelineOverlay
+          controller={timelineOverlay}
+          rows={charts()}
+          playback={playback()}
+          onTogglePlayback={() => timeline?.togglePlayback()}
+          onReload={reloadTimelineData}
+          onPaletteChange={changeChartPalette}
+          onRemoveRow={removeChart}
+        />
+        <EventTooltip controller={timelineOverlay} value={hover()} />
       </div>
       <div class={`status ${status().kind}`}>{status().message}</div>
     </>

@@ -244,7 +244,7 @@ test("vertical heatmap pan selects scale-aware sampling density", () => {
   );
 });
 
-test("event tooltips prefer the left and remain vertically centered", () => {
+test("event cards overlap their anchor and remain vertically centered", () => {
   const left = placeTooltip({
     anchorX: 220,
     anchorY: 90,
@@ -256,7 +256,7 @@ test("event tooltips prefer the left and remain vertically centered", () => {
   });
 
   assert(left.placement === "left", "tooltip did not prefer the left side");
-  assert(left.x === 96, "left tooltip x-position was incorrect");
+  assert(left.x === 104, "left tooltip x-position was incorrect");
   assert(left.y === 50, "tooltip was not vertically centered");
 
   const right = placeTooltip({
@@ -270,7 +270,7 @@ test("event tooltips prefer the left and remain vertically centered", () => {
   });
 
   assert(right.placement === "right", "tooltip did not flip near the left edge");
-  assert(right.x === 24, "right tooltip x-position was incorrect");
+  assert(right.x === 16, "right tooltip x-position was incorrect");
   assert(right.y === 50, "flipped tooltip was not vertically centered");
 });
 

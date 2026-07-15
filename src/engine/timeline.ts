@@ -1,7 +1,6 @@
 /** One shared, vertically-resizable news and market timeline. */
 
 import type { EventSet, NewsEvent } from "../domain.ts";
-import { Pause, Play, RefreshCw, createElement } from "lucide";
 import type { EventQueryResult } from "../data/events/broker.ts";
 import type { BrokerDemand, Subscription, ReadRequest, SignalView } from "../data/signal/broker.ts";
 import type { MutableSample } from "../data/signal/sample.ts";
@@ -10,7 +9,7 @@ import { DataTransform } from "./transform.ts";
 import { transformTouchRange } from "./gesture.ts";
 import { Plot } from "./plot.ts";
 import { eventIndexAtOrBefore, eventIndexNearPoint } from "./hittest.ts";
-import { PALETTES, paletteCssGradient, type PaletteName } from "./ramp.ts";
+import type { PaletteName } from "./ramp.ts";
 import { kernelContext, type WaveletMode } from "./wavelet.ts";
 import { DEFAULT_MIN_TICK_PX } from "./gfx/axis.ts";
 import type { Frame } from "./gfx/context.ts";
@@ -31,7 +30,6 @@ export type EventSource = (range: Range) => EventQueryResult;
 
 export interface SignalRow {
   readonly id: string;
-  readonly label: string;
   readonly read: DataReader;
   readonly readSampleAt: SampleAtReader;
   readonly subscribe: DataSubscriber;
@@ -39,18 +37,6 @@ export interface SignalRow {
   readonly verticalOffset: number;
   /** Preferred restored height. Used only when the row has no live height yet. */
   readonly height?: number;
-  readonly onRemove?: () => void;
-  readonly onDataChange?: () => void;
-  readonly onPaletteChange?: (palette: PaletteName) => void;
-  readonly onVerticalOffsetChange?: (offset: number) => void;
-}
-
-interface SignalRowChrome {
-  readonly root: HTMLDivElement;
-  readonly tooltip: HTMLDivElement;
-  readonly palette: HTMLButtonElement;
-  readonly paletteBar: HTMLSpanElement;
-  readonly paletteMenu: HTMLDivElement;
 }
 
 export interface HoverInfo {
@@ -60,10 +46,6 @@ export interface HoverInfo {
   readonly feedId: string;
   readonly summary: string;
   readonly t: number;
-  readonly anchorX: number;
-  readonly anchorY: number;
-  readonly viewportWidth: number;
-  readonly viewportHeight: number;
 }
 
 type MutableHoverInfo = { -readonly [Key in keyof HoverInfo]: HoverInfo[Key] };
@@ -73,7 +55,33 @@ export type TimelinePlayback =
 
 export interface TimelineLayout {
   readonly newsHeight: number;
-  readonly rows: readonly { readonly id: string; readonly height: number }[];
+  readonly rows: readonly {
+    readonly id: string;
+    readonly height: number;
+    readonly verticalOffset: number;
+  }[];
+}
+
+export interface TimelineOverlaySink {
+  setNowLine(visible: boolean, x: number, width: number, stroke: string): void;
+  setCrosshair(visible: boolean, x: number, time: number, viewportWidth: number): void;
+  setEventTooltipAnchor(
+    visible: boolean,
+    x: number,
+    y: number,
+    viewportWidth: number,
+    viewportHeight: number,
+  ): void;
+  setRowTop(id: string, top: number): void;
+  hideSignalTooltips(): void;
+  setSignalTooltip(
+    id: string,
+    text: string,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+  ): void;
 }
 
 export interface TimelineCallbacks {
@@ -81,7 +89,6 @@ export interface TimelineCallbacks {
   onViewportChange?: (viewport: { min: number; max: number }, priceScale: number) => void;
   onPlaybackChange?: (playback: TimelinePlayback) => void;
   onLayoutChange?: (layout: TimelineLayout) => void;
-  onReload?: () => void;
 }
 
 export interface TimelineOptions {
@@ -92,6 +99,7 @@ export interface TimelineOptions {
   readonly signalRows?: readonly SignalRow[];
   readonly eventSource: EventSource;
   readonly feedColorOf: (feedId: string) => string;
+  readonly overlay?: TimelineOverlaySink;
   readonly callbacks?: TimelineCallbacks;
   readonly config?: Partial<TimelineConfig>;
 }
@@ -134,8 +142,11 @@ export class Timeline {
   private readonly callbacks: TimelineCallbacks;
   private readonly eventSource: EventSource;
   private readonly feedColorOf: (feedId: string) => string;
+  private readonly overlay: TimelineOverlaySink | undefined;
   private readonly config: TimelineConfig;
   private signalRows: readonly SignalRow[];
+  private eventListeners: AbortController | null = null;
+  // Mutable render-state mirrors. App state owns persistence; Timeline owns live gestures.
   private rowHeights: number[];
   private rowPalettes: PaletteName[];
   private rowVerticalOffsets: number[];
@@ -145,7 +156,6 @@ export class Timeline {
   private rowHoverSamples: MutableSample[];
   private latestDpr = 1;
   private latestNumPx = 0;
-  private readonly rowChrome = new Map<string, SignalRowChrome>();
   private restoreNewsHeightOnFirstRows: boolean;
   private layoutDirty = false;
   private rafId: number | null = null;
@@ -166,12 +176,6 @@ export class Timeline {
   private touchBId: number | null = null;
   private touchBX = 0;
   private touchBY = 0;
-  private readonly nowLine: HTMLDivElement;
-  private readonly nowControls: HTMLDivElement;
-  private readonly playbackButton: HTMLButtonElement;
-  private readonly reloadButton: HTMLButtonElement;
-  private readonly hoverLine: HTMLDivElement;
-  private readonly timeHover: HTMLDivElement;
   private nowTimer: number | null = null;
   private pointerInside = false;
   private pointerPx = 0;
@@ -183,10 +187,6 @@ export class Timeline {
   private notifiedHoverLink = "";
   private notifiedHoverFeedId = "";
   private notifiedHoverSummary = "";
-  private notifiedAnchorX = Number.NaN;
-  private notifiedAnchorY = Number.NaN;
-  private notifiedViewportWidth = Number.NaN;
-  private notifiedViewportHeight = Number.NaN;
   private readonly hoverInfo: MutableHoverInfo = {
     index: -1,
     title: "",
@@ -194,16 +194,13 @@ export class Timeline {
     feedId: "",
     summary: "",
     t: Number.NaN,
-    anchorX: Number.NaN,
-    anchorY: Number.NaN,
-    viewportWidth: Number.NaN,
-    viewportHeight: Number.NaN,
   };
 
   constructor(opts: TimelineOptions) {
     this.canvas = opts.canvas;
     this.eventSource = opts.eventSource;
     this.feedColorOf = opts.feedColorOf;
+    this.overlay = opts.overlay;
     this.callbacks = opts.callbacks ?? {};
     this.config = { ...DEFAULT_TIMELINE_CONFIG, ...opts.config };
     this.restoreNewsHeightOnFirstRows = opts.initialNewsHeight !== undefined;
@@ -215,32 +212,6 @@ export class Timeline {
     this.rowVerticalOffsets = this.signalRows.map((row) => row.verticalOffset);
     this.rowHoverSamples = this.signalRows.map(() => ({ t: Number.NaN, value: Number.NaN }));
     this.plot = new Plot({ canvas: opts.canvas, initialTimeRange: opts.initialTimeRange });
-    const parent = this.canvas.parentElement;
-    if (parent === null) throw new Error("Timeline canvas must have a parent element");
-    this.nowLine = document.createElement("div");
-    this.nowLine.className = "timeline-now-line";
-    this.nowLine.style.background = this.config.nowStroke;
-    this.nowControls = document.createElement("div");
-    this.nowControls.className = "timeline-now-controls";
-    this.playbackButton = document.createElement("button");
-    this.playbackButton.type = "button";
-    this.playbackButton.className = "timeline-icon-button timeline-playback";
-    this.playbackButton.addEventListener("click", this.onPlaybackClick);
-    this.reloadButton = document.createElement("button");
-    this.reloadButton.type = "button";
-    this.reloadButton.className = "timeline-icon-button timeline-reload";
-    this.reloadButton.append(createTimelineIcon(RefreshCw));
-    this.reloadButton.title = "Reload data";
-    this.reloadButton.setAttribute("aria-label", this.reloadButton.title);
-    this.reloadButton.addEventListener("click", this.onReloadClick);
-    this.nowControls.append(this.reloadButton, this.playbackButton);
-    this.hoverLine = document.createElement("div");
-    this.hoverLine.className = "timeline-hover-line";
-    this.hoverLine.hidden = true;
-    this.timeHover = document.createElement("div");
-    this.timeHover.className = "timeline-time-hover";
-    this.timeHover.hidden = true;
-    parent.append(this.nowLine, this.hoverLine, this.timeHover, this.nowControls);
     this.state = {
       events: EMPTY_EVENTS,
       timeRange: opts.initialTimeRange,
@@ -250,9 +221,6 @@ export class Timeline {
       newsHeight: restoredRowHeight(opts.initialNewsHeight, DEFAULT_NEWS_HEIGHT),
       playback: normalizePlayback(opts.initialPlayback),
     };
-    this.syncPlaybackButton();
-    this.rebuildRowChrome();
-
     this.bindEvents();
     if (typeof ResizeObserver !== "undefined") {
       this.resizeObserver = new ResizeObserver(() => this.resize());
@@ -294,7 +262,6 @@ export class Timeline {
     this.fitLayout();
     this.rowEvalTime = rows.map(() => new Float64Array(0));
     this.subscribedDemands = rows.map(() => null);
-    this.rebuildRowChrome();
     this.state.hovered = null;
     this.reqDraw();
   }
@@ -320,7 +287,6 @@ export class Timeline {
   private setPlayback(playback: TimelinePlayback): void {
     if (samePlayback(playback, this.state.playback)) return;
     this.state.playback = playback;
-    this.syncPlaybackButton();
     this.callbacks.onPlaybackChange?.(playback);
     this.reqDraw();
   }
@@ -373,7 +339,11 @@ export class Timeline {
   getLayout(): TimelineLayout {
     return {
       newsHeight: this.state.newsHeight,
-      rows: this.signalRows.map((row, index) => ({ id: row.id, height: this.rowHeights[index]! })),
+      rows: this.signalRows.map((row, index) => ({
+        id: row.id,
+        height: this.rowHeights[index]!,
+        verticalOffset: this.rowVerticalOffsets[index]!,
+      })),
     };
   }
 
@@ -383,17 +353,6 @@ export class Timeline {
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.disposeSignalSubscriptions();
-    this.nowLine.remove();
-    this.playbackButton.removeEventListener("click", this.onPlaybackClick);
-    this.reloadButton.removeEventListener("click", this.onReloadClick);
-    this.nowControls.remove();
-    this.hoverLine.remove();
-    this.timeHover.remove();
-    for (const chrome of this.rowChrome.values()) {
-      chrome.root.remove();
-      chrome.tooltip.remove();
-    }
-    this.rowChrome.clear();
     this.unbindEvents();
   }
 
@@ -411,31 +370,36 @@ export class Timeline {
   }
 
   private bindEvents(): void {
-    this.canvas.addEventListener("pointerdown", this.onPointerDown);
-    window.addEventListener("pointermove", this.onPointerMove);
-    window.addEventListener("pointerup", this.onPointerUp);
-    window.addEventListener("pointercancel", this.onPointerCancel);
-    this.canvas.addEventListener("wheel", this.onWheel, { passive: false });
-    this.canvas.addEventListener("pointermove", this.onHoverMove);
-    this.canvas.addEventListener("pointerleave", this.onHoverLeave);
-    this.canvas.addEventListener("click", this.onClick);
-    this.canvas.addEventListener("dblclick", this.onDoubleClick);
-    document.addEventListener("pointerdown", this.onDocumentPointerDown);
-    window.addEventListener("resize", this.onResize);
+    if (this.eventListeners !== null) {
+      throw new Error("Timeline events are already bound");
+    }
+
+    const controller = new AbortController();
+    this.eventListeners = controller;
+    const { signal } = controller;
+
+    this.canvas.addEventListener("pointerdown", this.onPointerDown, { signal });
+
+    window.addEventListener("pointermove", this.onPointerMove, { signal });
+    window.addEventListener("pointerup", this.onPointerUp, { signal });
+    window.addEventListener("pointercancel", this.onPointerCancel, { signal });
+
+    this.canvas.addEventListener("wheel", this.onWheel, {
+      passive: false,
+      signal,
+    });
+
+    this.canvas.addEventListener("pointermove", this.onHoverMove, { signal });
+    this.canvas.addEventListener("pointerleave", this.onHoverLeave, { signal });
+    this.canvas.addEventListener("click", this.onClick, { signal });
+    this.canvas.addEventListener("dblclick", this.onDoubleClick, { signal });
+
+    window.addEventListener("resize", this.onResize, { signal });
   }
 
   private unbindEvents(): void {
-    this.canvas.removeEventListener("pointerdown", this.onPointerDown);
-    window.removeEventListener("pointermove", this.onPointerMove);
-    window.removeEventListener("pointerup", this.onPointerUp);
-    window.removeEventListener("pointercancel", this.onPointerCancel);
-    this.canvas.removeEventListener("wheel", this.onWheel);
-    this.canvas.removeEventListener("pointermove", this.onHoverMove);
-    this.canvas.removeEventListener("pointerleave", this.onHoverLeave);
-    this.canvas.removeEventListener("click", this.onClick);
-    this.canvas.removeEventListener("dblclick", this.onDoubleClick);
-    document.removeEventListener("pointerdown", this.onDocumentPointerDown);
-    window.removeEventListener("resize", this.onResize);
+    this.eventListeners?.abort();
+    this.eventListeners = null;
   }
 
   private resize(): void {
@@ -444,7 +408,6 @@ export class Timeline {
     const rect = this.canvas.getBoundingClientRect();
     this.canvas.width = Math.floor(rect.width * dpr);
     this.canvas.height = Math.floor(rect.height * dpr);
-    this.hideCrosshair();
     this.fitLayout();
     this.reqDraw();
   }
@@ -456,103 +419,6 @@ export class Timeline {
   }
 
   private onResize = (): void => this.resize();
-
-  private rebuildRowChrome(): void {
-    for (const chrome of this.rowChrome.values()) {
-      chrome.root.remove();
-      chrome.tooltip.remove();
-    }
-    this.rowChrome.clear();
-    const parent = this.canvas.parentElement;
-    if (parent === null) throw new Error("Timeline canvas must have a parent element");
-    for (let index = 0; index < this.signalRows.length; index++) {
-      const row = this.signalRows[index]!;
-      const root = document.createElement("div");
-      root.className = "timeline-price-header";
-      root.title = "Drag this heatmap vertically to move through its fixed scale field";
-      const label = document.createElement("span");
-      label.textContent = row.label;
-      root.append(label);
-      const palette = document.createElement("button");
-      palette.type = "button";
-      palette.className = "timeline-price-palette";
-      palette.title = `Change ${row.label} color map`;
-      palette.setAttribute("aria-label", `Change ${row.label} color map`);
-      palette.setAttribute("aria-haspopup", "listbox");
-      palette.setAttribute("aria-expanded", "false");
-      const paletteBar = document.createElement("span");
-      paletteBar.className = "timeline-price-palette-bar";
-      paletteBar.style.backgroundImage = paletteCssGradient(this.rowPalettes[index]!);
-      const caret = document.createElement("span");
-      caret.className = "timeline-price-palette-caret";
-      caret.textContent = "▾";
-      caret.setAttribute("aria-hidden", "true");
-      palette.append(paletteBar, caret);
-      const paletteMenu = document.createElement("div");
-      paletteMenu.className = "timeline-price-palette-menu";
-      paletteMenu.setAttribute("role", "listbox");
-      paletteMenu.setAttribute("aria-label", `${row.label} color maps`);
-      paletteMenu.hidden = true;
-      for (const name of Object.keys(PALETTES) as PaletteName[]) {
-        const option = document.createElement("button");
-        option.type = "button";
-        option.className = "timeline-price-palette-option";
-        option.setAttribute("role", "option");
-        option.setAttribute("aria-label", name);
-        option.setAttribute("aria-selected", String(name === this.rowPalettes[index]));
-        const optionBar = document.createElement("span");
-        optionBar.className = "timeline-price-palette-option-bar";
-        optionBar.style.backgroundImage = paletteCssGradient(name);
-        option.append(optionBar);
-        option.addEventListener("click", (event) => {
-          event.stopPropagation();
-          this.setRowPalette(index, name);
-          this.closePaletteMenus();
-        });
-        paletteMenu.append(option);
-      }
-      palette.addEventListener("click", (event) => {
-        event.stopPropagation();
-        const willOpen = paletteMenu.hidden;
-        this.closePaletteMenus();
-        paletteMenu.hidden = !willOpen;
-        palette.setAttribute("aria-expanded", String(willOpen));
-        root.classList.toggle("palette-open", willOpen);
-      });
-      palette.addEventListener("keydown", (event) => {
-        if (event.key !== "Escape") return;
-        this.closePaletteMenus();
-        palette.focus();
-      });
-      root.append(palette, paletteMenu);
-      if (row.onRemove !== undefined) {
-        const remove = document.createElement("button");
-        remove.type = "button";
-        remove.className = "timeline-price-remove";
-        remove.textContent = "×";
-        remove.title = `Remove ${row.label}`;
-        remove.setAttribute("aria-label", `Remove ${row.label}`);
-        remove.addEventListener("click", (event) => {
-          event.stopPropagation();
-          row.onRemove?.();
-        });
-        root.append(remove);
-      }
-      const tooltip = document.createElement("div");
-      tooltip.className = "timeline-signal-tooltip";
-      tooltip.hidden = true;
-      parent.append(root, tooltip);
-      this.rowChrome.set(row.id, { root, tooltip, palette, paletteBar, paletteMenu });
-    }
-  }
-
-  private positionRowChrome(row: SignalRow, rowY: number): void {
-    const chrome = this.rowChrome.get(row.id);
-    if (chrome === undefined) return;
-    chrome.root.style.transform = `translate3d(5px, ${rowY + 5}px, 0)`;
-    const index = this.signalRows.indexOf(row);
-    if (index >= 0) chrome.root.dataset.verticalOffset = String(this.rowVerticalOffsets[index]);
-  }
 
   private syncPriceSubscription(index: number, demand: BrokerDemand): void {
     const previous = this.subscribedDemands[index];
@@ -573,10 +439,7 @@ export class Timeline {
     }
     const row = this.signalRows[index];
     if (row === undefined) return;
-    this.signalSubscriptions[index] = row.subscribe(demand, () => {
-      row.onDataChange?.();
-      this.reqDraw();
-    });
+    this.signalSubscriptions[index] = row.subscribe(demand, () => this.reqDraw());
   }
 
   private disposeSignalSubscriptions(): void {
@@ -662,7 +525,7 @@ export class Timeline {
         this.rowPalettes[index]!,
       );
       frame.resolution().draw(result.coverage, gridStepMs, rowY + heatHeight);
-      this.positionRowChrome(row, rowY);
+      this.overlay?.setRowTop(row.id, rowY);
       rowY += rowHeight;
       frame.fillRectPx(0, rowY - 1, width, 1, "rgba(255,255,255,0.18)");
     }
@@ -688,33 +551,17 @@ export class Timeline {
   }
 
   private updateCrosshairOverlay(): void {
-    if (!this.canShowHoverOverlay()) {
-      this.hideCrosshair();
+    const width = this.plot.cssWidth;
+    if (!this.canShowHoverOverlay() || !(width > 0)) {
+      this.overlay?.setCrosshair(false, 0, Number.NaN, width);
       return;
     }
 
-    const width = this.plot.cssWidth;
-    if (!(width > 0)) {
-      this.hideCrosshair();
-      return;
-    }
     const x = Math.max(0, Math.min(width, this.pointerPx));
-    this.hoverLine.hidden = false;
-    this.hoverLine.style.transform = `translate3d(${x - 0.5}px, 0, 0)`;
-    const hoverTime =
+    const time =
       this.state.timeRange.min +
       (x / width) * (this.state.timeRange.max - this.state.timeRange.min);
-    this.timeHover.textContent = formatHoverTime(hoverTime);
-    this.timeHover.hidden = false;
-
-    const timeWidth = this.timeHover.offsetWidth;
-    const margin = 5;
-    const gap = 9;
-    const leftX = x - timeWidth - gap;
-    const maxX = Math.max(margin, width - timeWidth - margin);
-
-    const timeX = leftX >= margin ? leftX : Math.min(x + gap, maxX);
-    this.timeHover.style.transform = `translate3d(${timeX}px, 10px, 0)`;
+    this.overlay?.setCrosshair(true, x, time, width);
   }
 
   /** Shared visibility contract for the crosshair and all hover-owned labels. */
@@ -729,10 +576,8 @@ export class Timeline {
   }
 
   private drawSignalHoverTooltips(frame: Frame): void {
-    if (!this.canShowHoverOverlay()) {
-      this.hideSignalTooltips();
-      return;
-    }
+    this.overlay?.hideSignalTooltips();
+    if (!this.canShowHoverOverlay() || this.overlay === undefined) return;
 
     const x = Math.max(0, Math.min(frame.width, this.pointerPx));
     const hoverTime =
@@ -740,76 +585,39 @@ export class Timeline {
       (x / frame.width) * (this.state.timeRange.max - this.state.timeRange.min);
     let rowY = this.state.newsHeight;
     for (let index = 0; index < this.signalRows.length; index++) {
+      const row = this.signalRows[index]!;
       const rowHeight = this.rowHeights[index]!;
       const heatHeight = Math.max(2, rowHeight - COVERAGE_BAR_HEIGHT);
       const sample = this.rowHoverSamples[index]!;
-      const hasSample = this.signalRows[index]!.readSampleAt(hoverTime, sample);
+      const hasSample = row.readSampleAt(hoverTime, sample);
       const anchorX = !hasSample
         ? x
         : Math.max(0, Math.min(frame.width, frame.tx.timeToX(sample.t)));
       const text = !hasSample ? "loading…" : formatPrice(Math.exp(sample.value));
-      const chrome = this.rowChrome.get(this.signalRows[index]!.id);
-      if (chrome !== undefined) {
-        positionSignalTooltip(frame, chrome.tooltip, anchorX, rowY + heatHeight / 2, text);
-      }
+      positionSignalTooltip(frame, this.overlay, row.id, anchorX, rowY + heatHeight / 2, text);
       rowY += rowHeight;
     }
   }
 
-  private hideCrosshair(): void {
-    this.hoverLine.hidden = true;
-    this.timeHover.hidden = true;
-    this.hideSignalTooltips();
-  }
-
-  private hideSignalTooltips(): void {
-    for (const chrome of this.rowChrome.values()) chrome.tooltip.hidden = true;
-  }
-
-  private setRowPalette(index: number, palette: PaletteName): void {
+  public setSignalRowPalette(id: string, palette: PaletteName): void {
+    const index = this.signalRows.findIndex((row) => row.id === id);
+    if (index < 0 || this.rowPalettes[index] === palette) return;
     this.rowPalettes[index] = palette;
-    const row = this.signalRows[index];
-    if (row !== undefined) {
-      const chrome = this.rowChrome.get(row.id);
-      if (chrome !== undefined) {
-        chrome.paletteBar.style.backgroundImage = paletteCssGradient(palette);
-        for (const option of chrome.paletteMenu.querySelectorAll<HTMLElement>(
-          ".timeline-price-palette-option",
-        )) {
-          option.setAttribute(
-            "aria-selected",
-            String(option.getAttribute("aria-label") === palette),
-          );
-        }
-      }
-      row.onPaletteChange?.(palette);
-    }
     this.reqDraw();
   }
 
-  private closePaletteMenus(): void {
-    for (const chrome of this.rowChrome.values()) {
-      chrome.paletteMenu.hidden = true;
-      chrome.palette.setAttribute("aria-expanded", "false");
-      chrome.root.classList.remove("palette-open");
-    }
-  }
-
   private drawResizeHandles(frame: Frame): void {
-    for (const y of this.boundaryYs()) {
-      frame.fillRectPx(frame.width / 2 - 20, y - 2, 40, 4, "rgba(203,213,225,0.62)");
-    }
-  }
-
-  private boundaryYs(): number[] {
-    if (this.signalRows.length === 0) return [];
-    const ys = [this.state.newsHeight];
+    if (this.signalRows.length === 0) return;
     let y = this.state.newsHeight;
+    this.drawResizeHandle(frame, y);
     for (let index = 0; index < this.rowHeights.length - 1; index++) {
       y += this.rowHeights[index]!;
-      ys.push(y);
+      this.drawResizeHandle(frame, y);
     }
-    return ys;
+  }
+
+  private drawResizeHandle(frame: Frame, y: number): void {
+    frame.fillRectPx(frame.width / 2 - 20, y - 2, 40, 4, "rgba(203,213,225,0.62)");
   }
 
   private boundaryAt(y: number): number | null {
@@ -866,14 +674,14 @@ export class Timeline {
     const next = this.rowVerticalOffsets[index]! + delta;
     if (next === this.rowVerticalOffsets[index]) return;
     this.rowVerticalOffsets[index] = next;
-    this.signalRows[index]?.onVerticalOffsetChange?.(next);
+    this.layoutDirty = true;
     this.reqDraw();
   }
 
   private updateNowLine(now: number): void {
     const { timeRange } = this.state;
     if (now < timeRange.min || now > timeRange.max) {
-      this.nowLine.hidden = true;
+      this.overlay?.setNowLine(false, 0, 0, this.config.nowStroke);
       return;
     }
 
@@ -884,9 +692,12 @@ export class Timeline {
       0,
       Math.min(deviceCanvasWidth - deviceWidth, Math.round(x * this.latestDpr - deviceWidth / 2)),
     );
-    this.nowLine.style.width = `${deviceWidth / this.latestDpr}px`;
-    this.nowLine.style.transform = `translate3d(${deviceLeft / this.latestDpr}px, 0, 0)`;
-    this.nowLine.hidden = false;
+    this.overlay?.setNowLine(
+      true,
+      deviceLeft / this.latestDpr,
+      deviceWidth / this.latestDpr,
+      this.config.nowStroke,
+    );
   }
 
   private scheduleClock(timePerDevicePx: number, renderedNow: number): void {
@@ -905,14 +716,14 @@ export class Timeline {
     );
   }
 
-  private onPlaybackClick = (): void => {
+  public togglePlayback(): void {
     if (this.state.playback.mode === "following") {
       this.setPlayback({ mode: "paused" });
       return;
     }
 
     this.setPlayback({ mode: "following", anchor: this.captureNowAnchor(Date.now()) });
-  };
+  }
 
   private followNowAtRightEdge(): void {
     const now = Date.now();
@@ -921,24 +732,12 @@ export class Timeline {
 
     this.state.playback = { mode: "following", anchor: RIGHT_EDGE_NOW_ANCHOR };
     this.applyTimeRange(Range.create(now - span, now), true);
-    this.syncPlaybackButton();
     this.callbacks.onPlaybackChange?.(this.state.playback);
-  }
-
-  private onReloadClick = (): void => this.callbacks.onReload?.();
-
-  private syncPlaybackButton(): void {
-    const playing = this.state.playback.mode === "following";
-    this.playbackButton.replaceChildren(createTimelineIcon(playing ? Pause : Play));
-    this.playbackButton.setAttribute("aria-pressed", String(playing));
-    this.playbackButton.title = playing ? "Pause current-time playback" : "Play from here";
-    this.playbackButton.setAttribute("aria-label", this.playbackButton.title);
   }
 
   private onPointerDown = (event: PointerEvent): void => {
     this.updatePointer(event);
     this.crosshairPinned = false;
-    this.hideCrosshair();
     this.reqDraw();
     if (event.pointerType === "touch") {
       this.onTouchDown(event);
@@ -1014,7 +813,6 @@ export class Timeline {
       this.canvas.releasePointerCapture(event.pointerId);
     }
     this.updatePointer(event);
-    this.updateCrosshairOverlay();
     this.reqDraw();
   };
 
@@ -1029,7 +827,6 @@ export class Timeline {
     this.resizingBoundary = null;
     this.flushLayoutChange();
     this.verticalPanRow = null;
-    this.hideCrosshair();
     this.reqDraw();
   };
 
@@ -1071,7 +868,6 @@ export class Timeline {
         : this.clickableEventIndexAtCurrentTransform() !== null
           ? "pointer"
           : "";
-    this.updateCrosshairOverlay();
     if (this.dragging || this.resizingBoundary !== null) return;
     this.updateHoverAtCurrentTransform();
     this.reqDraw();
@@ -1080,20 +876,8 @@ export class Timeline {
   private onHoverLeave = (): void => {
     if (this.crosshairPinned) return;
     this.pointerInside = false;
-    this.hideCrosshair();
     if (!this.dragging && this.resizingBoundary === null) this.clearHover();
     this.reqDraw();
-  };
-
-  private onDocumentPointerDown = (event: PointerEvent): void => {
-    const target = event.target;
-    if (
-      target instanceof Element &&
-      target.closest(".timeline-price-palette, .timeline-price-palette-menu") !== null
-    ) {
-      return;
-    }
-    this.closePaletteMenus();
   };
 
   private onClick = (event: MouseEvent): void => {
@@ -1105,7 +889,6 @@ export class Timeline {
     const clickedEventIndex = this.clickableEventIndexAtCurrentTransform();
     this.crosshairPinned = true;
     if (this.updateHoverAtCurrentTransform()) this.reqDraw();
-    this.updateCrosshairOverlay();
     this.reqDraw();
     if (clickedEventIndex !== null) {
       const clicked = this.eventAt(clickedEventIndex);
@@ -1270,10 +1053,8 @@ export class Timeline {
     }
     if (cancelled) {
       this.pointerInside = false;
-      this.hideCrosshair();
       this.clearHover();
     } else if (this.touchAId === null) {
-      this.updateCrosshairOverlay();
       this.updateHoverAtCurrentTransform();
     }
     this.reqDraw();
@@ -1356,18 +1137,16 @@ export class Timeline {
 
     const event = this.eventAt(index);
     const anchorX = Math.max(0, Math.min(width, tx.timeToX(event.t)));
-    const changed =
+    this.overlay?.setEventTooltipAnchor(true, anchorX, eventY, width, height);
+
+    const contentChanged =
       index !== this.notifiedHoverIndex ||
       event.t !== this.notifiedHoverT ||
       event.title !== this.notifiedHoverTitle ||
       event.link !== this.notifiedHoverLink ||
       event.feedId !== this.notifiedHoverFeedId ||
-      event.summary !== this.notifiedHoverSummary ||
-      anchorX !== this.notifiedAnchorX ||
-      eventY !== this.notifiedAnchorY ||
-      width !== this.notifiedViewportWidth ||
-      height !== this.notifiedViewportHeight;
-    if (!changed || this.callbacks.onHover === undefined) return previous !== index;
+      event.summary !== this.notifiedHoverSummary;
+    if (!contentChanged || this.callbacks.onHover === undefined) return previous !== index;
 
     this.notifiedHoverIndex = index;
     this.notifiedHoverT = event.t;
@@ -1375,10 +1154,6 @@ export class Timeline {
     this.notifiedHoverLink = event.link;
     this.notifiedHoverFeedId = event.feedId;
     this.notifiedHoverSummary = event.summary;
-    this.notifiedAnchorX = anchorX;
-    this.notifiedAnchorY = eventY;
-    this.notifiedViewportWidth = width;
-    this.notifiedViewportHeight = height;
     const info = this.hoverInfo;
     info.index = index;
     info.title = event.title;
@@ -1386,10 +1161,6 @@ export class Timeline {
     info.feedId = event.feedId;
     info.summary = event.summary;
     info.t = event.t;
-    info.anchorX = anchorX;
-    info.anchorY = eventY;
-    info.viewportWidth = width;
-    info.viewportHeight = height;
     this.callbacks.onHover(info);
     return previous !== index;
   }
@@ -1397,6 +1168,7 @@ export class Timeline {
   private clearHover(): boolean {
     const visualChanged = this.state.hovered !== null;
     this.state.hovered = null;
+    this.overlay?.setEventTooltipAnchor(false, 0, 0, 0, 0);
     if (this.notifiedHoverIndex === null) return visualChanged;
     this.notifiedHoverIndex = null;
     this.notifiedHoverT = Number.NaN;
@@ -1404,10 +1176,6 @@ export class Timeline {
     this.notifiedHoverLink = "";
     this.notifiedHoverFeedId = "";
     this.notifiedHoverSummary = "";
-    this.notifiedAnchorX = Number.NaN;
-    this.notifiedAnchorY = Number.NaN;
-    this.notifiedViewportWidth = Number.NaN;
-    this.notifiedViewportHeight = Number.NaN;
     this.callbacks.onHover?.(null);
     return visualChanged;
   }
@@ -1441,30 +1209,10 @@ function formatPrice(price: number): string {
   return PRICE_FORMAT.format(price);
 }
 
-const HOVER_TIME_FORMAT = new Intl.DateTimeFormat(undefined, {
-  month: "short",
-  day: "numeric",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-});
-
-function formatHoverTime(time: number): string {
-  return HOVER_TIME_FORMAT.format(new Date(time));
-}
-
-function createTimelineIcon(icon: typeof Play): SVGElement {
-  return createElement(icon, {
-    width: 16,
-    height: 16,
-    "stroke-width": 1.75,
-    "aria-hidden": "true",
-  });
-}
-
 function positionSignalTooltip(
   frame: Frame,
-  tooltip: HTMLDivElement,
+  overlay: TimelineOverlaySink,
+  id: string,
   anchorX: number,
   anchorY: number,
   text: string,
@@ -1479,17 +1227,11 @@ function positionSignalTooltip(
   ctx.font = font;
   const width = Math.ceil(ctx.measureText(text).width) + paddingX * 2 + 2;
   const fitsLeft = anchorX - gap - width >= margin;
-  const left = fitsLeft
+  const x = fitsLeft
     ? anchorX - gap - width
     : Math.max(margin, Math.min(frame.width - width - margin, anchorX + gap));
-  const connectorX = fitsLeft ? left + width : left;
-  const top = Math.max(margin, Math.min(frame.height - height - margin, anchorY - height / 2));
-
-  if (tooltip.textContent !== text) tooltip.textContent = text;
-  tooltip.style.width = `${width}px`;
-  tooltip.style.height = `${height}px`;
-  tooltip.style.transform = `translate3d(${left}px, ${top}px, 0)`;
-  tooltip.hidden = false;
+  const connectorX = fitsLeft ? x + width : x;
+  const y = Math.max(margin, Math.min(frame.height - height - margin, anchorY - height / 2));
 
   ctx.strokeStyle = "rgba(226, 232, 240, 0.58)";
   ctx.lineWidth = 1;
@@ -1502,4 +1244,6 @@ function positionSignalTooltip(
   ctx.fillStyle = "#f8fafc";
   ctx.fill();
   ctx.restore();
+
+  overlay.setSignalTooltip(id, text, x, y, width, height);
 }

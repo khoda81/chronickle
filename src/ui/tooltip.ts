@@ -17,15 +17,24 @@ export interface TooltipPlacementInput {
   readonly margin?: number;
 }
 
-/** Place a tooltip beside its anchor, preferring the past/left side. */
+/**
+ * Place the event tooltip like a card pulled from a horizontal deck.
+ *
+ * The horizontal `gap` is intentionally an overlap rather than empty spacing:
+ * the event dot sits slightly inside the card's edge. The card prefers the
+ * left/past side, remains vertically centered on the event dot, and is clamped
+ * below the top strip reserved for the timeline's time-hover label.
+ */
 export function placeTooltip(input: TooltipPlacementInput): TooltipPosition {
+  const anchorOverlap = input.gap ?? 9;
   const margin = input.margin ?? 8;
 
   const maxX = Math.max(margin, input.viewportWidth - margin - input.width);
   const maxY = Math.max(margin, input.viewportHeight - margin - input.height);
 
-  const leftX = input.anchorX - input.width + 8;
-  const rightX = input.anchorX - 8;
+  // Deliberately overlap the event dot with the corresponding card edge.
+  const leftX = input.anchorX - input.width + anchorOverlap;
+  const rightX = input.anchorX - anchorOverlap;
 
   const leftFits = leftX >= margin;
   const rightFits = rightX + input.width <= input.viewportWidth - margin;
@@ -36,7 +45,10 @@ export function placeTooltip(input: TooltipPlacementInput): TooltipPosition {
 
   return {
     x: clamp(preferredX, margin, maxX),
+
+    // Keep the event card below the time-hover label at the top of the timeline.
     y: clamp(preferredY, 4 * margin + 15, maxY),
+
     placement,
   };
 }
