@@ -236,6 +236,7 @@ function main(): void {
       id: chart.key,
       label: `${chart.sourceLabel} · ${chart.symbol}`,
       read: (request) => chart.broker.read(request),
+      readLogPriceAt: (time) => chart.broker.logPriceAtOrBefore(time),
       subscribe: (demand, onChange) => chart.broker.subscribe(demand, onChange),
       palette: chart.palette,
       verticalOffset: chart.verticalOffset,

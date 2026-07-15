@@ -147,6 +147,35 @@ test("price span store returns NaN outside coverage and holds ZOH values", () =>
   const sampled = store.sample(evalTime, 20).value;
   assert(Number.isNaN(sampled[0]!), "value before first observation was defined");
   assert(sampled[1] === 1 && sampled[2] === 2 && sampled[3] === 2, "ZOH evaluation is incorrect");
+  assert(store.logPriceAtOrBefore(4) === null, "predecessor lookup invented a leading price");
+  assert(store.logPriceAtOrBefore(10) === 1, "predecessor lookup missed an interior value");
+  assert(store.logPriceAtOrBefore(15) === 2, "predecessor lookup missed a boundary value");
+  assert(store.logPriceAtOrBefore(30) === 2, "predecessor lookup did not hold the latest price");
+});
+
+test("price predecessor lookup holds across uncovered gaps", () => {
+  const store = new PriceSpanStore();
+  store.insertBatch([
+    {
+      startTime: 10,
+      endTime: 20,
+      startLogPrice: 1,
+      endLogPrice: 2,
+      resolutionMs: 10,
+    },
+    {
+      startTime: 40,
+      endTime: 50,
+      startLogPrice: 3,
+      endLogPrice: 4,
+      resolutionMs: 10,
+    },
+  ]);
+  assert(store.logPriceAtOrBefore(30) === 2, "gap lookup did not use the preceding observation");
+  assert(
+    store.logPriceAtOrBefore(40) === 3,
+    "new observation did not take effect at its timestamp",
+  );
 });
 
 test("broker read is side-effect-free and viewport subscriptions drive fetching", async () => {
@@ -461,6 +490,7 @@ test("returned future points are discarded while the last valid sample is held",
     "presented coverage entered the future",
   );
   assert(Number.isNaN(result.value[2]!), "future value was rendered");
+  approx(Math.exp(broker.logPriceAtOrBefore(10_000)!), 11, 1e-12);
   assert(
     warnings.some((message) => message.includes("10000")),
     "future API point was silent",

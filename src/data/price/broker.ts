@@ -160,7 +160,12 @@ export class Broker {
             ...this.readySegments(evalTime, wallNow),
             ...this.emptyCoverage.segments(historicalRange, maxDeltaTMs),
             ...this.transientSegments(historicalRange),
-          ].sort((a, b) => b.resolutionMs - a.resolutionMs || a.range.min - b.range.min);
+          ].sort(
+            (a, b) =>
+              a.range.min - b.range.min ||
+              coverageLabelRank(b.state) - coverageLabelRank(a.state) ||
+              a.range.max - b.range.max,
+          );
 
     return {
       value,
@@ -256,6 +261,14 @@ export class Broker {
 
   cachedRange(): Range | null {
     return this.store.timeRange();
+  }
+
+  /** Latest cached log price at or before `time`, clamped to the live wall clock. */
+  logPriceAtOrBefore(time: number): number | null {
+    if (!Number.isFinite(time)) {
+      throw new Error(`Broker.logPriceAtOrBefore: invalid time ${time}`);
+    }
+    return this.store.logPriceAtOrBefore(Math.min(time, this.now()));
   }
 
   private ensure(demand: BrokerDemand): void {
@@ -626,6 +639,13 @@ function clampToNow(range: Range, now: number): Range | null {
   if (!Number.isFinite(now)) throw new Error(`Broker: invalid wall clock ${now}`);
   const max = Math.min(range.max, now);
   return range.min < max ? Range.create(range.min, max) : null;
+}
+
+function coverageLabelRank(state: ResolutionSegment["state"]): number {
+  if (state === "failed") return 3;
+  if (state === "pending") return 2;
+  if (state === "ready") return 1;
+  return 0;
 }
 
 interface ClippedPoints {

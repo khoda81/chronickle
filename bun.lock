@@ -6,6 +6,7 @@
       "name": "chronickle",
       "dependencies": {
         "d3-time": "^3.1.0",
+        "lucide": "^1.24.0",
       },
       "devDependencies": {
         "@types/d3-time": "^3.0.4",
@@ -426,6 +427,13 @@
       "",
       {},
       "sha512-5Hh7Y1wQbvY5ooGgPbDaL5iYLAPzMTUrjMulskHLH6wnv/A+1q5rgEaiuqEjB+oxGXIVZs1FF+R/KPN3ZSQYYg==",
+    ],
+
+    "lucide": [
+      "lucide@1.24.0",
+      "",
+      {},
+      "sha512-oMAaeuNDc5VCnBb3IjwKYGRT56tqanUm1fyDFT5Tl8hWSZND59gztgjvXje08jKLPVAq0gHJcwZUE8GCQxzBeg==",
     ],
 
     "nanoid": [

@@ -5,7 +5,7 @@ export const MIN_NEWS_HEIGHT = 64;
 export const MIN_PRICE_ROW_HEIGHT = 130;
 
 /** Coverage/resolution diagnostics at the bottom of every price row. */
-export const RESOLUTION_BAR_HEIGHT = 8;
+export const RESOLUTION_BAR_HEIGHT = 18;
 /** Reference height that defines the logarithmic vertical scale spacing. */
 export const HEATMAP_FIELD_HEIGHT = 640;
 /** Maximum horizontal supersampling used when viewing sub-pixel scales. */

@@ -391,11 +391,17 @@ canvas.timeline:active {
   display: none;
 }
 
-.timeline-follow-lock {
+.timeline-now-controls {
   position: absolute;
   z-index: 6;
   top: 9px;
   right: 9px;
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.timeline-icon-button {
   display: grid;
   width: 28px;
   height: 28px;
@@ -404,19 +410,36 @@ canvas.timeline:active {
   border: 1px solid rgba(148, 163, 184, 0.55);
   border-radius: 6px;
   background: rgba(5, 7, 13, 0.9);
-  color: #f8fafc;
-  font-size: 14px;
-  line-height: 1;
+  color: #cbd5e1;
   cursor: pointer;
   box-shadow: 0 3px 12px rgba(0, 0, 0, 0.3);
 }
 
-.timeline-follow-lock:hover {
-  border-color: rgba(226, 232, 240, 0.9);
-  background: rgba(15, 23, 42, 0.96);
+.timeline-icon-button svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
 }
 
-.timeline-follow-lock[hidden] {
+.timeline-icon-button:hover {
+  border-color: rgba(226, 232, 240, 0.9);
+  background: rgba(15, 23, 42, 0.96);
+  color: #f8fafc;
+}
+
+.timeline-icon-button:focus-visible {
+  outline: 2px solid rgba(125, 211, 252, 0.9);
+  outline-offset: 2px;
+}
+
+.timeline-icon-button[aria-pressed="true"] {
+  border-color: rgba(167, 243, 208, 0.78);
+  color: #a7f3d0;
+}
+
+.timeline-icon-button[hidden] {
   display: none;
 }
 

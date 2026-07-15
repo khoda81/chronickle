@@ -86,6 +86,20 @@ export class PriceSpanStore {
       : null;
   }
 
+  /** Latest observed log price at or before `time`, including after the final span. */
+  logPriceAtOrBefore(time: number): number | null {
+    if (!Number.isFinite(time)) {
+      throw new Error(`PriceSpanStore.logPriceAtOrBefore: invalid time ${time}`);
+    }
+    const location = this.findSpanStartingAtOrBefore(time);
+    if (location === null) return null;
+    const selected = this.selectBoundaryOwner(location, time);
+    const block = this.blocks[selected.blockIndex]!;
+    return time >= block.endTime[selected.spanIndex]!
+      ? block.endLogPrice[selected.spanIndex]!
+      : block.startLogPrice[selected.spanIndex]!;
+  }
+
   /** Overlay a sorted, internally non-overlapping batch. */
   insertBatch(incoming: readonly PriceSpanInput[]): void {
     if (incoming.length === 0) return;
@@ -340,6 +354,13 @@ export class PriceSpanStore {
   }
 
   private findContainingSpan(t: number): SpanLocation | null {
+    const location = this.findSpanStartingAtOrBefore(t);
+    if (location === null) return null;
+    const block = this.blocks[location.blockIndex]!;
+    return t <= block.endTime[location.spanIndex]! ? location : null;
+  }
+
+  private findSpanStartingAtOrBefore(t: number): SpanLocation | null {
     if (this.blocks.length === 0) return null;
     let lo = 0;
     let hi = this.blocks.length;
@@ -359,7 +380,7 @@ export class PriceSpanStore {
       else innerHi = mid;
     }
     const spanIndex = innerLo - 1;
-    return spanIndex >= 0 && t <= block.endTime[spanIndex]! ? { blockIndex, spanIndex } : null;
+    return spanIndex >= 0 ? { blockIndex, spanIndex } : null;
   }
 
   private previousLocation(location: SpanLocation): SpanLocation | null {
