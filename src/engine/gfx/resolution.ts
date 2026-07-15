@@ -1,23 +1,15 @@
 import type { ResolutionSegment } from "../../data/price/coverage.ts";
+import { rampCss, rampIndex, rampLut, type PaletteName } from "../ramp.ts";
 import type { Frame } from "./context.ts";
 import { RESOLUTION_BAR_HEIGHT } from "./layout.ts";
 
-const COLORS = {
-  ready: "rgba(45, 212, 191, 0.82)",
-  pending: "rgba(250, 204, 21, 0.88)",
-  failed: "rgba(248, 113, 113, 0.92)",
-  empty: "rgba(107, 114, 128, 0.70)",
-} as const;
-
-const LABEL_COLORS = {
-  ready: "#052e2b",
-  pending: "#302600",
-  failed: "#3f0909",
-  empty: "#f8fafc",
-} as const;
-
 export interface ResolutionLayer {
-  draw(segments: readonly ResolutionSegment[], targetResolutionMs: number, y: number): void;
+  draw(
+    segments: readonly ResolutionSegment[],
+    targetResolutionMs: number,
+    y: number,
+    palette: PaletteName,
+  ): void;
 }
 
 export const Resolution = {
@@ -29,69 +21,56 @@ export const Resolution = {
 class ResolutionImpl implements ResolutionLayer {
   constructor(private readonly frame: Frame) {}
 
-  draw(segments: readonly ResolutionSegment[], targetResolutionMs: number, y: number): void {
+  draw(
+    segments: readonly ResolutionSegment[],
+    targetResolutionMs: number,
+    y: number,
+    palette: PaletteName,
+  ): void {
     const { frame } = this;
-    frame.fillRectPx(0, y, frame.width, RESOLUTION_BAR_HEIGHT, "#0a0e17");
+    const width = Math.ceil(frame.width);
+    if (width <= 0) return;
+    const quality = frame.scratch;
+    quality.fill(0, 0, width);
 
-    // Finer samples are taller. The broker orders coarse before fine, so finer
-    // evidence covers coarser evidence while pending/failed state remains
-    // visibly layered above ready/empty state.
-    for (let rank = 0; rank < 3; rank++) {
-      for (const segment of segments) {
-        if (stateRank(segment.state) !== rank) continue;
-        const x0 = Math.max(0, frame.tx.timeToX(segment.range.min));
-        const x1 = Math.min(frame.width, frame.tx.timeToX(segment.range.max));
-        if (!(x1 > x0)) continue;
-        const barHeight = resolutionHeight(segment.resolutionMs);
-        frame.fillRectPx(
-          x0,
-          y + RESOLUTION_BAR_HEIGHT - barHeight,
-          x1 - x0,
-          barHeight,
-          COLORS[segment.state],
-        );
-        if (x1 - x0 >= 64) {
-          const detail =
-            segment.state === "failed" && segment.message !== undefined && x1 - x0 >= 180
-              ? ` · ${segment.message}`
-              : "";
-          frame.text(
-            `${segment.state} ${formatResolution(segment.resolutionMs)}${detail}`,
-            x0 + 4,
-            y + RESOLUTION_BAR_HEIGHT - 5,
-            "10px ui-monospace, monospace",
-            LABEL_COLORS[segment.state],
-          );
-        }
-      }
+    // Ready evidence composes by maximum quality. Empty ranges remain exactly
+    // zero, so they can never paint over overlapping ready data.
+    for (const segment of segments) {
+      if (segment.state !== "ready") continue;
+      const x0 = Math.max(0, Math.floor(frame.tx.timeToX(segment.range.min)));
+      const x1 = Math.min(width, Math.ceil(frame.tx.timeToX(segment.range.max)));
+      if (!(x1 > x0)) continue;
+      const value = Math.min(1, targetResolutionMs / segment.resolutionMs);
+      for (let x = x0; x < x1; x++) quality[x] = Math.max(quality[x]!, value);
     }
 
-    frame.fillRectPx(0, y, frame.width, 1, "rgba(255,255,255,0.14)");
-    frame.text(
-      `coverage · target ${formatResolution(targetResolutionMs)}`,
-      6,
-      y + 4,
-      "10px ui-monospace, monospace",
-      "#cbd5e1",
-      "left",
-      "top",
-    );
+    const lut = rampLut(palette);
+    let runStart = 0;
+    let runIndex = rampIndex(quality[0]!);
+    for (let x = 1; x <= width; x++) {
+      const nextIndex = x < width ? rampIndex(quality[x]!) : -1;
+      if (nextIndex === runIndex) continue;
+      frame.fillRectPx(runStart, y, x - runStart, RESOLUTION_BAR_HEIGHT, rampCss(lut, runIndex));
+      runStart = x;
+      runIndex = nextIndex;
+    }
+
+    // Loading and failure are request state, not sample quality. Keep them as
+    // compact overlays without replacing the quality color underneath.
+    for (const segment of segments) {
+      if (segment.state !== "pending" && segment.state !== "failed") continue;
+      const x0 = Math.max(0, frame.tx.timeToX(segment.range.min));
+      const x1 = Math.min(frame.width, frame.tx.timeToX(segment.range.max));
+      if (!(x1 > x0)) continue;
+      frame.fillRectPx(
+        x0,
+        segment.state === "failed" ? y : y + RESOLUTION_BAR_HEIGHT - 2,
+        x1 - x0,
+        2,
+        segment.state === "failed" ? "rgba(248, 113, 113, 0.95)" : "rgba(250, 204, 21, 0.95)",
+      );
+    }
+
+    frame.fillRectPx(0, y, frame.width, 1, "rgba(255,255,255,0.18)");
   }
-}
-
-function stateRank(state: ResolutionSegment["state"]): number {
-  return state === "ready" || state === "empty" ? 0 : state === "pending" ? 1 : 2;
-}
-
-function resolutionHeight(resolutionMs: number): number {
-  const minutes = Math.max(1, resolutionMs / 1_000 / 60);
-  return Math.max(10, RESOLUTION_BAR_HEIGHT - Math.log2(minutes) * 2.2);
-}
-
-function formatResolution(ms: number): string {
-  if (ms >= 86_400_000 && ms % 86_400_000 === 0) return `${ms / 86_400_000}d`;
-  if (ms >= 3_600_000 && ms % 3_600_000 === 0) return `${ms / 3_600_000}h`;
-  if (ms >= 60_000 && ms % 60_000 === 0) return `${ms / 60_000}m`;
-  if (ms >= 1_000 && ms % 1_000 === 0) return `${ms / 1_000}s`;
-  return `${Math.round(ms)}ms`;
 }

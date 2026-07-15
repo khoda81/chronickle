@@ -1,5 +1,4 @@
 import type { Frame } from "./context.ts";
-import { HEATMAP_FIELD_HEIGHT, MIN_SIGMA, maxSigmaFor } from "./layout.ts";
 import { RAMP_RESOLUTION, rampLut, rampIndex, type PaletteName } from "../ramp.ts";
 import {
   computeWaveletField,
@@ -21,6 +20,7 @@ export interface PaddedEval {
   readonly value: Float64Array;
   readonly padLeft: number;
   readonly padRight: number;
+  readonly visibleCells: number;
   /** Broker cache revision, used to avoid recomputation on hover-only draws. */
   readonly revision: number;
 }
@@ -32,7 +32,8 @@ export interface HeatmapLayer {
     mode: WaveletMode,
     y: number,
     viewportHeight: number,
-    verticalOffset: number,
+    minScaleMs: number,
+    maxScaleMs: number,
     palette: PaletteName,
   ): void;
   drawFadeOverlay(y: number, heatHeight: number): void;
@@ -52,8 +53,8 @@ interface HeatmapResources {
 
 // Adjacent rows are logarithmically close in scale and the Gaussian scale-space
 // is smooth along that axis. Evaluate a compact set of anchor scales, then
-// interpolate values before the sigmoid. At typical row heights this removes
-// ~80% of inverse FFTs while retaining one displayed value per CSS row.
+// interpolate values before the sigmoid. The transform count also shrinks when
+// a row is vertically compacted.
 const MAX_TRANSFORM_BANDS = 32;
 
 const SIGMOID_MIN = -18;
@@ -78,7 +79,7 @@ class HeatmapImpl implements HeatmapLayer {
   constructor(
     private readonly frame: Frame,
     private readonly resources: HeatmapResources,
-  ) { }
+  ) {}
 
   drawWaveletField(
     padded: PaddedEval,
@@ -86,20 +87,17 @@ class HeatmapImpl implements HeatmapLayer {
     mode: WaveletMode,
     y: number,
     viewportHeight: number,
-    verticalOffset: number,
+    minScaleMs: number,
+    maxScaleMs: number,
     palette: PaletteName,
   ): void {
-    const { tx, ctx, dpr } = this.frame;
+    const { tx, ctx } = this.frame;
     const width = tx.screenDomain.max - tx.screenDomain.min;
-    const numPx = Math.ceil(width * dpr);
-    // One independently evaluated scale per visible CSS row. Using device
-    // rows would duplicate work on HiDPI screens without a perceptible gain;
-    // Canvas performs the final DPR rasterization.
-    const bandCount = HEATMAP_FIELD_HEIGHT;
+    const bandCount = Math.max(2, Math.ceil(viewportHeight));
     const transformBandCount = Math.min(bandCount, MAX_TRANSFORM_BANDS);
-    if (numPx <= 0) return;
+    if (!(width > 0) || !(viewportHeight > 0)) return;
 
-    const { evalTime, value, padLeft, padRight } = padded;
+    const { evalTime, value, padLeft, padRight, visibleCells } = padded;
     if (evalTime.length !== value.length) {
       throw new Error(`drawWaveletField: length mismatch (${evalTime.length} vs ${value.length})`);
     }
@@ -108,13 +106,18 @@ class HeatmapImpl implements HeatmapLayer {
     if (
       !Number.isInteger(padLeft) ||
       !Number.isInteger(padRight) ||
+      !Number.isInteger(visibleCells) ||
       padLeft < 0 ||
       padRight < 0 ||
-      padLeft + numPx + padRight !== cellCount
+      visibleCells < 1 ||
+      padLeft + visibleCells + padRight !== cellCount
     ) {
       throw new Error(
-        `drawWaveletField: cells=${cellCount}, visible=${numPx}, padding=${padLeft}+${padRight}`,
+        `drawWaveletField: cells=${cellCount}, visible=${visibleCells}, padding=${padLeft}+${padRight}`,
       );
+    }
+    if (!(minScaleMs > 0) || !(maxScaleMs >= minScaleMs)) {
+      throw new Error(`drawWaveletField: invalid scale range ${minScaleMs}..${maxScaleMs}`);
     }
 
     const stepMs = evalTime[1]! - evalTime[0]!;
@@ -125,24 +128,18 @@ class HeatmapImpl implements HeatmapLayer {
       padded.revision,
       evalTime[0],
       stepMs,
-      numPx,
+      visibleCells,
       padLeft,
       padRight,
       priceScale,
       mode,
       palette,
       bandCount,
+      minScaleMs,
+      maxScaleMs,
     ].join("|");
     if (resources.lastRenderKey === renderKey) {
-      drawClippedField(
-        ctx,
-        resources.offscreen,
-        tx.screenDomain.min,
-        y,
-        width,
-        viewportHeight,
-        verticalOffset,
-      );
+      drawField(ctx, resources.offscreen, tx.screenDomain.min, y, width, viewportHeight);
       return;
     }
     resources.returns = logPriceEdgesToReturns(value, resources.returns);
@@ -150,14 +147,14 @@ class HeatmapImpl implements HeatmapLayer {
     if (resources.scalesMs.length !== transformBandCount) {
       resources.scalesMs = new Float64Array(transformBandCount);
     }
-    const maxSigma = maxSigmaFor(numPx);
+    const scaleRatio = maxScaleMs / minScaleMs;
     for (let band = 0; band < transformBandCount; band++) {
-      const sigmaPx = MIN_SIGMA * Math.pow(maxSigma / MIN_SIGMA, band / (transformBandCount - 1));
-      resources.scalesMs[band] = sigmaPx * stepMs;
+      const position = transformBandCount === 1 ? 0 : band / (transformBandCount - 1);
+      resources.scalesMs[band] = minScaleMs * Math.pow(scaleRatio, position);
     }
 
     resources.validWindow.start = padLeft;
-    resources.validWindow.count = numPx;
+    resources.validWindow.count = visibleCells;
     const field = computeWaveletField(
       resources.returns,
       stepMs,
@@ -167,24 +164,24 @@ class HeatmapImpl implements HeatmapLayer {
       resources.wavelet,
       mode === "centered" ? resources.validWindow : undefined,
     );
-    ensureImage(resources, numPx, bandCount);
+    ensureImage(resources, visibleCells, bandCount);
     const imagePixels = resources.imagePixels!;
     const ramp = packedRampLut(palette);
     const sigmoid = sigmoidIndexLut();
     const sigmoidScale = (SIGMOID_LUT_SIZE - 1) / (SIGMOID_MAX - SIGMOID_MIN);
     const sigmoidMidpoint = Math.floor((RAMP_RESOLUTION - 1) / 2);
     const gain = Math.exp(priceScale);
-    const scaleRatio = (transformBandCount - 1) / (bandCount - 1);
+    const displayScaleRatio = (transformBandCount - 1) / (bandCount - 1);
 
     for (let band = 0; band < bandCount; band++) {
-      const sourceBand = band * scaleRatio;
+      const sourceBand = band * displayScaleRatio;
       const lowerBand = Math.floor(sourceBand);
       const upperBand = Math.min(transformBandCount - 1, lowerBand + 1);
       const mix = sourceBand - lowerBand;
       const lowerOffset = lowerBand * value.length + padLeft;
       const upperOffset = upperBand * value.length + padLeft;
-      const pixelBandOffset = band * numPx;
-      for (let x = 0; x < numPx; x++) {
+      const pixelBandOffset = band * visibleCells;
+      for (let x = 0; x < visibleCells; x++) {
         const lower = field.values[lowerOffset + x]!;
         const upper = field.values[upperOffset + x]!;
         const z = lower + (upper - lower) * mix;
@@ -208,15 +205,7 @@ class HeatmapImpl implements HeatmapLayer {
 
     resources.offCtx.putImageData(resources.imageData!, 0, 0);
     resources.lastRenderKey = renderKey;
-    drawClippedField(
-      ctx,
-      resources.offscreen,
-      tx.screenDomain.min,
-      y,
-      width,
-      viewportHeight,
-      verticalOffset,
-    );
+    drawField(ctx, resources.offscreen, tx.screenDomain.min, y, width, viewportHeight);
   }
 
   drawFadeOverlay(y: number, heatHeight: number): void {
@@ -297,21 +286,15 @@ function packedRampLut(name: PaletteName): Uint32Array {
   return result;
 }
 
-function drawClippedField(
+function drawField(
   ctx: CanvasRenderingContext2D,
   image: OffscreenCanvas,
   x: number,
   y: number,
   width: number,
   viewportHeight: number,
-  verticalOffset: number,
 ): void {
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(x, y, width, viewportHeight);
-  ctx.clip();
-  ctx.drawImage(image, x, y + verticalOffset, width, HEATMAP_FIELD_HEIGHT);
-  ctx.restore();
+  ctx.drawImage(image, x, y, width, viewportHeight);
 }
 
 function packRgba(red: number, green: number, blue: number, alpha: number): number {

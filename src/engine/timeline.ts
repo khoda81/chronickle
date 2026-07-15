@@ -24,7 +24,7 @@ import {
   MIN_PRICE_ROW_HEIGHT,
   RESIZE_HANDLE_RADIUS,
   RESOLUTION_BAR_HEIGHT,
-  maxSigmaFor,
+  heatmapScaleWindow,
 } from "./gfx/layout.ts";
 
 export type DataReader = (request: QueryOptions) => QueryResult;
@@ -124,11 +124,13 @@ export class Timeline {
   private rowHeights: number[];
   private rowPalettes: PaletteName[];
   private rowVerticalOffsets: number[];
-  private priceSubscriptions: BrokerSubscription[] = [];
-  private subscribedDemand: BrokerDemand | null = null;
+  private priceSubscriptions: Array<BrokerSubscription | undefined> = [];
+  private subscribedDemands: Array<BrokerDemand | null> = [];
   private latestPriceValues: Float64Array[] = [];
+  private rowEvalTime: Float64Array[] = [];
+  private latestEvalStart: number[] = [];
+  private latestEvalStep: number[] = [];
   private latestDpr = 1;
-  private latestPadLeft = 0;
   private latestNumPx = 0;
   private readonly rowChrome = new Map<string, PriceRowChrome>();
   private rafId: number | null = null;
@@ -149,11 +151,12 @@ export class Timeline {
   private touchBId: number | null = null;
   private touchBX = 0;
   private touchBY = 0;
-  private evalTime = new Float64Array(0);
   private readonly nowLine: HTMLDivElement;
+  private readonly followLock: HTMLButtonElement;
   private readonly hoverLine: HTMLDivElement;
   private readonly timeHover: HTMLDivElement;
   private nowTimer: number | null = null;
+  private lastFollowNow = Number.NaN;
   private pointerInside = false;
   private pointerPx = 0;
   private pointerPy = 0;
@@ -196,15 +199,22 @@ export class Timeline {
     if (parent === null) throw new Error("Timeline canvas must have a parent element");
     this.nowLine = document.createElement("div");
     this.nowLine.className = "timeline-now-line";
-    this.nowLine.style.width = `${this.config.nowWidth}px`;
     this.nowLine.style.background = this.config.nowStroke;
+    this.followLock = document.createElement("button");
+    this.followLock.type = "button";
+    this.followLock.className = "timeline-follow-lock";
+    this.followLock.textContent = "🔒";
+    this.followLock.title = "Return to live time";
+    this.followLock.setAttribute("aria-label", "Return to live time");
+    this.followLock.hidden = true;
+    this.followLock.addEventListener("click", this.onFollowLockClick);
     this.hoverLine = document.createElement("div");
     this.hoverLine.className = "timeline-hover-line";
     this.hoverLine.hidden = true;
     this.timeHover = document.createElement("div");
     this.timeHover.className = "timeline-time-hover";
     this.timeHover.hidden = true;
-    parent.append(this.nowLine, this.hoverLine, this.timeHover);
+    parent.append(this.nowLine, this.hoverLine, this.timeHover, this.followLock);
     this.state = {
       events: EMPTY_EVENTS,
       timeRange: opts.initialTimeRange,
@@ -212,6 +222,8 @@ export class Timeline {
       waveletMode: "centered",
       hovered: null,
       newsHeight: DEFAULT_NEWS_HEIGHT,
+      followNow: true,
+      nowAnchor: 0.85,
     };
     this.rebuildRowChrome();
 
@@ -249,6 +261,10 @@ export class Timeline {
     if (!hadPriceRows && rows.length > 0) this.state.newsHeight = DEFAULT_NEWS_HEIGHT;
     this.fitLayout();
     this.latestPriceValues = rows.map(() => new Float64Array(0));
+    this.rowEvalTime = rows.map(() => new Float64Array(0));
+    this.latestEvalStart = rows.map(() => Number.NaN);
+    this.latestEvalStep = rows.map(() => Number.NaN);
+    this.subscribedDemands = rows.map(() => null);
     this.rebuildRowChrome();
     this.state.hovered = null;
     this.reqDraw();
@@ -262,10 +278,27 @@ export class Timeline {
   }
 
   setTimeRange(range: Range): void {
+    this.applyTimeRange(range, true);
+    if (this.state.followNow) this.lastFollowNow = Number.NaN;
+  }
+
+  private applyTimeRange(range: Range, notify: boolean): void {
     this.state.timeRange = range;
     this.plot.setTimeRange(range);
-    this.notifyViewportChange();
+    if (notify) this.notifyViewportChange();
     this.reqDraw();
+  }
+
+  private setFollowNow(followNow: boolean): void {
+    if (followNow === this.state.followNow) return;
+    this.state.followNow = followNow;
+    this.followLock.hidden = followNow;
+    this.lastFollowNow = Number.NaN;
+    this.reqDraw();
+  }
+
+  private detachFromNow(): void {
+    this.setFollowNow(false);
   }
 
   getTimeRange(): Range {
@@ -298,6 +331,8 @@ export class Timeline {
     this.resizeObserver = null;
     this.disposePriceSubscriptions();
     this.nowLine.remove();
+    this.followLock.removeEventListener("click", this.onFollowLockClick);
+    this.followLock.remove();
     this.hoverLine.remove();
     this.timeHover.remove();
     for (const chrome of this.rowChrome.values()) {
@@ -452,63 +487,54 @@ export class Timeline {
     if (index >= 0) chrome.root.dataset.verticalOffset = String(this.rowVerticalOffsets[index]);
   }
 
-  private syncPriceSubscriptions(demand: BrokerDemand): void {
-    const previous = this.subscribedDemand;
+  private syncPriceSubscription(index: number, demand: BrokerDemand): void {
+    const previous = this.subscribedDemands[index];
     if (
       previous !== null &&
+      previous !== undefined &&
       previous.range.min === demand.range.min &&
       previous.range.max === demand.range.max &&
       previous.maxDeltaTMs === demand.maxDeltaTMs
     ) {
       return;
     }
-    this.subscribedDemand = demand;
-    if (this.priceSubscriptions.length === 0) {
-      this.priceSubscriptions = this.priceRows.map((row) =>
-        row.subscribe(demand, () => {
-          row.onDataChange?.();
-          this.reqDraw();
-        }),
-      );
+    this.subscribedDemands[index] = demand;
+    const existing = this.priceSubscriptions[index];
+    if (existing !== undefined) {
+      existing.update(demand);
       return;
     }
-    for (const subscription of this.priceSubscriptions) subscription.update(demand);
+    const row = this.priceRows[index];
+    if (row === undefined) return;
+    this.priceSubscriptions[index] = row.subscribe(demand, () => {
+      row.onDataChange?.();
+      this.reqDraw();
+    });
   }
 
   private disposePriceSubscriptions(): void {
-    for (const subscription of this.priceSubscriptions) subscription.dispose();
+    for (const subscription of this.priceSubscriptions) subscription?.dispose();
     this.priceSubscriptions = [];
-    this.subscribedDemand = null;
+    this.subscribedDemands = [];
   }
 
   private draw = (): void => {
     if (!(this.plot.cssWidth > 0) || !(this.plot.cssHeight > 0)) return;
+
+    const dpr = window.devicePixelRatio;
+    const numDevicePx = Math.ceil(this.plot.cssWidth * dpr);
+    if (numDevicePx <= 0) return;
+    const wallNow = Date.now();
+    this.advanceFollowNow(wallNow, numDevicePx);
+
     using frame = this.plot.beginFrame();
-    const { width, height, dpr } = frame;
+    const { width, height } = frame;
     const { priceScale, timeRange, waveletMode } = this.state;
     frame.fillRectPx(0, 0, width, height, "#05070d");
 
-    const numPx = Math.ceil(width * dpr);
-    if (numPx <= 0) return;
-    const maxSigma = maxSigmaFor(numPx);
-    const timePerPx = (timeRange.max - timeRange.min) / numPx;
-    const context = kernelContext(waveletMode, maxSigma);
-    const padLeft = context.leftCells;
-    const padRight = context.rightCells;
-    const edgeCount = padLeft + numPx + padRight + 1;
-    if (this.evalTime.length < edgeCount) this.evalTime = new Float64Array(edgeCount);
-    for (let index = 0; index < edgeCount; index++) {
-      this.evalTime[index] = timeRange.min + (index - padLeft) * timePerPx;
-    }
-    const evalView = this.evalTime.subarray(0, edgeCount) as Float64Array;
-    this.latestDpr = dpr;
-    this.latestPadLeft = padLeft;
-    this.latestNumPx = numPx;
-    const demand = {
-      range: Range.create(evalView[0]!, evalView[evalView.length - 1]!),
-      maxDeltaTMs: timePerPx,
-    } satisfies BrokerDemand;
-    this.syncPriceSubscriptions(demand);
+    const timePerDevicePx = (timeRange.max - timeRange.min) / numDevicePx;
+    this.latestDpr = frame.dpr;
+    this.latestNumPx = numDevicePx;
 
     const eventResult = this.eventSource(timeRange);
     this.state.events = { events: eventResult.events };
@@ -522,25 +548,63 @@ export class Timeline {
       const row = this.priceRows[index]!;
       const rowHeight = this.rowHeights[index]!;
       const heatHeight = Math.max(2, rowHeight - RESOLUTION_BAR_HEIGHT);
-      const verticalOffset = this.rowVerticalOffsets[index]!;
-      const result = row.read({ evalTime: evalView, maxDeltaTMs: timePerPx });
+      const scaleWindow = heatmapScaleWindow(
+        numDevicePx,
+        heatHeight,
+        this.rowVerticalOffsets[index]!,
+      );
+      const visibleCells = scaleWindow.sampleCellCount;
+      const sampleStepMs = (timeRange.max - timeRange.min) / visibleCells;
+      const minScaleMs = scaleWindow.minSigmaPx * timePerDevicePx;
+      const maxScaleMs = scaleWindow.maxSigmaPx * timePerDevicePx;
+      const context = kernelContext(waveletMode, maxScaleMs / sampleStepMs);
+      const padLeft = context.leftCells;
+      const padRight = context.rightCells;
+      const edgeCount = padLeft + visibleCells + padRight + 1;
+      let evalTime = this.rowEvalTime[index];
+      if (evalTime === undefined || evalTime.length < edgeCount) {
+        evalTime = new Float64Array(edgeCount);
+        this.rowEvalTime[index] = evalTime;
+      }
+      for (let sample = 0; sample < edgeCount; sample++) {
+        evalTime[sample] = timeRange.min + (sample - padLeft) * sampleStepMs;
+      }
+      const evalView = evalTime.subarray(0, edgeCount) as Float64Array;
+      const demand = {
+        range: Range.create(evalView[0]!, evalView[evalView.length - 1]!),
+        maxDeltaTMs: sampleStepMs,
+      } satisfies BrokerDemand;
+      this.syncPriceSubscription(index, demand);
+
+      const result = row.read({ evalTime: evalView, maxDeltaTMs: sampleStepMs });
       this.latestPriceValues[index] = result.value;
+      this.latestEvalStart[index] = evalView[0]!;
+      this.latestEvalStep[index] = sampleStepMs;
       frame.heatmap(row.id).drawWaveletField(
         {
           evalTime: evalView,
           value: result.value,
           padLeft,
           padRight,
+          visibleCells,
           revision: result.revision,
         },
         priceScale,
         waveletMode,
         rowY,
         heatHeight,
-        verticalOffset,
+        minScaleMs,
+        maxScaleMs,
         this.rowPalettes[index]!,
       );
-      frame.resolution().draw(result.resolution, result.targetResolutionMs, rowY + heatHeight);
+      frame
+        .resolution()
+        .draw(
+          result.resolution,
+          result.targetResolutionMs,
+          rowY + heatHeight,
+          this.rowPalettes[index]!,
+        );
       this.positionRowChrome(row, rowY);
       rowY += rowHeight;
       frame.fillRectPx(0, rowY - 1, width, 1, "rgba(255,255,255,0.18)");
@@ -552,8 +616,21 @@ export class Timeline {
     frame.fillRectPx(0, this.state.newsHeight, width, 1, "rgba(255,255,255,0.3)");
     frame.drawTimeAxis(this.state.newsHeight, this.config.minTickPx);
     this.drawResizeHandles(frame);
-    this.updateNowLine(timePerPx);
+    this.updateNowLine(wallNow);
+    this.scheduleClock(timePerDevicePx);
   };
+
+  private advanceFollowNow(now: number, numDevicePx: number): void {
+    if (!this.state.followNow) return;
+    const span = this.state.timeRange.max - this.state.timeRange.min;
+    const stepMs = span / numDevicePx;
+    if (Number.isFinite(this.lastFollowNow) && now - this.lastFollowNow < stepMs) return;
+    const min = now - span * this.state.nowAnchor;
+    const range = Range.create(min, min + span);
+    this.state.timeRange = range;
+    this.plot.setTimeRange(range);
+    this.lastFollowNow = now;
+  }
 
   private updateCrosshairOverlay(): void {
     if (
@@ -597,13 +674,21 @@ export class Timeline {
     }
 
     const x = Math.max(0, Math.min(frame.width, this.pointerPx));
-    const deviceX = Math.max(0, Math.min(this.latestNumPx, Math.floor(x * this.latestDpr)));
-    const sampleIndex = this.latestPadLeft + deviceX;
+    const hoverTime =
+      this.state.timeRange.min +
+      (x / frame.width) * (this.state.timeRange.max - this.state.timeRange.min);
     let rowY = this.state.newsHeight;
     for (let index = 0; index < this.priceRows.length; index++) {
       const rowHeight = this.rowHeights[index]!;
       const heatHeight = Math.max(2, rowHeight - RESOLUTION_BAR_HEIGHT);
-      const logPrice = this.latestPriceValues[index]?.[sampleIndex];
+      const evalStart = this.latestEvalStart[index]!;
+      const evalStep = this.latestEvalStep[index]!;
+      const values = this.latestPriceValues[index];
+      const sampleIndex =
+        values !== undefined && Number.isFinite(evalStart) && evalStep > 0
+          ? Math.max(0, Math.min(values.length - 1, Math.floor((hoverTime - evalStart) / evalStep)))
+          : -1;
+      const logPrice = sampleIndex >= 0 ? values?.[sampleIndex] : undefined;
       const text =
         logPrice !== undefined && Number.isFinite(logPrice)
           ? formatPrice(Math.exp(logPrice))
@@ -721,33 +806,47 @@ export class Timeline {
     this.reqDraw();
   }
 
-  /** Move the wall-clock marker without invalidating data or the heatmap. */
-  private updateNowLine(timePerPx: number): void {
-    if (this.nowTimer !== null) clearTimeout(this.nowTimer);
-    this.nowTimer = null;
-    const now = Date.now();
+  private updateNowLine(now: number): void {
     const { timeRange } = this.state;
-    if (now > timeRange.max) {
+    if (now < timeRange.min || now > timeRange.max) {
       this.nowLine.hidden = true;
       return;
     }
-    if (now >= timeRange.min) {
-      const x = ((now - timeRange.min) / (timeRange.max - timeRange.min)) * this.plot.cssWidth;
-      this.nowLine.hidden = false;
-      this.nowLine.style.transform = `translate3d(${x - this.config.nowWidth / 2}px, 0, 0)`;
-    } else {
-      this.nowLine.hidden = true;
+
+    const x = ((now - timeRange.min) / (timeRange.max - timeRange.min)) * this.plot.cssWidth;
+    const deviceWidth = Math.max(1, Math.round(this.config.nowWidth));
+    const deviceLeft = Math.round(x * this.latestDpr - deviceWidth / 2);
+    this.nowLine.style.width = `${deviceWidth / this.latestDpr}px`;
+    this.nowLine.style.transform = `translate3d(${deviceLeft / this.latestDpr}px, 0, 0)`;
+    this.nowLine.hidden = false;
+  }
+
+  private scheduleClock(timePerDevicePx: number): void {
+    if (this.nowTimer !== null) clearTimeout(this.nowTimer);
+    const now = Date.now();
+    if (this.state.followNow) {
+      const elapsed = Number.isFinite(this.lastFollowNow)
+        ? now - this.lastFollowNow
+        : timePerDevicePx;
+      const delayMs = Math.max(1000 / 30, timePerDevicePx - elapsed);
+      this.nowTimer = setTimeout(() => {
+        this.nowTimer = null;
+        this.reqDraw();
+      }, delayMs) as unknown as number;
+      return;
     }
 
-    // Ten updates per horizontal pixel matches the old visual motion, but this
-    // timer now changes one compositor transform instead of redrawing/querying
-    // the entire timeline. Cap at 120 Hz on extremely zoomed-in views.
-    const delayMs = Math.max(1000 / 120, timeRange.min - now, timePerPx / 10);
+    const delayMs = Math.max(1000 / 120, this.state.timeRange.min - now, timePerDevicePx / 10);
     this.nowTimer = setTimeout(() => {
       this.nowTimer = null;
-      this.updateNowLine(timePerPx);
+      this.updateNowLine(Date.now());
+      this.scheduleClock(timePerDevicePx);
     }, delayMs) as unknown as number;
   }
+
+  private onFollowLockClick = (): void => {
+    this.setFollowNow(true);
+  };
 
   private onPointerDown = (event: PointerEvent): void => {
     this.updatePointer(event);
@@ -807,7 +906,10 @@ export class Timeline {
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width <= 0) return;
     const span = this.state.timeRange.max - this.state.timeRange.min;
-    if (dx !== 0) this.setTimeRange(Range.pan(this.state.timeRange, -(dx / rect.width) * span));
+    if (dx !== 0) {
+      this.detachFromNow();
+      this.setTimeRange(Range.pan(this.state.timeRange, -(dx / rect.width) * span));
+    }
     this.panRowVertically(this.verticalPanRow, dy);
   };
 
@@ -856,7 +958,10 @@ export class Timeline {
     else if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) dy *= cssHeight;
     const span = this.state.timeRange.max - this.state.timeRange.min;
     const dt = (this.config.timeScrollSensitivity * span * event.deltaX) / cssWidth;
-    if (dt !== 0) this.setTimeRange(Range.pan(this.state.timeRange, dt));
+    if (dt !== 0) {
+      this.detachFromNow();
+      this.setTimeRange(Range.pan(this.state.timeRange, dt));
+    }
     if (event.shiftKey) {
       this.setPriceScale(this.state.priceScale - dy * this.config.wheelSensitivity);
       return;
@@ -898,7 +1003,7 @@ export class Timeline {
     this.closePaletteMenus();
   };
 
-  private onClick = (event: PointerEvent): void => {
+  private onClick = (event: MouseEvent): void => {
     if (this.gestureMoved) {
       this.gestureMoved = false;
       return;
@@ -972,6 +1077,7 @@ export class Timeline {
           this.touchBX - this.touchAX,
           this.touchBY - this.touchAY,
         );
+        if (Math.abs(currentCenterX - previousCenterX) >= 0.5) this.detachFromNow();
         this.setTimeRange(
           transformTouchRange(
             this.state.timeRange,
@@ -1007,7 +1113,10 @@ export class Timeline {
     if (rect.width > 0) {
       const dx = this.touchAX - previousAX;
       const span = this.state.timeRange.max - this.state.timeRange.min;
-      if (dx !== 0) this.setTimeRange(Range.pan(this.state.timeRange, -(dx / rect.width) * span));
+      if (dx !== 0) {
+        this.detachFromNow();
+        this.setTimeRange(Range.pan(this.state.timeRange, -(dx / rect.width) * span));
+      }
       if (rect.height > 0) {
         this.panRowVertically(
           this.verticalPanRow,
@@ -1107,9 +1216,9 @@ export class Timeline {
     const previous = this.state.hovered;
     const index =
       this.pointerInside &&
-        !this.dragging &&
-        this.resizingBoundary === null &&
-        this.boundaryAt(this.pointerPy) === null
+      !this.dragging &&
+      this.resizingBoundary === null &&
+      this.boundaryAt(this.pointerPy) === null
         ? nearestEventIndex(this.state.events, tx, this.pointerPx)
         : null;
     this.state.hovered = index;
@@ -1209,17 +1318,14 @@ function drawPriceTooltip(frame: Frame, anchorX: number, anchorY: number, text: 
   ctx.save();
   ctx.font = font;
   const width = Math.ceil(ctx.measureText(text).width) + paddingX * 2;
-  const left =
-    anchorX + gap + width <= frame.width - margin
-      ? anchorX + gap
-      : Math.max(margin, anchorX - gap - width);
+  const left = Math.max(margin, anchorX - gap - width);
   const top = Math.max(margin, Math.min(frame.height - height - margin, anchorY - height / 2));
 
   ctx.strokeStyle = "rgba(226, 232, 240, 0.58)";
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(anchorX, anchorY);
-  ctx.lineTo(left > anchorX ? left : left + width, anchorY);
+  ctx.lineTo(left + width, anchorY);
   ctx.stroke();
 
   roundedRectPath(ctx, left, top, width, height, 5);

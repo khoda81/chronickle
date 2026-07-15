@@ -574,7 +574,7 @@ function main(): void {
   });
   window.addEventListener("pagehide", () => {
     flushUiState({
-      viewport: { min: sharedRange.min, max: sharedRange.max },
+      viewport: { min: timeline.getTimeRange().min, max: timeline.getTimeRange().max },
       waveletMode,
       charts: chartSpecs(),
     });

@@ -391,6 +391,35 @@ canvas.timeline:active {
   display: none;
 }
 
+.timeline-follow-lock {
+  position: absolute;
+  z-index: 6;
+  top: 9px;
+  right: 9px;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(148, 163, 184, 0.55);
+  border-radius: 6px;
+  background: rgba(5, 7, 13, 0.9);
+  color: #f8fafc;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.3);
+}
+
+.timeline-follow-lock:hover {
+  border-color: rgba(226, 232, 240, 0.9);
+  background: rgba(15, 23, 42, 0.96);
+}
+
+.timeline-follow-lock[hidden] {
+  display: none;
+}
+
 .timeline-hover-line {
   position: absolute;
   z-index: 3;

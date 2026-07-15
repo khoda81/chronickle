@@ -5,9 +5,13 @@ export const MIN_NEWS_HEIGHT = 64;
 export const MIN_PRICE_ROW_HEIGHT = 130;
 
 /** Coverage/resolution diagnostics at the bottom of every price row. */
-export const RESOLUTION_BAR_HEIGHT = 34;
-/** Shared intrinsic heatmap height. Rows crop this field instead of stretching it. */
+export const RESOLUTION_BAR_HEIGHT = 8;
+/** Reference height that defines the logarithmic vertical scale spacing. */
 export const HEATMAP_FIELD_HEIGHT = 640;
+/** Maximum horizontal supersampling used when viewing sub-pixel scales. */
+const MAX_SAMPLE_DENSITY = 8;
+/** Maximum horizontal decimation used when viewing very broad scales. */
+const MAX_SAMPLE_STRIDE = 64;
 /** Pointer hit target around each draggable horizontal boundary. */
 export const RESIZE_HANDLE_RADIUS = 6;
 
@@ -16,6 +20,52 @@ export const MAX_SIGMA_CAP = 128;
 
 export function maxSigmaFor(numPx: number): number {
   return Math.max(MIN_SIGMA, Math.min(MAX_SIGMA_CAP, numPx / 4));
+}
+
+export interface HeatmapScaleWindow {
+  /** Visible logarithmic scale range, expressed in physical screen pixels. */
+  readonly minSigmaPx: number;
+  readonly maxSigmaPx: number;
+  /** Number of uniform time cells required across the visible width. */
+  readonly sampleCellCount: number;
+}
+
+/**
+ * Map an unbounded vertical pan to a visible logarithmic scale window.
+ *
+ * At offset zero this exactly follows the old 640-row intrinsic field. Rows
+ * outside that old field continue the same logarithmic progression instead of
+ * becoming blank. The smallest visible scale also selects a power-of-two
+ * horizontal sampling stride, keeping at least MIN_SIGMA input cells beneath
+ * the finest convolution while avoiding request churn for every drag pixel.
+ */
+export function heatmapScaleWindow(
+  numDevicePx: number,
+  viewportHeight: number,
+  verticalOffset: number,
+): HeatmapScaleWindow {
+  if (!(numDevicePx > 0) || !Number.isFinite(numDevicePx)) {
+    throw new Error(`heatmapScaleWindow: invalid width ${numDevicePx}`);
+  }
+  if (!(viewportHeight > 0) || !Number.isFinite(viewportHeight)) {
+    throw new Error(`heatmapScaleWindow: invalid height ${viewportHeight}`);
+  }
+  if (!Number.isFinite(verticalOffset)) {
+    throw new Error(`heatmapScaleWindow: invalid offset ${verticalOffset}`);
+  }
+
+  const maxSigma = maxSigmaFor(numDevicePx);
+  const logStep = Math.log(maxSigma / MIN_SIGMA) / (HEATMAP_FIELD_HEIGHT - 1);
+  const firstFieldRow = -verticalOffset;
+  const lastFieldRow = firstFieldRow + Math.max(1, Math.ceil(viewportHeight) - 1);
+  const minSigmaPx = MIN_SIGMA * Math.exp(logStep * firstFieldRow);
+  const maxSigmaPx = MIN_SIGMA * Math.exp(logStep * lastFieldRow);
+
+  const idealStride = minSigmaPx / MIN_SIGMA;
+  const quantizedStride = 2 ** Math.floor(Math.log2(idealStride));
+  const stride = Math.max(1 / MAX_SAMPLE_DENSITY, Math.min(MAX_SAMPLE_STRIDE, quantizedStride));
+  const sampleCellCount = Math.max(2, Math.ceil(numDevicePx / stride));
+  return { minSigmaPx, maxSigmaPx, sampleCellCount };
 }
 
 export interface StackLayout {

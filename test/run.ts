@@ -10,7 +10,7 @@ import { marketSource } from "../src/data/price/markets.ts";
 import { filterMarketSymbols, parseNobitexMarketKey } from "../src/data/price/symbols.ts";
 import { PriceSpanStore } from "../src/data/price/store.ts";
 import { Range } from "../src/engine/range.ts";
-import { fitStackLayout } from "../src/engine/gfx/layout.ts";
+import { fitStackLayout, heatmapScaleWindow } from "../src/engine/gfx/layout.ts";
 import { placeTooltip } from "../src/ui/tooltip.ts";
 import {
   computeCenteredGaussianReference,
@@ -75,6 +75,26 @@ test("stack layout fills the canvas and preserves every resizable row", () => {
   assert(
     compact.rowHeights.every((height) => height > 0),
     "compact row collapsed",
+  );
+});
+
+test("vertical heatmap pan selects scale-aware sampling density", () => {
+  const neutral = heatmapScaleWindow(2_000, 220, 0);
+  const finer = heatmapScaleWindow(2_000, 220, 480);
+  const coarser = heatmapScaleWindow(2_000, 220, -480);
+  assert(finer.minSigmaPx < neutral.minSigmaPx, "downward pan did not expose finer scales");
+  assert(coarser.minSigmaPx > neutral.minSigmaPx, "upward pan did not expose coarser scales");
+  assert(
+    finer.sampleCellCount > neutral.sampleCellCount,
+    "fine scales did not request denser time samples",
+  );
+  assert(
+    coarser.sampleCellCount < neutral.sampleCellCount,
+    "coarse scales did not reduce time samples",
+  );
+  assert(
+    neutral.maxSigmaPx > neutral.minSigmaPx,
+    "visible heatmap range did not cover multiple convolution scales",
   );
 });
 
