@@ -134,7 +134,7 @@ function TimelineRowChrome(props: TimelineRowChromeProps) {
           }}
           itemComponent={(itemProps) => (
             <Select.Item item={itemProps.item} class={styles.paletteItem}>
-              <Select.ItemLabel>
+              <Select.ItemLabel class={styles.paletteItemLabel}>
                 <span
                   class={styles.paletteOptionBar}
                   style={{ "background-image": paletteCssGradient(itemProps.item.rawValue) }}

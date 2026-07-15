@@ -38,3 +38,8 @@ button {
 [hidden] {
   display: none !important;
 }
+:where([role="listbox"]) {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}

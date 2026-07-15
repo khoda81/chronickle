@@ -182,6 +182,8 @@ export class Timeline {
   private pointerPx = 0;
   private pointerPy = 0;
   private crosshairPinned = false;
+  private eventTooltipHovered = false;
+  private hoverClearTimer: number | null = null;
   private notifiedHoverIndex: number | null = null;
   private notifiedHoverT = Number.NaN;
   private notifiedHoverTitle = "";
@@ -351,6 +353,7 @@ export class Timeline {
   dispose(): void {
     if (this.rafId !== null) cancelAnimationFrame(this.rafId);
     if (this.nowTimer !== null) clearTimeout(this.nowTimer);
+    if (this.hoverClearTimer !== null) clearTimeout(this.hoverClearTimer);
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.disposeSignalSubscriptions();
@@ -564,7 +567,7 @@ export class Timeline {
   /** Shared visibility contract for the crosshair and all hover-owned labels. */
   private canShowHoverOverlay(): boolean {
     return (
-      this.pointerInside &&
+      (this.pointerInside || this.eventTooltipHovered || this.crosshairPinned) &&
       !this.dragging &&
       this.resizingBoundary === null &&
       this.latestNumPx > 0 &&
@@ -713,6 +716,27 @@ export class Timeline {
     );
   }
 
+  /**
+   * Retain the current hover while the pointer is over the event card.
+   *
+   * Canvas `pointerleave` fires before the tooltip receives `pointerenter`, so
+   * hover clearing is deferred by one task and cancelled when the card takes
+   * ownership. This keeps the crosshair fixed while links remain selectable.
+   */
+  public setEventTooltipHovered(hovered: boolean): void {
+    this.eventTooltipHovered = hovered;
+    if (hovered) {
+      this.cancelScheduledHoverClear();
+      this.reqDraw();
+      return;
+    }
+    if (this.state.hovered === null) {
+      this.cancelScheduledHoverClear();
+      return;
+    }
+    this.scheduleHoverClear();
+  }
+
   public togglePlayback(): void {
     if (this.state.playback.mode === "following") {
       this.setPlayback({ mode: "paused" });
@@ -858,6 +882,7 @@ export class Timeline {
 
   private onHoverMove = (event: PointerEvent): void => {
     this.updatePointer(event);
+    if (this.pointerInside) this.cancelScheduledHoverClear();
     const boundary = this.boundaryAt(this.pointerPy);
     this.canvas.style.cursor =
       boundary !== null
@@ -871,10 +896,8 @@ export class Timeline {
   };
 
   private onHoverLeave = (): void => {
-    if (this.crosshairPinned) return;
     this.pointerInside = false;
-    if (!this.dragging && this.resizingBoundary === null) this.clearHover();
-    this.reqDraw();
+    this.scheduleHoverClear();
   };
 
   private onClick = (event: MouseEvent): void => {
@@ -884,7 +907,6 @@ export class Timeline {
     }
     this.updatePointer(event);
     const clickedEventIndex = this.clickableEventIndexAtCurrentTransform();
-    this.crosshairPinned = true;
     if (this.updateHoverAtCurrentTransform()) this.reqDraw();
     this.reqDraw();
     if (clickedEventIndex !== null) {
@@ -1057,6 +1079,40 @@ export class Timeline {
     this.reqDraw();
   }
 
+  private scheduleHoverClear(): void {
+    if (
+      this.pointerInside ||
+      this.eventTooltipHovered ||
+      this.crosshairPinned ||
+      this.dragging ||
+      this.resizingBoundary !== null ||
+      this.hoverClearTimer !== null
+    ) {
+      return;
+    }
+
+    this.hoverClearTimer = window.setTimeout(() => {
+      this.hoverClearTimer = null;
+      if (
+        this.pointerInside ||
+        this.eventTooltipHovered ||
+        this.crosshairPinned ||
+        this.dragging ||
+        this.resizingBoundary !== null
+      ) {
+        return;
+      }
+      this.clearHover();
+      this.reqDraw();
+    }, 0);
+  }
+
+  private cancelScheduledHoverClear(): void {
+    if (this.hoverClearTimer === null) return;
+    clearTimeout(this.hoverClearTimer);
+    this.hoverClearTimer = null;
+  }
+
   private markGestureMoved(clientX: number, clientY: number): void {
     if (
       !this.gestureMoved &&
@@ -1120,7 +1176,7 @@ export class Timeline {
   private updateHover(tx: DataTransform, eventY: number, width: number, height: number): boolean {
     const previous = this.state.hovered;
     const index =
-      this.pointerInside &&
+      (this.pointerInside || this.eventTooltipHovered || this.crosshairPinned) &&
       !this.dragging &&
       this.resizingBoundary === null &&
       this.boundaryAt(this.pointerPy) === null

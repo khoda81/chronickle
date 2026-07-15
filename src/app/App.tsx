@@ -361,7 +361,11 @@ export function App() {
           onPaletteChange={changeChartPalette}
           onRemoveRow={removeChart}
         />
-        <EventTooltip controller={timelineOverlay} value={hover()} />
+        <EventTooltip
+          controller={timelineOverlay}
+          value={hover()}
+          onPointerPresenceChange={(inside) => timeline?.setEventTooltipHovered(inside)}
+        />
       </div>
       <Status message={status().message} kind={status().kind} />
     </main>

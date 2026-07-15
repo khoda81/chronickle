@@ -105,6 +105,10 @@
   color: var(--color-fg-strong);
 }
 
+.itemLabel {
+  min-width: 0;
+}
+
 .indicator {
   display: inline-grid;
   place-items: center;

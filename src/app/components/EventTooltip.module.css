@@ -28,7 +28,7 @@
   line-height: 1.4;
   opacity: 1;
   visibility: visible;
-  pointer-events: none;
+  pointer-events: auto;
   transform: translate3d(var(--tooltip-x), var(--tooltip-y), 0) scale(1);
   transition:
     opacity 110ms ease-out,

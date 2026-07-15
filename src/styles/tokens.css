@@ -54,7 +54,7 @@
 
   /* Floating surfaces */
   --glass-fill: rgba(9, 15, 27, 0.34);
-  --glass-fill-strong: rgba(12, 20, 34, 0.94);
+  --glass-fill-strong: rgba(12, 20, 34, 0.46);
   --glass-border: rgba(226, 232, 240, 0.24);
   --glass-highlight: rgba(255, 255, 255, 0.14);
   --glass-shadow: 0 0.875rem 2.25rem rgba(0, 0, 0, 0.28);

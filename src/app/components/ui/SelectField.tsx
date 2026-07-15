@@ -35,7 +35,7 @@ export function SelectField<Value extends string>(props: SelectFieldProps<Value>
       }}
       itemComponent={(itemProps) => (
         <Select.Item item={itemProps.item} class={styles.item}>
-          <Select.ItemLabel>
+          <Select.ItemLabel class={styles.itemLabel}>
             {props.itemContent?.(itemProps.item.rawValue) ?? itemProps.item.rawValue.label}
           </Select.ItemLabel>
           <Select.ItemIndicator class={styles.indicator}>

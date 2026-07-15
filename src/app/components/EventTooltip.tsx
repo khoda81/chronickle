@@ -12,6 +12,7 @@ export interface EventTooltipModel {
 interface EventTooltipProps {
   readonly controller: TimelineOverlayController;
   readonly value: EventTooltipModel | null;
+  readonly onPointerPresenceChange: (inside: boolean) => void;
 }
 
 export function EventTooltip(props: EventTooltipProps) {
@@ -19,11 +20,17 @@ export function EventTooltip(props: EventTooltipProps) {
 
   onMount(() => {
     props.controller.attachEventTooltip(element);
-    onCleanup(() => props.controller.detachEventTooltip(element));
+    onCleanup(() => {
+      props.onPointerPresenceChange(false);
+      props.controller.detachEventTooltip(element);
+    });
   });
 
   createEffect(() => {
-    if (props.value === null) return;
+    if (props.value === null) {
+      props.onPointerPresenceChange(false);
+      return;
+    }
     queueMicrotask(() => props.controller.refreshEventTooltipPosition());
   });
 
@@ -35,6 +42,8 @@ export function EventTooltip(props: EventTooltipProps) {
       style={{
         "--outlet-color": props.value?.feed.color ?? "rgba(148, 163, 184, 0.9)",
       }}
+      onPointerEnter={() => props.onPointerPresenceChange(true)}
+      onPointerLeave={() => props.onPointerPresenceChange(false)}
     >
       <Show when={props.value}>
         {(value) => (
