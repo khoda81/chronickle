@@ -1,7 +1,7 @@
 /** One shared, vertically-resizable news and market timeline. */
 
 import type { EventSet, NewsEvent } from "../domain.ts";
-import { LocateFixed, Play, createElement } from "lucide";
+import { LocateFixed, Pause, Play, createElement } from "lucide";
 import type { EventQueryResult } from "../data/events/broker.ts";
 import type {
   BrokerDemand,
@@ -155,8 +155,8 @@ export class Timeline {
   private touchBY = 0;
   private readonly nowLine: HTMLDivElement;
   private readonly nowControls: HTMLDivElement;
-  private readonly followLock: HTMLButtonElement;
-  private readonly rightEdgeButton: HTMLButtonElement;
+  private readonly playbackButton: HTMLButtonElement;
+  private readonly targetButton: HTMLButtonElement;
   private readonly hoverLine: HTMLDivElement;
   private readonly timeHover: HTMLDivElement;
   private nowTimer: number | null = null;
@@ -205,19 +205,18 @@ export class Timeline {
     this.nowLine.style.background = this.config.nowStroke;
     this.nowControls = document.createElement("div");
     this.nowControls.className = "timeline-now-controls";
-    this.followLock = document.createElement("button");
-    this.followLock.type = "button";
-    this.followLock.className = "timeline-icon-button timeline-follow-lock";
-    this.followLock.append(createTimelineIcon(Play));
-    this.followLock.title = "Follow current time from here";
-    this.followLock.setAttribute("aria-label", "Follow current time from here");
-    this.followLock.addEventListener("click", this.onFollowLockClick);
-    this.rightEdgeButton = document.createElement("button");
-    this.rightEdgeButton.type = "button";
-    this.rightEdgeButton.className = "timeline-icon-button timeline-right-edge";
-    this.rightEdgeButton.append(createTimelineIcon(LocateFixed));
-    this.rightEdgeButton.addEventListener("click", this.onRightEdgeClick);
-    this.nowControls.append(this.followLock, this.rightEdgeButton);
+    this.playbackButton = document.createElement("button");
+    this.playbackButton.type = "button";
+    this.playbackButton.className = "timeline-icon-button timeline-playback";
+    this.playbackButton.addEventListener("click", this.onPlaybackClick);
+    this.targetButton = document.createElement("button");
+    this.targetButton.type = "button";
+    this.targetButton.className = "timeline-icon-button timeline-target";
+    this.targetButton.append(createTimelineIcon(LocateFixed));
+    this.targetButton.title = "Put now at the right edge";
+    this.targetButton.setAttribute("aria-label", this.targetButton.title);
+    this.targetButton.addEventListener("click", this.onTargetClick);
+    this.nowControls.append(this.targetButton, this.playbackButton);
     this.hoverLine = document.createElement("div");
     this.hoverLine.className = "timeline-hover-line";
     this.hoverLine.hidden = true;
@@ -235,7 +234,7 @@ export class Timeline {
       followNow: true,
       nowAnchor: DEFAULT_NOW_ANCHOR,
     };
-    this.syncRightEdgeButton();
+    this.syncNowControls();
     this.rebuildRowChrome();
 
     this.bindEvents();
@@ -299,11 +298,24 @@ export class Timeline {
   private setFollowNow(followNow: boolean): void {
     if (followNow === this.state.followNow) return;
     this.state.followNow = followNow;
+    this.syncPlaybackButton();
+    this.syncTargetButton();
     this.reqDraw();
   }
 
-  private detachFromNow(): void {
-    this.setFollowNow(false);
+  private captureNowAnchor(now: number): void {
+    const span = this.state.timeRange.max - this.state.timeRange.min;
+    if (!(span > 0)) return;
+    this.state.nowAnchor = (now - this.state.timeRange.min) / span;
+    this.syncTargetButton();
+  }
+
+  private panTimeRange(range: Range, now = Date.now()): void {
+    this.state.timeRange = range;
+    this.plot.setTimeRange(range);
+    if (this.state.followNow) this.captureNowAnchor(now);
+    this.notifyViewportChange();
+    this.reqDraw();
   }
 
   getTimeRange(): Range {
@@ -336,8 +348,8 @@ export class Timeline {
     this.resizeObserver = null;
     this.disposePriceSubscriptions();
     this.nowLine.remove();
-    this.followLock.removeEventListener("click", this.onFollowLockClick);
-    this.rightEdgeButton.removeEventListener("click", this.onRightEdgeClick);
+    this.playbackButton.removeEventListener("click", this.onPlaybackClick);
+    this.targetButton.removeEventListener("click", this.onTargetClick);
     this.nowControls.remove();
     this.hoverLine.remove();
     this.timeHover.remove();
@@ -833,33 +845,42 @@ export class Timeline {
     }, delayMs) as unknown as number;
   }
 
-  private onFollowLockClick = (): void => {
-    const now = Date.now();
-    const { min, max } = this.state.timeRange;
-    const span = max - min;
-
-    if (span > 0) {
-      this.state.nowAnchor = (now - min) / span;
-      this.syncRightEdgeButton();
+  private onPlaybackClick = (): void => {
+    if (this.state.followNow) {
+      this.setFollowNow(false);
+      return;
     }
 
+    this.captureNowAnchor(Date.now());
     this.setFollowNow(true);
   };
 
-  private onRightEdgeClick = (): void => {
-    this.state.nowAnchor =
-      this.state.nowAnchor === RIGHT_EDGE_NOW_ANCHOR ? DEFAULT_NOW_ANCHOR : RIGHT_EDGE_NOW_ANCHOR;
-    this.syncRightEdgeButton();
-    this.reqDraw();
+  private onTargetClick = (): void => {
+    const now = Date.now();
+    const span = this.state.timeRange.max - this.state.timeRange.min;
+    if (!(span > 0)) return;
+
+    this.state.nowAnchor = RIGHT_EDGE_NOW_ANCHOR;
+    this.applyTimeRange(Range.create(now - span, now), true);
+    this.syncTargetButton();
   };
 
-  private syncRightEdgeButton(): void {
+  private syncNowControls(): void {
+    this.syncPlaybackButton();
+    this.syncTargetButton();
+  }
+
+  private syncPlaybackButton(): void {
+    const playing = this.state.followNow;
+    this.playbackButton.replaceChildren(createTimelineIcon(playing ? Pause : Play));
+    this.playbackButton.setAttribute("aria-pressed", String(playing));
+    this.playbackButton.title = playing ? "Pause current-time playback" : "Play from here";
+    this.playbackButton.setAttribute("aria-label", this.playbackButton.title);
+  }
+
+  private syncTargetButton(): void {
     const atRightEdge = this.state.nowAnchor === RIGHT_EDGE_NOW_ANCHOR;
-    this.rightEdgeButton.setAttribute("aria-pressed", String(atRightEdge));
-    this.rightEdgeButton.title = atRightEdge
-      ? "Restore a small future-time margin"
-      : "Put now at the right edge";
-    this.rightEdgeButton.setAttribute("aria-label", this.rightEdgeButton.title);
+    this.targetButton.hidden = this.state.followNow && atRightEdge;
   }
 
   private onPointerDown = (event: PointerEvent): void => {
@@ -921,8 +942,7 @@ export class Timeline {
     if (rect.width <= 0) return;
     const span = this.state.timeRange.max - this.state.timeRange.min;
     if (dx !== 0) {
-      this.detachFromNow();
-      this.setTimeRange(Range.pan(this.state.timeRange, -(dx / rect.width) * span));
+      this.panTimeRange(Range.pan(this.state.timeRange, -(dx / rect.width) * span));
     }
     this.panRowVertically(this.verticalPanRow, dy);
   };
@@ -973,8 +993,7 @@ export class Timeline {
     const span = this.state.timeRange.max - this.state.timeRange.min;
     const dt = (this.config.timeScrollSensitivity * span * event.deltaX) / cssWidth;
     if (dt !== 0) {
-      this.detachFromNow();
-      this.setTimeRange(Range.pan(this.state.timeRange, dt));
+      this.panTimeRange(Range.pan(this.state.timeRange, dt));
     }
     if (event.shiftKey) {
       this.setPriceScale(this.state.priceScale - dy * this.config.wheelSensitivity);
@@ -986,7 +1005,7 @@ export class Timeline {
       Range.create(0, cssHeight),
     );
     const factor = Math.exp(-dy * this.config.wheelSensitivity);
-    this.setTimeRange(Range.zoom(this.state.timeRange, tx.xToTime(px), factor));
+    this.panTimeRange(Range.zoom(this.state.timeRange, tx.xToTime(px), factor));
   };
 
   private onHoverMove = (event: PointerEvent): void => {
@@ -1091,17 +1110,19 @@ export class Timeline {
           this.touchBX - this.touchAX,
           this.touchBY - this.touchAY,
         );
-        if (Math.abs(currentCenterX - previousCenterX) >= 0.5) this.detachFromNow();
-        this.setTimeRange(
-          transformTouchRange(
-            this.state.timeRange,
-            rect.width,
-            previousCenterX,
-            currentCenterX,
-            previousDistance,
-            currentDistance,
-          ),
+        const transformedRange = transformTouchRange(
+          this.state.timeRange,
+          rect.width,
+          previousCenterX,
+          currentCenterX,
+          previousDistance,
+          currentDistance,
         );
+        if (Math.abs(currentCenterX - previousCenterX) >= 0.5) {
+          this.panTimeRange(transformedRange);
+        } else {
+          this.setTimeRange(transformedRange);
+        }
         if (rect.height > 0) {
           this.panRowVertically(
             this.verticalPanRow,
@@ -1128,8 +1149,7 @@ export class Timeline {
       const dx = this.touchAX - previousAX;
       const span = this.state.timeRange.max - this.state.timeRange.min;
       if (dx !== 0) {
-        this.detachFromNow();
-        this.setTimeRange(Range.pan(this.state.timeRange, -(dx / rect.width) * span));
+        this.panTimeRange(Range.pan(this.state.timeRange, -(dx / rect.width) * span));
       }
       if (rect.height > 0) {
         this.panRowVertically(
@@ -1322,7 +1342,7 @@ function formatHoverTime(time: number): string {
   return HOVER_TIME_FORMAT.format(new Date(time));
 }
 
-function createTimelineIcon(icon: typeof LockKeyhole): SVGElement {
+function createTimelineIcon(icon: typeof Play): SVGElement {
   return createElement(icon, {
     width: 16,
     height: 16,
