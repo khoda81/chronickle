@@ -1,8 +1,8 @@
-/** Range-capable Binance kline adapter for the generic price Fetcher. */
+/** Range-capable Binance kline adapter. */
 
 import type { PricePoint } from "../../../domain.ts";
 import { Range } from "../../../engine/range.ts";
-import type { Fetcher } from "../fetcher.ts";
+import { createPollingAdapter, type PriceAdapter } from "../fetcher.ts";
 import { pickResolution } from "../resolution.ts";
 
 const BINANCE_KLINES = "https://api.binance.com/api/v3/klines";
@@ -27,26 +27,30 @@ const BINANCE_LADDER: readonly { readonly periodMs: number; readonly interval: s
 
 const PERIODS = BINANCE_LADDER.map((entry) => entry.periodMs);
 
-export interface BinanceFetcherOptions {
+export interface BinanceAdapterOptions {
   readonly symbol: string;
   readonly timeoutMs?: number;
 }
 
-export function createBinanceFetcher(opts: BinanceFetcherOptions): Fetcher {
+export function createBinanceAdapter(opts: BinanceAdapterOptions): PriceAdapter {
   const symbol = opts.symbol.trim().toUpperCase();
   if (!/^[A-Z0-9]{4,30}$/.test(symbol)) {
     throw new Error(`Invalid Binance symbol: ${opts.symbol}`);
   }
 
-  return {
+  return createPollingAdapter({
+    minFetchPoints: 256,
     retryDelayMs(error, attempt) {
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes("429") || message.includes("418")) return 60_000;
       return Math.min(30_000, 1_000 * 2 ** (attempt - 1));
     },
 
-    async fetchRange({ range, maxDeltaTMs }) {
-      const periodMs = pickResolution(PERIODS, maxDeltaTMs);
+    resolve({ maxDeltaTMs }) {
+      return pickResolution(PERIODS, maxDeltaTMs);
+    },
+
+    async fetchRange({ range, resolutionMs: periodMs }, signal) {
       const entry = BINANCE_LADDER.find((candidate) => candidate.periodMs === periodMs)!;
       const params = new URLSearchParams({
         symbol,
@@ -56,6 +60,8 @@ export function createBinanceFetcher(opts: BinanceFetcherOptions): Fetcher {
         limit: LIMIT.toString(),
       });
       const controller = new AbortController();
+      const abort = (): void => controller.abort();
+      signal.addEventListener("abort", abort, { once: true });
       const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 15_000);
 
       try {
@@ -80,10 +86,11 @@ export function createBinanceFetcher(opts: BinanceFetcherOptions): Fetcher {
           const searchedMax = Math.min(range.max, last.t + periodMs);
           if (range.min < searchedMax) searchedRange = Range.create(range.min, searchedMax);
         }
-        return { points, resolutionHintMs: periodMs, searchedRange };
+        return { points, searchedRange };
       } finally {
         clearTimeout(timer);
+        signal.removeEventListener("abort", abort);
       }
     },
-  };
+  });
 }

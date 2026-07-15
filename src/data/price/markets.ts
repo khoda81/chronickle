@@ -1,7 +1,7 @@
-import type { Fetcher } from "./fetcher.ts";
-import { createBinanceFetcher } from "./exchanges/binanceFetcher.ts";
-import { createNobitexFetcher } from "./exchanges/nobitexFetcher.ts";
-import { createYahooFetcher } from "./exchanges/yahoo.ts";
+import type { PriceAdapter } from "./fetcher.ts";
+import { createBinanceAdapter } from "./exchanges/binanceFetcher.ts";
+import { createNobitexAdapter } from "./exchanges/nobitexFetcher.ts";
+import { createYahooAdapter } from "./exchanges/yahoo.ts";
 import { fetchBinanceSymbols, fetchNobitexSymbols, type MarketSymbol } from "./symbols.ts";
 
 export type MarketSourceId = "nobitex" | "binance" | "yahoo";
@@ -11,7 +11,7 @@ export interface MarketSource {
   readonly label: string;
   readonly examples: readonly MarketSymbol[];
   normalizeSymbol(value: string): string;
-  createFetcher(symbol: string): Fetcher;
+  createAdapter(symbol: string): PriceAdapter;
   loadSymbols(): Promise<readonly MarketSymbol[]>;
 }
 
@@ -81,7 +81,7 @@ export const MARKET_SOURCES: readonly MarketSource[] = [
     label: "Nobitex",
     examples: NOBITEX_EXAMPLES,
     normalizeSymbol,
-    createFetcher: (symbol) => createNobitexFetcher({ symbol }),
+    createAdapter: (symbol) => createNobitexAdapter({ symbol }),
     loadSymbols: loadNobitexSymbols,
   },
   {
@@ -89,7 +89,7 @@ export const MARKET_SOURCES: readonly MarketSource[] = [
     label: "Binance",
     examples: BINANCE_EXAMPLES,
     normalizeSymbol,
-    createFetcher: (symbol) => createBinanceFetcher({ symbol }),
+    createAdapter: (symbol) => createBinanceAdapter({ symbol }),
     loadSymbols: loadBinanceSymbols,
   },
   {
@@ -97,7 +97,7 @@ export const MARKET_SOURCES: readonly MarketSource[] = [
     label: "Yahoo Finance",
     examples: YAHOO_EXAMPLES,
     normalizeSymbol: normalizeYahooSymbol,
-    createFetcher: (symbol) => createYahooFetcher({ symbol }),
+    createAdapter: (symbol) => createYahooAdapter({ symbol }),
     loadSymbols: async () => YAHOO_EXAMPLES,
   },
 ];

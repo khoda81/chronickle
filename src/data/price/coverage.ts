@@ -1,32 +1,26 @@
 import { Range } from "../../engine/range.ts";
 import { RangeSet } from "../rangeSet.ts";
 
-export type CoverageState = "ready" | "empty" | "pending" | "failed";
+export type CoverageState = "ready" | "empty" | "pending" | "watching" | "failed";
 
 export interface ResolutionSegment {
   readonly range: Range;
   readonly resolutionMs: number;
   readonly state: CoverageState;
   readonly message?: string;
+  readonly retryAtMs?: number;
 }
 
-/** Request-quality-local evidence that a remote lookup searched but found no data. */
-export class EmptyCoverageIndex {
-  private readonly empty = new Map<number, RangeSet>();
+/** Request-quality-local evidence that an adapter definitively searched a range. */
+export class FetchedCoverageIndex {
+  private readonly fetched = new Map<number, RangeSet>();
 
   clear(): void {
-    this.empty.clear();
+    this.fetched.clear();
   }
 
   add(requestResolutionMs: number, range: Range): void {
     this.level(requestResolutionMs).add(range);
-  }
-
-  /** Finer ready evidence invalidates overlapping empty evidence for coarser requests. */
-  removeSatisfied(readyResolutionMs: number, range: Range): void {
-    for (const [requestResolutionMs, empty] of this.empty) {
-      if (readyResolutionMs <= requestResolutionMs) empty.remove(range);
-    }
   }
 
   answers(range: Range, requestResolutionMs: number): boolean {
@@ -36,33 +30,35 @@ export class EmptyCoverageIndex {
   }
 
   addBlockers(out: RangeSet, requestResolutionMs: number, range: Range): void {
-    // A finer search that found no observations is also valid evidence for a
-    // coarser viewport. Exact floating-point zoom resolutions must not create
-    // distinct islands of otherwise identical empty coverage.
-    for (const [evidenceResolutionMs, ranges] of this.empty) {
+    // A finer completed search is also valid evidence for a coarser viewport.
+    // Exact floating-point zoom resolutions must not create distinct islands.
+    for (const [evidenceResolutionMs, ranges] of this.fetched) {
       if (evidenceResolutionMs > requestResolutionMs) continue;
       for (const overlap of ranges.intersections(range)) out.add(overlap);
     }
   }
 
-  segments(range: Range, requestResolutionMs: number): ResolutionSegment[] {
-    const covered = new RangeSet();
-    this.addBlockers(covered, requestResolutionMs, range);
-    return covered.intersections(range).map((overlap) => ({
-      range: overlap,
-      resolutionMs: requestResolutionMs,
-      state: "empty" as const,
-    }));
+  /** Completed search ranges not already supported by ready sample data. */
+  emptySegments(range: Range, requestResolutionMs: number, ready: RangeSet): ResolutionSegment[] {
+    const fetched = new RangeSet();
+    this.addBlockers(fetched, requestResolutionMs, range);
+    const out: ResolutionSegment[] = [];
+    for (const searched of fetched.intersections(range)) {
+      for (const gap of ready.gaps(searched)) {
+        out.push({ range: gap, resolutionMs: requestResolutionMs, state: "empty" });
+      }
+    }
+    return out;
   }
 
   private level(resolutionMs: number): RangeSet {
     if (!(resolutionMs > 0) || !Number.isFinite(resolutionMs)) {
-      throw new Error(`EmptyCoverageIndex: invalid resolution ${resolutionMs}`);
+      throw new Error(`FetchedCoverageIndex: invalid resolution ${resolutionMs}`);
     }
-    let ranges = this.empty.get(resolutionMs);
+    let ranges = this.fetched.get(resolutionMs);
     if (ranges === undefined) {
       ranges = new RangeSet();
-      this.empty.set(resolutionMs, ranges);
+      this.fetched.set(resolutionMs, ranges);
     }
     return ranges;
   }

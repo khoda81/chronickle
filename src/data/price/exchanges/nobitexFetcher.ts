@@ -1,5 +1,5 @@
 /**
- * Nobitex adapter for the `Fetcher` contract.
+ * Nobitex adapter for the subscription contract.
  *
  * Wraps the existing `fetchOhlc` and maps the broker's `maxDeltaTMs` to the
  * coarsest Nobitex TradingView resolution whose period is `<= maxDeltaTMs`.
@@ -13,7 +13,7 @@
  *   43200 ("720"), 86400 ("D"), 172800 ("2D"), 259200 ("3D")
  */
 
-import { Fetcher, FetchRangeOptions, FetchRangeResult } from "../fetcher.ts";
+import { createPollingAdapter, type PriceAdapter } from "../fetcher.ts";
 import { pickResolution } from "../resolution.ts";
 import { fetchOhlc, NobitexOhlcResponse, ohlcToPriceSeries } from "./nobitex.ts";
 import { PricePoint } from "../../../domain.ts";
@@ -38,27 +38,32 @@ const NOBITEX_LADDER: readonly { periodMs: number; resolution: string }[] = [
 
 const NOBITEX_PERIODS_MS: readonly number[] = NOBITEX_LADDER.map((e) => e.periodMs);
 
-export interface NobitexFetcherOptions {
+export interface NobitexAdapterOptions {
   /** Symbol, defaults to "USDTIRT". */
   readonly symbol?: string;
   /** Per-request timeout in ms. */
   readonly timeoutMs?: number;
 }
 
-export function createNobitexFetcher(opts: NobitexFetcherOptions = {}): Fetcher {
+export function createNobitexAdapter(opts: NobitexAdapterOptions = {}): PriceAdapter {
   const symbol = opts.symbol ?? "USDTIRT";
   const timeoutMs = opts.timeoutMs;
 
-  return {
-    liveRetryDelayMs: 1_000,
+  return createPollingAdapter({
+    minFetchPoints: 256,
+    livePollDelayMs: 1_000,
     // Nobitex applies endpoint-wide throttling. The broker owns transient
     // failure state but asks the adapter how long to suppress retries.
     retryDelayMs(_error, attempt) {
       return Math.min(60_000, 2_000 * 2 ** (attempt - 1));
     },
 
-    async fetchRange(req: FetchRangeOptions): Promise<FetchRangeResult> {
-      const periodMs = pickResolution(NOBITEX_PERIODS_MS, req.maxDeltaTMs);
+    resolve(req) {
+      return pickResolution(NOBITEX_PERIODS_MS, req.maxDeltaTMs);
+    },
+
+    async fetchRange(req, signal) {
+      const periodMs = req.resolutionMs;
       const entry = NOBITEX_LADDER.find((e) => e.periodMs === periodMs)!;
       if (!entry) {
         // Unreachable: pickResolution always returns a member of NOBITEX_PERIODS_MS.
@@ -73,6 +78,7 @@ export function createNobitexFetcher(opts: NobitexFetcherOptions = {}): Fetcher 
         fromMs: req.range.min - periodMs,
         toMs: req.range.max,
         timeoutMs,
+        signal,
       });
 
       // "no_data" means no candles exist for this range at all — the request
@@ -80,7 +86,6 @@ export function createNobitexFetcher(opts: NobitexFetcherOptions = {}): Fetcher 
       if (res === null) {
         return {
           points: [],
-          resolutionHintMs: periodMs,
           searchedRange: req.range,
         };
       }
@@ -89,7 +94,6 @@ export function createNobitexFetcher(opts: NobitexFetcherOptions = {}): Fetcher 
       if (points.length === 0) {
         return {
           points: [],
-          resolutionHintMs: periodMs,
           searchedRange: req.range,
         };
       }
@@ -106,22 +110,19 @@ export function createNobitexFetcher(opts: NobitexFetcherOptions = {}): Fetcher 
       if (firstT <= req.range.min) {
         return {
           points,
-          resolutionHintMs: periodMs,
           searchedRange: req.range,
         };
       }
       if (firstT < req.range.max) {
         return {
           points,
-          resolutionHintMs: periodMs,
           searchedRange: { min: firstT, max: req.range.max },
         };
       }
       return {
         points,
-        resolutionHintMs: periodMs,
         searchedRange: req.range,
       };
     },
-  };
+  });
 }

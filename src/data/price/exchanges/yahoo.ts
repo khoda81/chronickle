@@ -1,7 +1,7 @@
 /** Range-aware Yahoo Finance chart adapter for futures, equities, and indices. */
 
 import type { PricePoint } from "../../../domain.ts";
-import type { Fetcher, FetchRangeResult } from "../fetcher.ts";
+import { createPollingAdapter, type AdapterBatch, type PriceAdapter } from "../fetcher.ts";
 
 const YAHOO_CHART_API = "https://query2.finance.yahoo.com/v8/finance/chart";
 const CORS_PROXY = "https://corsproxy.io/?url=";
@@ -26,14 +26,14 @@ const YAHOO_LADDER: readonly YahooInterval[] = [
   { periodMs: 7 * DAY_MS, interval: "1wk", lookbackMs: Number.POSITIVE_INFINITY },
 ];
 
-export interface YahooFetcherOptions {
+export interface YahooAdapterOptions {
   readonly symbol: string;
   readonly timeoutMs?: number;
   readonly proxy?: string;
   readonly now?: () => number;
 }
 
-export function createYahooFetcher(opts: YahooFetcherOptions): Fetcher {
+export function createYahooAdapter(opts: YahooAdapterOptions): PriceAdapter {
   const symbol = opts.symbol.trim().toUpperCase();
   if (!/^[A-Z0-9.^=_-]{1,40}$/.test(symbol)) {
     throw new Error(`Invalid Yahoo Finance symbol: ${opts.symbol}`);
@@ -43,9 +43,11 @@ export function createYahooFetcher(opts: YahooFetcherOptions): Fetcher {
   const pending = new Map<string, Promise<CachedYahooResult>>();
   let generation = 0;
 
-  return {
+  return createPollingAdapter({
+    minFetchPoints: 128,
     serializeRequests: true,
     sourceWideBackoff: true,
+    now,
 
     retryDelayMs(error, attempt) {
       if (error instanceof YahooHttpError && error.status === 429) {
@@ -60,8 +62,13 @@ export function createYahooFetcher(opts: YahooFetcherOptions): Fetcher {
       pending.clear();
     },
 
-    async fetchRange({ range, maxDeltaTMs }) {
-      const entry = chooseInterval(maxDeltaTMs, range.min, now());
+    resolve({ range, maxDeltaTMs, requestedAtMs }) {
+      return chooseInterval(maxDeltaTMs, range.min, requestedAtMs).periodMs;
+    },
+
+    async fetchRange({ range, resolutionMs }, signal) {
+      const entry = YAHOO_LADDER.find((candidate) => candidate.periodMs === resolutionMs);
+      if (entry === undefined) throw new Error(`Yahoo: unsupported resolution ${resolutionMs}`);
       const startMs = Math.floor((range.min - entry.periodMs) / entry.periodMs) * entry.periodMs;
       const roundedEndMs = Math.ceil(range.max / entry.periodMs) * entry.periodMs;
       const endMs = Math.max(startMs + entry.periodMs, roundedEndMs);
@@ -73,7 +80,7 @@ export function createYahooFetcher(opts: YahooFetcherOptions): Fetcher {
 
       let work = pending.get(key);
       if (work === undefined) {
-        work = fetchYahooWindow(symbol, entry, startMs, endMs, opts);
+        work = fetchYahooWindow(symbol, entry, startMs, endMs, opts, signal);
         pending.set(key, work);
       }
 
@@ -88,7 +95,7 @@ export function createYahooFetcher(opts: YahooFetcherOptions): Fetcher {
         if (pending.get(key) === work) pending.delete(key);
       }
     },
-  };
+  });
 }
 
 async function fetchYahooWindow(
@@ -96,7 +103,8 @@ async function fetchYahooWindow(
   entry: YahooInterval,
   startMs: number,
   endMs: number,
-  opts: YahooFetcherOptions,
+  opts: YahooAdapterOptions,
+  signal: AbortSignal,
 ): Promise<CachedYahooResult> {
   const params = new URLSearchParams({
     period1: Math.floor(startMs / 1_000).toString(),
@@ -108,6 +116,8 @@ async function fetchYahooWindow(
   const target = `${YAHOO_CHART_API}/${encodeURIComponent(symbol)}?${params}`;
   const url = `${opts.proxy ?? CORS_PROXY}${encodeURIComponent(target)}`;
   const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  signal.addEventListener("abort", abort, { once: true });
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 15_000);
 
   try {
@@ -133,7 +143,7 @@ async function fetchYahooWindow(
     const timestamps = result?.timestamp;
     const opens = result?.indicators?.quote?.[0]?.open;
     if (!Array.isArray(timestamps) || !Array.isArray(opens)) {
-      return { points: [], resolutionHintMs: entry.periodMs };
+      return { points: [] };
     }
 
     const points: PricePoint[] = [];
@@ -151,15 +161,15 @@ async function fetchYahooWindow(
         points.push({ t: seconds * 1_000, price });
       }
     }
-    return { points, resolutionHintMs: entry.periodMs };
+    return { points };
   } finally {
     clearTimeout(timer);
+    signal.removeEventListener("abort", abort);
   }
 }
 
 interface CachedYahooResult {
   readonly points: readonly PricePoint[];
-  readonly resolutionHintMs: number;
 }
 
 class YahooHttpError extends Error {
@@ -175,8 +185,8 @@ class YahooHttpError extends Error {
 
 function withSearchedRange(
   result: CachedYahooResult,
-  searchedRange: FetchRangeResult["searchedRange"],
-): FetchRangeResult {
+  searchedRange: AdapterBatch["searchedRange"],
+): AdapterBatch {
   return { ...result, searchedRange };
 }
 

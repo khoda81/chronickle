@@ -297,7 +297,7 @@ function main(): void {
       setStatus(app.status, `${source.label} ${symbol} is already visible`, "error");
       return false;
     }
-    const broker = new Broker(source.createFetcher(symbol), {
+    const broker = new Broker(source.createAdapter(symbol), {
       onError: (message, error) => {
         console.error(message, error);
         setStatus(

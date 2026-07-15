@@ -51,7 +51,8 @@ class ResolutionImpl implements ResolutionLayer {
     // Request state is orthogonal to cached quality. Keep it as a thin,
     // unmistakable overlay instead of replacing the underlying resolution.
     for (const segment of segments) {
-      if (segment.state !== "pending" && segment.state !== "failed") continue;
+      if (segment.state !== "pending" && segment.state !== "watching" && segment.state !== "failed")
+        continue;
       const x0 = Math.max(0, frame.tx.timeToX(segment.range.min));
       const x1 = Math.min(frame.width, frame.tx.timeToX(segment.range.max));
       if (!(x1 > x0)) continue;
@@ -60,7 +61,11 @@ class ResolutionImpl implements ResolutionLayer {
         segment.state === "failed" ? y : y + RESOLUTION_BAR_HEIGHT - 3,
         x1 - x0,
         3,
-        segment.state === "failed" ? "rgba(248, 113, 113, 0.98)" : "rgba(250, 204, 21, 0.98)",
+        segment.state === "failed"
+          ? "rgba(248, 113, 113, 0.98)"
+          : segment.state === "watching"
+            ? "rgba(45, 212, 191, 0.98)"
+            : "rgba(250, 204, 21, 0.98)",
       );
     }
 
@@ -112,6 +117,8 @@ function segmentLabel(segment: ResolutionSegment): string {
       return "no data";
     case "pending":
       return `loading ${formatResolution(segment.resolutionMs)}`;
+    case "watching":
+      return `live ${formatResolution(segment.resolutionMs)}`;
     case "failed":
       return segment.message === undefined
         ? `error ${formatResolution(segment.resolutionMs)}`
@@ -121,6 +128,7 @@ function segmentLabel(segment: ResolutionSegment): string {
 
 function labelColor(state: ResolutionSegment["state"]): string {
   if (state === "pending") return "#fde68a";
+  if (state === "watching") return "#99f6e4";
   if (state === "failed") return "#fecaca";
   return "#f8fafc";
 }

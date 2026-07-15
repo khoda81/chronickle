@@ -62,6 +62,7 @@ export interface FetchOhlcOptions {
   /** Inclusive end, epoch ms. */
   readonly toMs: number;
   readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -130,6 +131,8 @@ export async function fetchOhlc(opts: FetchOhlcOptions): Promise<NobitexOhlcResp
   const url = `${NOBITEX_OHLC}?${params.toString()}`;
 
   const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  opts.signal?.addEventListener("abort", abort, { once: true });
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 15_000);
 
   try {
@@ -150,6 +153,7 @@ export async function fetchOhlc(opts: FetchOhlcOptions): Promise<NobitexOhlcResp
     return json;
   } finally {
     clearTimeout(timer);
+    opts.signal?.removeEventListener("abort", abort);
   }
 }
 
