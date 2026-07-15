@@ -625,7 +625,7 @@ export class Timeline {
     frame.drawTimeAxis(this.state.newsHeight, this.config.minTickPx);
     this.drawResizeHandles(frame);
     this.updateNowLine(wallNow);
-    this.scheduleClock(timePerDevicePx, wallNow);
+    this.scheduleClock(timePerDevicePx / 2, wallNow);
   };
 
   private advanceFollowNow(now: number): void {
@@ -824,25 +824,20 @@ export class Timeline {
   }
 
   private scheduleClock(timePerDevicePx: number, renderedNow: number): void {
+    console.debug("Scheduling a redraw.");
     if (this.nowTimer !== null) clearTimeout(this.nowTimer);
-    if (this.state.followNow) {
-      const delayMs = Math.max(1000 / 30, timePerDevicePx);
-      this.nowTimer = setTimeout(() => {
-        this.nowTimer = null;
-        this.reqDraw();
-      }, delayMs) as unknown as number;
-      return;
-    }
+    let delayMs = this.state.timeRange.min - renderedNow;
 
-    if (renderedNow > this.state.timeRange.max) return;
-    const delayMs =
-      renderedNow < this.state.timeRange.min
-        ? Math.max(1000 / 30, Math.min(this.state.timeRange.min - renderedNow, timePerDevicePx))
-        : Math.max(1000 / 30, timePerDevicePx);
+    if (this.state.followNow)
+      delayMs = timePerDevicePx;
+    else if (renderedNow > this.state.timeRange.max)
+      return;
+
+
     this.nowTimer = setTimeout(() => {
       this.nowTimer = null;
       this.reqDraw();
-    }, delayMs) as unknown as number;
+    }, Math.max(delayMs, timePerDevicePx)) as unknown as number;
   }
 
   private onPlaybackClick = (): void => {
