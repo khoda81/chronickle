@@ -60,11 +60,6 @@
   outline-offset: 2px;
 }
 
-.timelineButton[aria-pressed="true"] {
-  border-color: rgba(167, 243, 208, 0.78);
-  color: var(--color-success);
-}
-
 .hoverLine {
   position: absolute;
   z-index: 3;
@@ -83,6 +78,7 @@
   top: 0;
   left: 0;
   display: flex;
+  width: max-content;
   max-width: calc(100% - var(--timeline-row-inline-margin));
   align-items: center;
   gap: var(--space-1);
@@ -104,115 +100,48 @@
   will-change: transform;
 }
 
+.rowHeader:hover,
+.rowHeader:focus-within {
+  z-index: 8;
+}
+
 .rowLabel {
   overflow: hidden;
+  max-width: min(18rem, 48vw);
+  min-width: 0;
+  flex: 0 1 auto;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.paletteRoot {
-  flex: 0 0 5.75rem;
-  pointer-events: auto;
-}
-
-.paletteTrigger {
-  display: flex;
-  width: 100%;
-  height: 1.125rem;
-  align-items: center;
-  gap: var(--space-1);
-  padding: 0.1875rem var(--space-1);
-  border: 1px solid rgba(226, 232, 240, 0.45);
-  border-radius: var(--radius-xs);
-  background: rgba(7, 12, 21, 0.26);
-  color: #cbd5e1;
-  cursor: pointer;
-}
-
-.paletteTrigger:hover,
-.paletteTrigger:focus-visible,
-.paletteTrigger[data-expanded] {
-  border-color: var(--color-fg-strong);
-  outline: 2px solid rgba(124, 196, 255, 0.35);
-  outline-offset: 1px;
-}
-
-.paletteBar {
-  flex: 1;
-  align-self: stretch;
-  min-width: 0;
-  border-radius: var(--radius-pill);
-  background-size: 100% 100%;
-}
-
-.paletteIcon {
+.collapseHint {
+  position: absolute;
+  top: 50%;
+  right: calc(-1 * (1.125rem + var(--space-1)));
   display: grid;
-  flex: 0 0 auto;
+  width: 1.125rem;
+  height: 1.125rem;
   place-items: center;
-  transition: transform var(--duration-normal) var(--ease-out);
-}
-
-.paletteIcon[data-expanded] {
-  transform: rotate(180deg);
-}
-
-.paletteIcon svg {
-  width: 0.625rem;
-  height: 0.625rem;
-}
-
-.paletteContent {
-  z-index: var(--layer-menu);
-  width: 6rem;
-  padding: var(--space-1);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-md);
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.12), rgba(124, 196, 255, 0.03)),
-    var(--glass-fill-strong);
-  -webkit-backdrop-filter: var(--glass-blur);
-  backdrop-filter: var(--glass-blur);
-  box-shadow: var(--glass-shadow);
-  pointer-events: auto;
-}
-
-.paletteListbox {
-  outline: none;
-}
-
-.paletteItem {
-  display: block;
-  width: 100%;
-  height: 1.25rem;
-  padding: 0.1875rem;
-  border: 1px solid transparent;
   border-radius: var(--radius-xs);
-  outline: none;
+  background: var(--color-error-soft);
+  color: var(--color-error);
+  opacity: var(--timeline-row-collapse-progress, 0);
+  transform: translateY(-50%) scale(var(--timeline-row-collapse-scale, 0.7));
+  transition:
+    opacity var(--duration-fast) ease,
+    transform var(--duration-fast) ease;
 }
 
-.paletteItem + .paletteItem {
-  margin-top: 0.1875rem;
+.collapseHint svg {
+  width: 0.75rem;
+  height: 0.75rem;
 }
 
-.paletteItem[data-highlighted],
-.paletteItem[data-selected] {
-  border-color: var(--color-border-hover);
-  background: var(--color-surface-hover);
-}
-
-.paletteItemLabel {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-
-.paletteOptionBar {
-  display: block;
-  width: 100%;
-  height: 100%;
-  border: 1px solid rgba(226, 232, 240, 0.42);
-  border-radius: var(--radius-pill);
-  background-size: 100% 100%;
+.rowHeader[data-collapsing] {
+  border-color: rgb(255 107 107 / var(--timeline-row-collapse-border-alpha, 0));
+  box-shadow:
+    0 0 1rem rgb(255 107 107 / var(--timeline-row-collapse-shadow-alpha, 0)),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
 .removeRow {
@@ -309,13 +238,5 @@
     width: 1.75rem;
     height: 1.75rem;
     flex-basis: 1.75rem;
-  }
-
-  .paletteRoot {
-    flex-basis: 6.5rem;
-  }
-
-  .paletteTrigger {
-    height: 1.75rem;
   }
 }

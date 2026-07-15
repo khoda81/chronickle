@@ -39,6 +39,7 @@
 }
 
 .toggle,
+.nameButton,
 .remove {
   border: 0;
   background: transparent;
@@ -46,16 +47,38 @@
 }
 
 .toggle {
+  display: grid;
+  width: 1.5rem;
+  place-items: center;
+  padding: 0;
+  color: var(--color-fg);
+}
+
+.nameButton {
   display: inline-flex;
   min-width: 0;
   align-items: center;
-  gap: var(--space-1-5);
-  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-1-5);
+  padding: var(--space-1) var(--space-1-5) var(--space-1) 0;
   color: var(--color-fg);
   font-size: var(--text-xs);
 }
 
+.nameInput {
+  width: min(16rem, 45vw);
+  min-width: 6rem;
+  margin: 0;
+  padding: 0 var(--space-1);
+  border: 0;
+  border-inline: 1px solid var(--color-border-control);
+  background: rgba(5, 7, 13, 0.36);
+  color: var(--color-fg-strong);
+  font: inherit;
+  font-size: var(--text-xs);
+  outline: none;
+}
+
 .toggle:focus-visible,
+.nameButton:focus-visible,
 .remove:focus-visible {
   outline: 2px solid color-mix(in oklab, var(--color-focus) 52%, transparent);
   outline-offset: -2px;
@@ -77,6 +100,12 @@
 
 .chipDisabled .name {
   text-decoration: line-through;
+}
+
+.nameButton:hover .name {
+  color: var(--color-fg-strong);
+  text-decoration: underline dotted;
+  text-underline-offset: 0.2em;
 }
 
 .remove {

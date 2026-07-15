@@ -51,7 +51,6 @@ export function App() {
   const [feeds, setFeeds] = createSignal(registry.all());
   const [charts, setCharts] = createSignal<readonly ChartState[]>([]);
   const [viewport, setViewport] = createSignal(initialViewport);
-  const [waveletMode, setWaveletModeState] = createSignal<WaveletMode>(saved.waveletMode);
   const [playback, setPlayback] = createSignal<TimelinePlayback>(saved.playback);
   const [newsHeight, setNewsHeight] = createSignal(saved.newsHeight);
   const [hover, setHover] = createSignal<EventTooltipModel | null>(null);
@@ -61,6 +60,7 @@ export function App() {
       sourceLabel: priceSignalSource(chart.sourceId)?.label ?? chart.sourceId,
       symbol: chart.symbol,
       palette: chart.palette,
+      waveletMode: chart.waveletMode,
     })),
   );
   const timelineOverlay = new TimelineOverlayController();
@@ -74,15 +74,15 @@ export function App() {
   };
 
   const persistedState = (): PersistedUiState => ({
-    version: 2,
+    version: 3,
     viewport: viewport(),
-    waveletMode: waveletMode(),
     playback: playback(),
     newsHeight: newsHeight(),
-    charts: charts().map(({ sourceId, symbol, palette, verticalOffset, height }) => ({
+    charts: charts().map(({ sourceId, symbol, palette, waveletMode, verticalOffset, height }) => ({
       sourceId,
       symbol,
       palette,
+      waveletMode,
       verticalOffset,
       height,
     })),
@@ -108,6 +108,7 @@ export function App() {
         readSampleAt: (time, out) => broker.readPointAtOrBefore(time, out),
         subscribe: (demand, onChange) => broker.subscribe(demand, onChange),
         palette: chart.palette,
+        waveletMode: chart.waveletMode,
         verticalOffset: chart.verticalOffset,
         height: chart.height,
       };
@@ -115,17 +116,26 @@ export function App() {
     timeline.setSignalRows(rows);
   };
 
-  const removeChart = (key: string): void => {
-    const chart = charts().find((candidate) => chartStateKey(candidate) === key);
-    if (chart === undefined) return;
-    setCharts((current) => current.filter((candidate) => chartStateKey(candidate) !== key));
+  const removeCharts = (keys: readonly string[]): void => {
+    if (keys.length === 0) return;
+    const removed = charts().filter((chart) => keys.includes(chartStateKey(chart)));
+    if (removed.length === 0) return;
+    const removedKeys = new Set(removed.map(chartStateKey));
+    setCharts((current) => current.filter((chart) => !removedKeys.has(chartStateKey(chart))));
+    for (const key of removedKeys) {
+      brokers.get(key)?.dispose();
+      brokers.delete(key);
+    }
     syncTimelineRows();
-    brokers.get(key)?.dispose();
-    brokers.delete(key);
     persistence.schedule();
-    const sourceLabel = priceSignalSource(chart.sourceId)?.label ?? chart.sourceId;
-    setStatus(`Removed ${sourceLabel} ${chart.symbol}`);
+    const labels = removed.map((chart) => {
+      const sourceLabel = priceSignalSource(chart.sourceId)?.label ?? chart.sourceId;
+      return `${sourceLabel} ${chart.symbol}`;
+    });
+    setStatus(`Removed ${labels.join(", ")}`);
   };
+
+  const removeChart = (key: string): void => removeCharts([key]);
 
   const addChart = (
     sourceId: string,
@@ -174,6 +184,7 @@ export function App() {
       sourceId: source.id,
       symbol,
       palette,
+      waveletMode: initial?.waveletMode ?? "centered",
       verticalOffset:
         initial?.verticalOffset !== undefined && Number.isFinite(initial.verticalOffset)
           ? initial.verticalOffset
@@ -191,7 +202,7 @@ export function App() {
     return true;
   };
 
-  const applyLayout = (layout: TimelineLayout): void => {
+  const applyLayout = (layout: TimelineLayout, collapsedRowIds: readonly string[]): void => {
     const rows = new Map(layout.rows.map((row) => [row.id, row]));
     setNewsHeight(layout.newsHeight);
     setCharts((current) =>
@@ -206,6 +217,10 @@ export function App() {
             };
       }),
     );
+    if (collapsedRowIds.length > 0) {
+      removeCharts(collapsedRowIds);
+      return;
+    }
     persistence.schedule();
   };
 
@@ -264,6 +279,11 @@ export function App() {
     updateChart(key, { palette });
   };
 
+  const changeChartWaveletMode = (key: string, waveletMode: WaveletMode): void => {
+    timeline?.setSignalRowWaveletMode(key, waveletMode);
+    updateChart(key, { waveletMode });
+  };
+
   const reloadTimelineData = (): void => {
     eventBroker.clearCache();
     for (const broker of brokers.values()) broker.clearCache();
@@ -302,7 +322,6 @@ export function App() {
         onLayoutChange: applyLayout,
       },
     });
-    timeline.setWaveletMode(waveletMode());
     syncTimelineRows();
     unsubscribeEvents = eventBroker.subscribe(() => timeline?.reqDraw());
 
@@ -321,15 +340,9 @@ export function App() {
     brokers.clear();
   });
 
-  const changeWaveletMode = (mode: WaveletMode): void => {
-    setWaveletModeState(mode);
-    timeline?.setWaveletMode(mode);
-    persistence.schedule();
-  };
-
   return (
     <main class={styles.app}>
-      <Header waveletMode={waveletMode()} onWaveletModeChange={changeWaveletMode} />
+      <Header />
       <div class={styles.dataControls}>
         <MarketControls
           onAdd={(sourceId, symbol) => addChart(sourceId, symbol)}
@@ -343,6 +356,12 @@ export function App() {
           registry.setEnabled(feed.id, !feed.enabled);
           registry.save();
           refreshFeeds();
+        }}
+        onRename={(feed: RssFeed, source: string) => {
+          registry.rename(feed.id, source);
+          registry.save();
+          setFeeds(registry.all());
+          setStatus(`Renamed feed to ${source}`);
         }}
         onRemove={(feed: RssFeed) => {
           registry.remove(feed.id);
@@ -359,6 +378,7 @@ export function App() {
           onTogglePlayback={() => timeline?.togglePlayback()}
           onReload={reloadTimelineData}
           onPaletteChange={changeChartPalette}
+          onWaveletModeChange={changeChartWaveletMode}
           onRemoveRow={removeChart}
         />
         <EventTooltip

@@ -1,0 +1,136 @@
+.root {
+  position: relative;
+  flex: 0 0 6.5rem;
+  pointer-events: auto;
+}
+
+.trigger {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  width: 100%;
+  height: 1.25rem;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0.1875rem var(--space-1);
+  border: 1px solid rgba(226, 232, 240, 0.45);
+  border-radius: var(--radius-xs);
+  background: rgba(7, 12, 21, 0.26);
+  color: #cbd5e1;
+  cursor: pointer;
+}
+
+.trigger:hover,
+.trigger:focus-visible,
+.trigger[aria-expanded="true"] {
+  border-color: var(--color-fg-strong);
+  outline: 2px solid rgba(124, 196, 255, 0.35);
+  outline-offset: 1px;
+}
+
+.bar,
+.optionBar {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0.625rem;
+  border-radius: var(--radius-pill);
+  background-size: 100% 100%;
+}
+
+.bar {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid rgba(226, 232, 240, 0.38);
+}
+
+.icon {
+  width: 0.625rem;
+  height: 0.625rem;
+  flex: 0 0 auto;
+  transition: transform var(--duration-normal) var(--ease-out);
+}
+
+.trigger[aria-expanded="true"] .icon {
+  transform: rotate(180deg);
+}
+
+.deck {
+  position: absolute;
+  z-index: var(--layer-menu);
+  top: 50%;
+  left: calc(-1 * var(--space-1));
+  width: calc(100% + 2 * var(--space-1));
+  height: 7.25rem;
+  overflow: hidden;
+  padding: var(--space-1);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.12), rgba(124, 196, 255, 0.03)),
+    var(--glass-fill-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow);
+  transform: translateY(-50%);
+  animation: deckIn var(--duration-fast) var(--ease-out);
+}
+
+.listbox {
+  height: 100%;
+  overflow-y: auto;
+  padding-block: 2.5rem;
+  outline: none;
+  scrollbar-width: none;
+  scroll-snap-type: y mandatory;
+}
+
+.listbox::-webkit-scrollbar {
+  display: none;
+}
+
+.item {
+  display: block;
+  width: 100%;
+  height: 1.25rem;
+  padding: 0.1875rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  cursor: pointer;
+  scroll-snap-align: center;
+}
+
+.item + .item {
+  margin-top: 0.1875rem;
+}
+
+.item:hover,
+.item:focus-visible,
+.selected {
+  border-color: var(--color-border-hover);
+  background: var(--color-surface-hover);
+  outline: none;
+}
+
+.optionBar {
+  border: 1px solid rgba(226, 232, 240, 0.42);
+}
+
+@keyframes deckIn {
+  from {
+    opacity: 0;
+    transform: translateY(-50%) scale(0.96);
+  }
+}
+
+@media (pointer: coarse) {
+  .root {
+    flex-basis: 7rem;
+  }
+
+  .trigger {
+    height: 1.75rem;
+    cursor: pointer;
+  }
+}

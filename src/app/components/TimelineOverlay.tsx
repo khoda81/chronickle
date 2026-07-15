@@ -1,10 +1,12 @@
-import { Select } from "@kobalte/core/select";
-import { ChevronDown, Pause, Play, RefreshCw, X } from "lucide-solid";
+import { Pause, Play, RefreshCw, Trash2, X } from "lucide-solid";
 import { For, onCleanup, onMount, type Accessor, type JSX } from "solid-js";
-import { PALETTES, paletteCssGradient, type PaletteName } from "../../engine/ramp.ts";
+import type { PaletteName } from "../../engine/ramp.ts";
 import type { TimelinePlayback } from "../../engine/timeline.ts";
+import type { WaveletMode } from "../../engine/wavelet.ts";
 import { TIMELINE_OVERLAY_METRICS } from "../../ui/timelineOverlayMetrics.ts";
 import type { TimelineOverlayController } from "../timeline/TimelineOverlayController.ts";
+import { ChartSettings } from "./ChartSettings.tsx";
+import { PalettePicker } from "./PalettePicker.tsx";
 import styles from "./TimelineOverlay.module.css";
 
 export interface TimelineOverlayRowView {
@@ -12,6 +14,7 @@ export interface TimelineOverlayRowView {
   readonly sourceLabel: string;
   readonly symbol: string;
   readonly palette: PaletteName;
+  readonly waveletMode: WaveletMode;
 }
 
 interface TimelineOverlayProps {
@@ -21,10 +24,10 @@ interface TimelineOverlayProps {
   readonly onTogglePlayback: () => void;
   readonly onReload: () => void;
   readonly onPaletteChange: (id: string, palette: PaletteName) => void;
+  readonly onWaveletModeChange: (id: string, mode: WaveletMode) => void;
   readonly onRemoveRow: (id: string) => void;
 }
 
-const PALETTE_NAMES = Object.keys(PALETTES) as PaletteName[];
 const OVERLAY_STYLE = {
   "--timeline-row-inset": `${TIMELINE_OVERLAY_METRICS.rowInsetPx}px`,
   "--timeline-row-inline-margin": `${TIMELINE_OVERLAY_METRICS.rowInsetPx * 2}px`,
@@ -90,6 +93,7 @@ export function TimelineOverlay(props: TimelineOverlayProps) {
               return row;
             }}
             onChoosePalette={(palette) => props.onPaletteChange(key, palette)}
+            onChooseWaveletMode={(mode) => props.onWaveletModeChange(key, mode)}
             onRemove={() => props.onRemoveRow(key)}
           />
         )}
@@ -102,6 +106,7 @@ interface TimelineRowChromeProps {
   readonly controller: TimelineOverlayController;
   readonly row: Accessor<TimelineOverlayRowView>;
   readonly onChoosePalette: (palette: PaletteName) => void;
+  readonly onChooseWaveletMode: (mode: WaveletMode) => void;
   readonly onRemove: () => void;
 }
 
@@ -124,52 +129,23 @@ function TimelineRowChrome(props: TimelineRowChromeProps) {
         hidden
         title="Drag this heatmap vertically to move through its fixed scale field"
       >
-        <span class={styles.rowLabel}>{label()}</span>
-        <Select<PaletteName>
-          class={styles.paletteRoot}
-          options={PALETTE_NAMES}
+        <span class={styles.rowLabel} title={label()}>
+          {label()}
+        </span>
+        <PalettePicker
+          label={label()}
           value={props.row().palette}
-          onChange={(palette) => {
-            if (palette !== null) props.onChoosePalette(palette);
-          }}
-          itemComponent={(itemProps) => (
-            <Select.Item item={itemProps.item} class={styles.paletteItem}>
-              <Select.ItemLabel class={styles.paletteItemLabel}>
-                <span
-                  class={styles.paletteOptionBar}
-                  style={{ "background-image": paletteCssGradient(itemProps.item.rawValue) }}
-                />
-              </Select.ItemLabel>
-            </Select.Item>
-          )}
-          gutter={5}
-          placement="bottom-end"
-          sameWidth
-          fitViewport
-        >
-          <Select.Trigger
-            class={styles.paletteTrigger}
-            title={`Change ${label()} color map`}
-            aria-label={`Change ${label()} color map`}
-          >
-            <Select.Value<PaletteName>>
-              {(state) => (
-                <span
-                  class={styles.paletteBar}
-                  style={{ "background-image": paletteCssGradient(state.selectedOption()) }}
-                />
-              )}
-            </Select.Value>
-            <Select.Icon class={styles.paletteIcon}>
-              <ChevronDown aria-hidden="true" />
-            </Select.Icon>
-          </Select.Trigger>
-          <Select.Portal>
-            <Select.Content class={styles.paletteContent}>
-              <Select.Listbox class={styles.paletteListbox} />
-            </Select.Content>
-          </Select.Portal>
-        </Select>
+          onChange={props.onChoosePalette}
+        />
+        <ChartSettings
+          id={key}
+          label={label()}
+          waveletMode={props.row().waveletMode}
+          onWaveletModeChange={props.onChooseWaveletMode}
+        />
+        <span class={styles.collapseHint} aria-hidden="true">
+          <Trash2 />
+        </span>
         <button
           type="button"
           class={styles.removeRow}

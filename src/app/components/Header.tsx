@@ -1,18 +1,6 @@
-import type { WaveletMode } from "../../engine/wavelet.ts";
-import { SelectField, type SelectOption } from "./ui/SelectField.tsx";
 import styles from "./Header.module.css";
 
-interface HeaderProps {
-  readonly waveletMode: WaveletMode;
-  readonly onWaveletModeChange: (mode: WaveletMode) => void;
-}
-
-const WAVELET_OPTIONS: readonly SelectOption<WaveletMode>[] = [
-  { value: "centered", label: "Centered growth" },
-  { value: "causal", label: "Causal growth" },
-];
-
-export function Header(props: HeaderProps) {
+export function Header() {
   return (
     <header class={styles.header}>
       <h1 class={styles.title}>Chronickle</h1>
@@ -33,13 +21,6 @@ export function Header(props: HeaderProps) {
           View on GitHub
         </span>
       </a>
-      <SelectField
-        class={styles.waveletSelect}
-        ariaLabel="Wavelet mode"
-        value={props.waveletMode}
-        options={WAVELET_OPTIONS}
-        onChange={props.onWaveletModeChange}
-      />
     </header>
   );
 }

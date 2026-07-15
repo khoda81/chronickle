@@ -77,10 +77,6 @@
   transform: translate(-50%, 0);
 }
 
-.waveletSelect {
-  margin-left: auto;
-}
-
 @media (max-width: 40rem) {
   .header {
     gap: var(--space-2);

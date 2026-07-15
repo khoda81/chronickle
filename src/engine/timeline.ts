@@ -18,7 +18,7 @@ import {
   DEFAULT_NEWS_HEIGHT,
   fitStackLayout,
   MIN_NEWS_HEIGHT,
-  MIN_SIGNAL_ROW_HEIGHT,
+  DEFAULT_SIGNAL_ROW_HEIGHT,
   RESIZE_HANDLE_RADIUS,
   COVERAGE_BAR_HEIGHT,
   heatmapScaleWindow,
@@ -35,6 +35,7 @@ export interface SignalRow {
   readonly readSampleAt: SampleAtReader;
   readonly subscribe: DataSubscriber;
   readonly palette: PaletteName;
+  readonly waveletMode: WaveletMode;
   readonly verticalOffset: number;
   /** Preferred restored height. Used only when the row has no live height yet. */
   readonly height?: number;
@@ -74,6 +75,7 @@ export interface TimelineOverlaySink {
     viewportHeight: number,
   ): void;
   setRowTop(id: string, top: number): void;
+  setRowCollapseProgress(id: string, progress: number): void;
   hideSignalTooltips(): void;
   setSignalTooltip(
     id: string,
@@ -89,7 +91,7 @@ export interface TimelineCallbacks {
   onHover?: (event: HoverInfo | null) => void;
   onViewportChange?: (viewport: { min: number; max: number }, priceScale: number) => void;
   onPlaybackChange?: (playback: TimelinePlayback) => void;
-  onLayoutChange?: (layout: TimelineLayout) => void;
+  onLayoutChange?: (layout: TimelineLayout, collapsedRowIds: readonly string[]) => void;
 }
 
 export interface TimelineOptions {
@@ -109,7 +111,6 @@ interface TimelineState {
   events: EventSet;
   timeRange: Range;
   logGain: number;
-  waveletMode: WaveletMode;
   hovered: number | null;
   newsHeight: number;
   playback: TimelinePlayback;
@@ -136,6 +137,8 @@ const DEFAULT_TIMELINE_CONFIG: TimelineConfig = {
 const EMPTY_EVENTS: EventSet = { events: [] };
 const DEFAULT_NOW_ANCHOR = 0.85;
 const RIGHT_EDGE_NOW_ANCHOR = 1;
+const ROW_COLLAPSE_HINT_HEIGHT = 72;
+const ROW_REMOVE_THRESHOLD = 12;
 
 export class Timeline {
   private readonly canvas: HTMLCanvasElement;
@@ -150,6 +153,7 @@ export class Timeline {
   // Mutable render-state mirrors. App state owns persistence; Timeline owns live gestures.
   private rowHeights: number[];
   private rowPalettes: PaletteName[];
+  private rowWaveletModes: WaveletMode[];
   private rowVerticalOffsets: number[];
   private signalSubscriptions: Array<Subscription | undefined> = [];
   private subscribedDemands: Array<BrokerDemand | null> = [];
@@ -209,9 +213,10 @@ export class Timeline {
     this.restoreNewsHeightOnFirstRows = opts.initialNewsHeight !== undefined;
     this.signalRows = opts.signalRows ?? [];
     this.rowHeights = this.signalRows.map((row) =>
-      restoredRowHeight(row.height, MIN_SIGNAL_ROW_HEIGHT),
+      restoredRowHeight(row.height, DEFAULT_SIGNAL_ROW_HEIGHT),
     );
     this.rowPalettes = this.signalRows.map((row) => row.palette);
+    this.rowWaveletModes = this.signalRows.map((row) => row.waveletMode);
     this.rowVerticalOffsets = this.signalRows.map((row) => row.verticalOffset);
     this.rowHoverSamples = this.signalRows.map(() => ({ t: Number.NaN, value: Number.NaN }));
     this.plot = new Plot({ canvas: opts.canvas, initialTimeRange: opts.initialTimeRange });
@@ -219,7 +224,6 @@ export class Timeline {
       events: EMPTY_EVENTS,
       timeRange: opts.initialTimeRange,
       logGain: 22,
-      waveletMode: "centered",
       hovered: null,
       newsHeight: restoredRowHeight(opts.initialNewsHeight, DEFAULT_NEWS_HEIGHT),
       playback: normalizePlayback(opts.initialPlayback),
@@ -250,12 +254,13 @@ export class Timeline {
     const fallback =
       this.rowHeights.length > 0
         ? this.rowHeights.reduce((sum, height) => sum + height, 0) / this.rowHeights.length
-        : MIN_SIGNAL_ROW_HEIGHT;
+        : DEFAULT_SIGNAL_ROW_HEIGHT;
     this.signalRows = [...rows];
     this.rowHeights = rows.map(
       (row) => oldHeight.get(row.id) ?? restoredRowHeight(row.height, fallback),
     );
     this.rowPalettes = rows.map((row) => row.palette);
+    this.rowWaveletModes = rows.map((row) => row.waveletMode);
     this.rowVerticalOffsets = rows.map((row) => row.verticalOffset);
     this.rowHoverSamples = rows.map(() => ({ t: Number.NaN, value: Number.NaN }));
     if (!hadPriceRows && rows.length > 0) {
@@ -326,13 +331,12 @@ export class Timeline {
     return this.state.logGain;
   }
 
-  setWaveletMode(mode: WaveletMode): void {
-    this.state.waveletMode = mode;
+  setSignalRowWaveletMode(id: string, mode: WaveletMode): void {
+    const index = this.signalRows.findIndex((row) => row.id === id);
+    if (index < 0 || this.rowWaveletModes[index] === mode) return;
+    this.rowWaveletModes[index] = mode;
+    this.subscribedDemands[index] = null;
     this.reqDraw();
-  }
-
-  getWaveletMode(): WaveletMode {
-    return this.state.waveletMode;
   }
 
   getPlayback(): TimelinePlayback {
@@ -367,10 +371,15 @@ export class Timeline {
     );
   }
 
-  private flushLayoutChange(): void {
+  private flushLayoutChange(removeCollapsedRows = false): void {
     if (!this.layoutDirty) return;
     this.layoutDirty = false;
-    this.callbacks.onLayoutChange?.(this.getLayout());
+    const collapsedRowIds = removeCollapsedRows
+      ? this.signalRows
+          .filter((_, index) => this.rowHeights[index]! <= ROW_REMOVE_THRESHOLD)
+          .map((row) => row.id)
+      : [];
+    this.callbacks.onLayoutChange?.(this.getLayout(), collapsedRowIds);
   }
 
   private bindEvents(): void {
@@ -459,7 +468,7 @@ export class Timeline {
 
     using frame = this.plot.beginFrame();
     const { width, height } = frame;
-    const { logGain: priceScale, timeRange, waveletMode } = this.state;
+    const { logGain: priceScale, timeRange } = this.state;
     frame.fillRectPx(0, 0, width, height, "#05070d");
 
     const timePerDevicePx = (timeRange.max - timeRange.min) / numDevicePx;
@@ -477,7 +486,22 @@ export class Timeline {
     for (let index = 0; index < this.signalRows.length; index++) {
       const row = this.signalRows[index]!;
       const rowHeight = this.rowHeights[index]!;
-      const heatHeight = Math.max(2, rowHeight - COVERAGE_BAR_HEIGHT);
+      const waveletMode = this.rowWaveletModes[index]!;
+      this.overlay?.setRowTop(row.id, rowY);
+      const rowTouchesActiveBoundary =
+        this.resizingBoundary === 0
+          ? index === 0
+          : this.resizingBoundary !== null &&
+            (index === this.resizingBoundary - 1 || index === this.resizingBoundary);
+      const collapseProgress = rowTouchesActiveBoundary
+        ? Math.max(0, Math.min(1, 1 - rowHeight / ROW_COLLAPSE_HINT_HEIGHT))
+        : 0;
+      this.overlay?.setRowCollapseProgress(row.id, collapseProgress);
+      if (rowHeight <= COVERAGE_BAR_HEIGHT + 2) {
+        rowY += rowHeight;
+        continue;
+      }
+      const heatHeight = rowHeight - COVERAGE_BAR_HEIGHT;
       const scaleWindow = heatmapScaleWindow(
         numDevicePx,
         heatHeight,
@@ -525,7 +549,6 @@ export class Timeline {
         this.rowPalettes[index]!,
       );
       frame.resolution().draw(result.coverage, gridStepMs, rowY + heatHeight);
-      this.overlay?.setRowTop(row.id, rowY);
       rowY += rowHeight;
       frame.fillRectPx(0, rowY - 1, width, 1, "rgba(255,255,255,0.18)");
     }
@@ -535,7 +558,6 @@ export class Timeline {
     // The only time axis lives on the news/price boundary.
     frame.fillRectPx(0, this.state.newsHeight, width, 1, "rgba(255,255,255,0.3)");
     frame.drawTimeAxis(this.state.newsHeight, this.config.minTickPx);
-    this.drawResizeHandles(frame);
     this.updateNowLine(wallNow);
     this.scheduleClock(timePerDevicePx / 2, wallNow);
   };
@@ -587,7 +609,11 @@ export class Timeline {
     for (let index = 0; index < this.signalRows.length; index++) {
       const row = this.signalRows[index]!;
       const rowHeight = this.rowHeights[index]!;
-      const heatHeight = Math.max(2, rowHeight - COVERAGE_BAR_HEIGHT);
+      if (rowHeight <= COVERAGE_BAR_HEIGHT + 2) {
+        rowY += rowHeight;
+        continue;
+      }
+      const heatHeight = rowHeight - COVERAGE_BAR_HEIGHT;
       const sample = this.rowHoverSamples[index]!;
       const hasSample = row.readSampleAt(hoverTime, sample);
       const anchorX = !hasSample
@@ -606,20 +632,6 @@ export class Timeline {
     this.reqDraw();
   }
 
-  private drawResizeHandles(frame: Frame): void {
-    if (this.signalRows.length === 0) return;
-    let y = this.state.newsHeight;
-    this.drawResizeHandle(frame, y);
-    for (let index = 0; index < this.rowHeights.length - 1; index++) {
-      y += this.rowHeights[index]!;
-      this.drawResizeHandle(frame, y);
-    }
-  }
-
-  private drawResizeHandle(frame: Frame, y: number): void {
-    frame.fillRectPx(frame.width / 2 - 20, y - 2, 40, 4, "rgba(203,213,225,0.62)");
-  }
-
   private boundaryAt(y: number): number | null {
     if (this.signalRows.length === 0) return null;
     let boundaryY = this.state.newsHeight;
@@ -634,16 +646,10 @@ export class Timeline {
   private moveBoundary(boundary: number, delta: number): void {
     if (this.rowHeights.length === 0 || delta === 0) return;
     this.layoutDirty = true;
-    const total = this.plot.cssHeight;
-    const count = this.rowHeights.length;
-    const minNews = Math.min(MIN_NEWS_HEIGHT, total / (count + 1));
-    const minPrice = Math.min(MIN_SIGNAL_ROW_HEIGHT, (total - minNews) / count);
     if (boundary === 0) {
       const pair = this.state.newsHeight + this.rowHeights[0]!;
-      const newsHeight = Math.max(
-        minNews,
-        Math.min(pair - minPrice, this.state.newsHeight + delta),
-      );
+      const minNews = Math.min(MIN_NEWS_HEIGHT, pair);
+      const newsHeight = Math.max(minNews, Math.min(pair, this.state.newsHeight + delta));
       this.rowHeights[0] = pair - newsHeight;
       this.state.newsHeight = newsHeight;
       return;
@@ -651,10 +657,7 @@ export class Timeline {
     const left = boundary - 1;
     const right = boundary;
     const pair = this.rowHeights[left]! + this.rowHeights[right]!;
-    const leftHeight = Math.max(
-      minPrice,
-      Math.min(pair - minPrice, this.rowHeights[left]! + delta),
-    );
+    const leftHeight = Math.max(0, Math.min(pair, this.rowHeights[left]! + delta));
     this.rowHeights[left] = leftHeight;
     this.rowHeights[right] = pair - leftHeight;
   }
@@ -827,7 +830,7 @@ export class Timeline {
     if (event.pointerId !== this.dragPointerId) return;
     this.dragging = false;
     this.resizingBoundary = null;
-    this.flushLayoutChange();
+    this.flushLayoutChange(true);
     this.verticalPanRow = null;
     this.dragPointerId = null;
     if (this.canvas.hasPointerCapture?.(event.pointerId)) {
@@ -846,7 +849,7 @@ export class Timeline {
     this.dragPointerId = null;
     this.dragging = false;
     this.resizingBoundary = null;
-    this.flushLayoutChange();
+    this.flushLayoutChange(true);
     this.verticalPanRow = null;
     this.reqDraw();
   };
@@ -1059,7 +1062,6 @@ export class Timeline {
       this.canvas.releasePointerCapture(event.pointerId);
     }
     this.resizingBoundary = null;
-    this.flushLayoutChange();
     if (this.touchAId === null) {
       this.dragging = false;
       this.verticalPanRow = null;
@@ -1070,6 +1072,7 @@ export class Timeline {
       this.gestureStartX = this.touchAX;
       this.gestureStartY = this.touchAY;
     }
+    this.flushLayoutChange(this.touchAId === null);
     if (cancelled) {
       this.pointerInside = false;
       this.clearHover();

@@ -3,21 +3,21 @@ import type { TimelinePlayback } from "../engine/timeline.ts";
 import type { WaveletMode } from "../engine/wavelet.ts";
 
 const STORAGE_KEY = "chronickle.ui";
-const STORAGE_VERSION = 2;
+const STORAGE_VERSION = 3;
 const DEBOUNCE_MS = 300;
 
 export interface PersistedChart {
   readonly sourceId: string;
   readonly symbol: string;
   readonly palette?: PaletteName;
+  readonly waveletMode?: WaveletMode;
   readonly verticalOffset?: number;
   readonly height?: number;
 }
 
 export interface PersistedUiState {
-  readonly version: 2;
+  readonly version: 3;
   readonly viewport?: { readonly min: number; readonly max: number };
-  readonly waveletMode: WaveletMode;
   readonly playback: TimelinePlayback;
   readonly newsHeight?: number;
   readonly charts: readonly PersistedChart[];
@@ -26,6 +26,8 @@ export interface PersistedUiState {
 interface LegacyUiState {
   readonly viewport?: { readonly min?: unknown; readonly max?: unknown };
   readonly waveletMode?: unknown;
+  readonly playback?: unknown;
+  readonly newsHeight?: unknown;
   readonly charts?: readonly unknown[];
 }
 
@@ -38,7 +40,6 @@ export interface UiStatePersistence {
 export function loadUiState(): PersistedUiState {
   const fallback: PersistedUiState = {
     version: STORAGE_VERSION,
-    waveletMode: "centered",
     playback: { mode: "following", anchor: 0.85 },
     charts: [],
   };
@@ -48,7 +49,7 @@ export function loadUiState(): PersistedUiState {
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!isRecord(parsed)) return fallback;
-    if (parsed.version === STORAGE_VERSION) return parseV2(parsed);
+    if (parsed.version === STORAGE_VERSION) return parseV3(parsed);
     return migrateLegacy(parsed as LegacyUiState, fallback);
   } catch {
     return fallback;
@@ -94,27 +95,28 @@ export function createUiStatePersistence(readState: () => PersistedUiState): UiS
   };
 }
 
-function parseV2(value: Record<string, unknown>): PersistedUiState {
+function parseV3(value: Record<string, unknown>): PersistedUiState {
   return {
     version: STORAGE_VERSION,
     viewport: parseViewport(value.viewport),
-    waveletMode: value.waveletMode === "causal" ? "causal" : "centered",
     playback: parsePlayback(value.playback),
     newsHeight: finitePositive(value.newsHeight),
-    charts: parseCharts(value.charts),
-  } satisfies PersistedUiState;
-}
-
-function migrateLegacy(value: LegacyUiState, fallback: PersistedUiState): PersistedUiState {
-  return {
-    ...fallback,
-    viewport: parseViewport(value.viewport),
-    waveletMode: value.waveletMode === "causal" ? "causal" : "centered",
-    charts: parseCharts(value.charts),
+    charts: parseCharts(value.charts, "centered"),
   };
 }
 
-function parseCharts(value: unknown): readonly PersistedChart[] {
+function migrateLegacy(value: LegacyUiState, fallback: PersistedUiState): PersistedUiState {
+  const previousGlobalMode = parseWaveletMode(value.waveletMode, "centered");
+  return {
+    ...fallback,
+    viewport: parseViewport(value.viewport),
+    playback: parsePlayback(value.playback),
+    newsHeight: finitePositive(value.newsHeight),
+    charts: parseCharts(value.charts, previousGlobalMode),
+  };
+}
+
+function parseCharts(value: unknown, defaultWaveletMode: WaveletMode): readonly PersistedChart[] {
   if (!Array.isArray(value)) return [];
   const charts: PersistedChart[] = [];
   for (const entry of value) {
@@ -129,11 +131,18 @@ function parseCharts(value: unknown): readonly PersistedChart[] {
       sourceId: entry.sourceId,
       symbol: entry.symbol,
       palette: typeof entry.palette === "string" ? (entry.palette as PaletteName) : undefined,
+      waveletMode: parseWaveletMode(entry.waveletMode, defaultWaveletMode),
       verticalOffset: finiteNumber(entry.verticalOffset),
       height: finitePositive(entry.height),
     });
   }
   return charts;
+}
+
+function parseWaveletMode(value: unknown, fallback: WaveletMode): WaveletMode {
+  if (value === "causal") return "causal";
+  if (value === "centered") return "centered";
+  return fallback;
 }
 
 function parseViewport(value: unknown): { readonly min: number; readonly max: number } | undefined {

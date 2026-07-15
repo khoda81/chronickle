@@ -210,9 +210,12 @@ test("stack layout fills the canvas and preserves every resizable row", () => {
   assert(layout.rowHeights.length === 3, "a price row disappeared");
   assert(layout.newsHeight >= 64, "news row fell below its preferred minimum");
   assert(
-    layout.rowHeights.every((height) => height >= 130),
-    "price row fell below minimum",
+    layout.rowHeights.every((height) => height > 0),
+    "a signal row collapsed unexpectedly",
   );
+
+  const noMinimum = fitStackLayout(64, [1, 99], 200);
+  assert(noMinimum.rowHeights[0]! < 10, "signal rows still have an implicit minimum height");
 
   const compact = fitStackLayout(110, [220, 180, 140], 240);
   const compactUsed =
@@ -316,10 +319,7 @@ test("signal segment store returns NaN outside coverage and holds ZOH values", (
   const empty = store.sample(evalTime, 20);
   assert(empty.every(Number.isNaN), "empty store did not return NaN");
 
-  store.insertBatch([
-    heldSegment(5, 15, 5, 1, 10),
-    heldSegment(15, 25, 15, 2, 10),
-  ]);
+  store.insertBatch([heldSegment(5, 15, 5, 1, 10), heldSegment(15, 25, 15, 2, 10)]);
   const sampled = store.sample(evalTime, 20);
   assert(Number.isNaN(sampled[0]!), "value before first observation was defined");
   assert(sampled[1] === 1 && sampled[2] === 2 && sampled[3] === 2, "ZOH evaluation is incorrect");
@@ -364,10 +364,7 @@ test("signal predecessor lookup holds across uncovered gaps", () => {
 
 test("equal-valued observations retain their distinct timestamps", () => {
   const store = new SignalSegmentStore();
-  store.insertBatch([
-    heldSegment(0, 10, 0, 1, 10),
-    heldSegment(10, 20, 10, 1, 10),
-  ]);
+  store.insertBatch([heldSegment(0, 10, 0, 1, 10), heldSegment(10, 20, 10, 1, 10)]);
   const selected = { t: Number.NaN, value: Number.NaN };
   assert(store.readPointAtOrBefore(15, selected), "equal-value point lookup failed");
   assert(selected.t === 10, "equal values erased the newer observation time");
@@ -530,10 +527,7 @@ test("an empty signal segment store has no invalid cached range", () => {
 test("finer signal segments replace coarse history and reject late coarse overwrites", () => {
   const store = new SignalSegmentStore();
   store.insertBatch([heldSegment(0, 20, 0, 1, 20)]);
-  store.insertBatch([
-    heldSegment(5, 15, 5, 10, 10),
-    heldSegment(15, 25, 15, 11, 10),
-  ]);
+  store.insertBatch([heldSegment(5, 15, 5, 10, 10), heldSegment(15, 25, 15, 11, 10)]);
   store.insertBatch([heldSegment(0, 20, 0, -1, 30)]);
   const sampled = store.sample(new Float64Array([2, 7, 15, 18, 24]), 25);
   assert(sampled[0] === 1, "late coarse response overwrote leading history");

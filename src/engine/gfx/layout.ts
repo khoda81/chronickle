@@ -2,9 +2,9 @@
 
 export const DEFAULT_NEWS_HEIGHT = 110;
 export const MIN_NEWS_HEIGHT = 64;
-export const MIN_SIGNAL_ROW_HEIGHT = 130;
+export const DEFAULT_SIGNAL_ROW_HEIGHT = 130;
 
-/** Coverage/resolution diagnostics at the bottom of every price row. */
+/** Coverage/resolution diagnostics at the bottom of every signal row. */
 export const COVERAGE_BAR_HEIGHT = 18;
 /** Reference height that defines the logarithmic vertical scale spacing. */
 const HEATMAP_FIELD_HEIGHT = 640;
@@ -73,7 +73,7 @@ export interface StackLayout {
   readonly rowHeights: readonly number[];
 }
 
-/** Fit a news row and N price rows exactly into the available canvas height. */
+/** Fit a news row and N signal rows exactly into the available canvas height. */
 export function fitStackLayout(
   newsHeight: number,
   rowHeights: readonly number[],
@@ -83,16 +83,17 @@ export function fitStackLayout(
   const count = rowHeights.length;
   if (count === 0) return { newsHeight: total, rowHeights: [] };
 
-  // Small embeds may not have enough room for the preferred minima. In that
-  // case all rows shrink proportionally while remaining usable.
-  const minNews = Math.min(MIN_NEWS_HEIGHT, total / (count + 1));
-  const minPrice = Math.min(MIN_SIGNAL_ROW_HEIGHT, (total - minNews) / count);
-  const fittedNews = clamp(newsHeight, minNews, Math.max(minNews, total - minPrice * count));
-  const priceSpace = Math.max(0, total - fittedNews);
-  const extra = Math.max(0, priceSpace - minPrice * count);
-  const weights = rowHeights.map((height) => Math.max(1, height - minPrice));
+  // The news lane remains present, but signal rows intentionally have no
+  // minimum. A row may be dragged all the way closed and removed on commit.
+  const minNews = Math.min(MIN_NEWS_HEIGHT, total);
+  const fittedNews = clamp(newsHeight, minNews, total);
+  const signalSpace = Math.max(0, total - fittedNews);
+  const weights = rowHeights.map((height) => Math.max(0, height));
   const weightSum = weights.reduce((sum, weight) => sum + weight, 0);
-  const fittedRows = weights.map((weight) => minPrice + (extra * weight) / weightSum);
+  const fittedRows =
+    weightSum > 0
+      ? weights.map((weight) => (signalSpace * weight) / weightSum)
+      : rowHeights.map(() => signalSpace / count);
 
   return { newsHeight: fittedNews, rowHeights: fittedRows };
 }

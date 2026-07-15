@@ -75,7 +75,14 @@ export class TimelineOverlayController implements TimelineOverlaySink {
 
   detachRow(id: string): void {
     const row = this.rows.get(id);
-    if (row !== undefined) row.tooltip.hidden = true;
+    if (row !== undefined) {
+      row.tooltip.hidden = true;
+      row.header.style.removeProperty("--timeline-row-collapse-progress");
+      row.header.style.removeProperty("--timeline-row-collapse-scale");
+      row.header.style.removeProperty("--timeline-row-collapse-border-alpha");
+      row.header.style.removeProperty("--timeline-row-collapse-shadow-alpha");
+      delete row.header.dataset.collapsing;
+    }
     this.rows.delete(id);
     this.rowTops.delete(id);
   }
@@ -131,6 +138,18 @@ export class TimelineOverlayController implements TimelineOverlaySink {
     this.rowTops.set(id, top);
     const row = this.rows.get(id);
     if (row !== undefined) this.positionRow(row.header, top);
+  }
+
+  setRowCollapseProgress(id: string, progress: number): void {
+    const header = this.rows.get(id)?.header;
+    if (header === undefined) return;
+    const normalized = Math.max(0, Math.min(1, progress));
+    header.style.setProperty("--timeline-row-collapse-progress", String(normalized));
+    header.style.setProperty("--timeline-row-collapse-scale", String(0.7 + normalized * 0.3));
+    header.style.setProperty("--timeline-row-collapse-border-alpha", String(normalized * 0.82));
+    header.style.setProperty("--timeline-row-collapse-shadow-alpha", String(normalized * 0.28));
+    if (normalized > 0) header.dataset.collapsing = "";
+    else delete header.dataset.collapsing;
   }
 
   hideSignalTooltips(): void {

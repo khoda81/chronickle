@@ -46,6 +46,7 @@ export function FeedInput(props: FeedInputProps) {
 interface FeedListProps {
   readonly feeds: readonly RssFeed[];
   readonly onToggle: (feed: RssFeed) => void;
+  readonly onRename: (feed: RssFeed, source: string) => void;
   readonly onRemove: (feed: RssFeed) => void;
 }
 
@@ -54,29 +55,100 @@ export function FeedList(props: FeedListProps) {
     <div class={styles.list} aria-label="News feeds">
       <For each={props.feeds}>
         {(feed) => (
-          <div class={styles.chip} classList={{ [styles.chipDisabled!]: !feed.enabled }}>
-            <button
-              type="button"
-              class={styles.toggle}
-              aria-pressed={feed.enabled}
-              title={feed.enabled ? `Hide ${feed.source}` : `Show ${feed.source}`}
-              onClick={() => props.onToggle(feed)}
-            >
-              <span class={styles.swatch} style={{ background: feed.color }} aria-hidden="true" />
-              <span class={styles.name}>{feed.source}</span>
-            </button>
-            <button
-              type="button"
-              class={styles.remove}
-              title={`Remove ${feed.source}`}
-              aria-label={`Remove ${feed.source}`}
-              onClick={() => props.onRemove(feed)}
-            >
-              <X aria-hidden="true" />
-            </button>
-          </div>
+          <FeedChip
+            feed={feed}
+            onToggle={() => props.onToggle(feed)}
+            onRename={(source) => props.onRename(feed, source)}
+            onRemove={() => props.onRemove(feed)}
+          />
         )}
       </For>
+    </div>
+  );
+}
+
+interface FeedChipProps {
+  readonly feed: RssFeed;
+  readonly onToggle: () => void;
+  readonly onRename: (source: string) => void;
+  readonly onRemove: () => void;
+}
+
+function FeedChip(props: FeedChipProps) {
+  const [editing, setEditing] = createSignal(false);
+  const [draft, setDraft] = createSignal(props.feed.source);
+  let input!: HTMLInputElement;
+
+  const beginEditing = (): void => {
+    setDraft(props.feed.source);
+    setEditing(true);
+    queueMicrotask(() => {
+      input.focus();
+      input.select();
+    });
+  };
+
+  const finishEditing = (): void => {
+    if (!editing()) return;
+    const source = draft().trim();
+    setEditing(false);
+    if (source.length > 0 && source !== props.feed.source) props.onRename(source);
+  };
+
+  const cancelEditing = (): void => {
+    setDraft(props.feed.source);
+    setEditing(false);
+  };
+
+  return (
+    <div class={styles.chip} classList={{ [styles.chipDisabled!]: !props.feed.enabled }}>
+      <button
+        type="button"
+        class={styles.toggle}
+        aria-pressed={props.feed.enabled}
+        title={props.feed.enabled ? `Hide ${props.feed.source}` : `Show ${props.feed.source}`}
+        aria-label={props.feed.enabled ? `Hide ${props.feed.source}` : `Show ${props.feed.source}`}
+        onClick={props.onToggle}
+      >
+        <span class={styles.swatch} style={{ background: props.feed.color }} aria-hidden="true" />
+      </button>
+      {editing() ? (
+        <input
+          ref={input}
+          class={styles.nameInput}
+          aria-label={`Rename ${props.feed.source}`}
+          value={draft()}
+          onInput={(event) => setDraft(event.currentTarget.value)}
+          onBlur={finishEditing}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              finishEditing();
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              cancelEditing();
+            }
+          }}
+        />
+      ) : (
+        <button
+          type="button"
+          class={styles.nameButton}
+          title={`Rename ${props.feed.source}`}
+          onClick={beginEditing}
+        >
+          <span class={styles.name}>{props.feed.source}</span>
+        </button>
+      )}
+      <button
+        type="button"
+        class={styles.remove}
+        title={`Remove ${props.feed.source}`}
+        aria-label={`Remove ${props.feed.source}`}
+        onClick={props.onRemove}
+      >
+        <X aria-hidden="true" />
+      </button>
     </div>
   );
 }
