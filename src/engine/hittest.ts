@@ -13,45 +13,6 @@
 import type { EventSet } from "../domain.ts";
 import type { DataTransform } from "./transform.ts";
 
-/**
- * Find the index of the nearest event under pixel (px, py), or null if none
- * is within `radius` pixels. Culls to the visible time window.
- */
-export function hitTestEvent(
-  events: EventSet,
-  tx: DataTransform,
-  px: number,
-  py: number,
-  eventY: number,
-  radius = 10,
-): number | null {
-  if (Math.abs(py - eventY) > radius) return null;
-
-  const xs = events.events;
-  if (xs.length === 0) return null;
-
-  const tMin = tx.timeDomain.min;
-  const tMax = tx.timeDomain.max;
-  // First index whose t >= tMin (xs.length if all are before the window).
-  const lo = lowerBound(xs, tMin);
-  if (lo === xs.length) return null;
-  // First index whose t > tMax. Events in [lo, hi) are within [tMin, tMax].
-  const hi = upperBound(xs, tMax, lo);
-  if (hi === lo) return null;
-
-  let best: number | null = null;
-  let bestDist = radius;
-  for (let i = lo; i < hi; i++) {
-    const e = xs[i]!;
-    const x = tx.timeToX(e.t);
-    const d = Math.abs(x - px);
-    if (d < bestDist) {
-      bestDist = d;
-      best = i;
-    }
-  }
-  return best;
-}
 
 /** Find the visible event nearest to a vertical crosshair. */
 export function nearestEventIndex(events: EventSet, tx: DataTransform, px: number): number | null {

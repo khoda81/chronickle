@@ -105,7 +105,7 @@ export interface TimelineConfig {
   readonly minTickPx: number;
 }
 
-export const DEFAULT_TIMELINE_CONFIG: TimelineConfig = {
+const DEFAULT_TIMELINE_CONFIG: TimelineConfig = {
   wheelLineHeight: 16,
   wheelSensitivity: 0.003,
   timeScrollSensitivity: 3,

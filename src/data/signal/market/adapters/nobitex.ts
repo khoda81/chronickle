@@ -15,9 +15,8 @@
  * pagination). For longer history, the OHLC endpoint should be used instead.
  */
 
-import { PricePoint, PriceSeries } from "../../../domain.ts";
+import { PricePoint, PriceSeries } from "../../../../domain.ts";
 
-const NOBITEX_TRADES = "https://apiv2.nobitex.ir/v2/trades";
 const NOBITEX_OHLC = "https://apiv2.nobitex.ir/market/udf/history";
 
 export interface NobitexTrade {
@@ -65,50 +64,7 @@ export interface FetchOhlcOptions {
   readonly signal?: AbortSignal;
 }
 
-/**
- * Fetch raw trades from Nobitex.
- * @throws on non-OK HTTP status, non-"ok" payload status, or malformed JSON.
- */
-export async function fetchTrades(opts: FetchPriceOptions = {}): Promise<NobitexTradesResponse> {
-  const symbol = opts.symbol ?? "USDTIRT";
-  const url = `${NOBITEX_TRADES}/${encodeURIComponent(symbol)}`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 15_000);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    if (!res.ok) {
-      throw new Error(`Nobitex trades request failed: ${res.status} ${res.statusText}`);
-    }
-    const json = (await res.json()) as NobitexTradesResponse;
-    if (json.status !== "ok") {
-      throw new Error(`Nobitex trades returned status: ${json.status}`);
-    }
-    return json;
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
-/**
- * Convert raw Nobitex trades into a PriceSeries. Trades are mapped 1:1 to
- * PricePoints (no resampling, no deduplication). Price validation is
- * delegated to PriceSeries.from.
- */
-export function tradesToPriceSeries(trades: readonly NobitexTrade[]): PriceSeries {
-  const points: PricePoint[] = trades.map((t) => ({
-    t: t.time,
-    price: Number(t.price),
-  }));
-  return PriceSeries.from(points);
-}
-
-/**
- * High-level helper: fetch trades and convert to a PriceSeries.
- */
-export async function fetchPriceSeries(opts: FetchPriceOptions = {}): Promise<PriceSeries> {
-  const res = await fetchTrades(opts);
-  return tradesToPriceSeries(res.trades);
-}
 export async function fetchOhlc(opts: FetchOhlcOptions): Promise<NobitexOhlcResponse | null> {
   const symbol = opts.symbol ?? "USDTIRT";
   const resolution = opts.resolution ?? "D";
@@ -169,12 +125,4 @@ export function ohlcToPriceSeries(res: NobitexOhlcResponse | null): PriceSeries 
     price: res.o[i]!,
   }));
   return PriceSeries.from(points);
-}
-
-/**
- * High-level helper: fetch OHLC and convert to a PriceSeries (open-only).
- */
-export async function fetchOhlcPriceSeries(opts: FetchOhlcOptions): Promise<PriceSeries> {
-  const res = await fetchOhlc(opts);
-  return ohlcToPriceSeries(res);
 }

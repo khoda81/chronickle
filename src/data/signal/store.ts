@@ -57,16 +57,9 @@ export class SignalSpanStore {
   private readonly blocks: SpanBlock[] = [];
   private totalSpanCount = 0;
 
-  private treeBase = 1;
-  private treeMaxResolution = new Float64Array(2);
-  private treeGapCount = new Uint32Array(2);
-
   clear(): void {
     this.blocks.length = 0;
     this.totalSpanCount = 0;
-    this.treeBase = 1;
-    this.treeMaxResolution = new Float64Array(2);
-    this.treeGapCount = new Uint32Array(2);
   }
 
   get spanCount(): number {
@@ -107,7 +100,6 @@ export class SignalSpanStore {
     if (this.blocks.length === 0) {
       this.blocks.push(...chunkSpans(incoming));
       this.totalSpanCount = incoming.length;
-      this.rebuildSummaryTree();
       return;
     }
 
@@ -130,7 +122,6 @@ export class SignalSpanStore {
     }
     this.blocks.splice(spliceStart, spliceEnd - spliceStart, ...replacement);
     this.totalSpanCount += merged.length - removedCount;
-    this.rebuildSummaryTree();
   }
 
   sample(
@@ -143,39 +134,6 @@ export class SignalSpanStore {
       reuseValue?.length === evalTime.length ? reuseValue : new Float64Array(evalTime.length);
 
     return { value };
-  }
-
-  /** True when selected evidence covers all of `range` at acceptable quality. */
-  answers(range: Range, maxResolutionMs: number): boolean {
-    validateResolution(maxResolutionMs);
-    const first = this.findContainingSpan(range.min);
-    const last = this.findContainingSpan(range.max);
-    if (first === null || last === null) return false;
-    if (compareLocations(first, last) > 0) return false;
-
-    if (first.blockIndex === last.blockIndex) {
-      return this.scanQuality(first, last, maxResolutionMs);
-    }
-
-    const firstBlock = this.blocks[first.blockIndex]!;
-    const firstEnd = { blockIndex: first.blockIndex, spanIndex: firstBlock.length - 1 };
-    if (!this.scanQuality(first, firstEnd, maxResolutionMs)) return false;
-
-    const lastStart = { blockIndex: last.blockIndex, spanIndex: 0 };
-    if (!this.scanQuality(lastStart, last, maxResolutionMs)) return false;
-
-    // Boundaries from the partial edge blocks into the summarized middle.
-    if (!this.blocksTouch(first.blockIndex, first.blockIndex + 1)) return false;
-    if (!this.blocksTouch(last.blockIndex - 1, last.blockIndex)) return false;
-
-    const middleStart = first.blockIndex + 1;
-    const middleEnd = last.blockIndex; // exclusive
-    if (middleStart < middleEnd) {
-      const summary = this.queryBlockSummary(middleStart, middleEnd);
-      if (summary.maxResolutionMs > maxResolutionMs || summary.gapCount !== 0) return false;
-    }
-
-    return true;
   }
 
   /** Add acceptable selected coverage, clipped to `range`, to `out`. */
@@ -242,74 +200,6 @@ export class SignalSpanStore {
     return out;
   }
 
-  private rebuildSummaryTree(): void {
-    this.treeBase = 1;
-    while (this.treeBase < this.blocks.length) this.treeBase <<= 1;
-    this.treeMaxResolution = new Float64Array(this.treeBase * 2);
-    this.treeMaxResolution.fill(Number.NEGATIVE_INFINITY);
-    this.treeGapCount = new Uint32Array(this.treeBase * 2);
-
-    for (let blockIndex = 0; blockIndex < this.blocks.length; blockIndex++) {
-      const block = this.blocks[blockIndex]!;
-      const treeIndex = this.treeBase + blockIndex;
-      this.treeMaxResolution[treeIndex] = block.maxResolutionMs;
-      this.treeGapCount[treeIndex] =
-        block.internalGapCount +
-        (blockIndex > 0 && !this.blocksTouch(blockIndex - 1, blockIndex) ? 1 : 0);
-    }
-    for (let index = this.treeBase - 1; index > 0; index--) {
-      this.treeMaxResolution[index] = Math.max(
-        this.treeMaxResolution[index * 2]!,
-        this.treeMaxResolution[index * 2 + 1]!,
-      );
-      this.treeGapCount[index] = this.treeGapCount[index * 2]! + this.treeGapCount[index * 2 + 1]!;
-    }
-  }
-
-  private queryBlockSummary(
-    startBlock: number,
-    endBlock: number,
-  ): { maxResolutionMs: number; gapCount: number } {
-    let left = this.treeBase + startBlock;
-    let right = this.treeBase + endBlock;
-    let maxResolutionMs = Number.NEGATIVE_INFINITY;
-    let gapCount = 0;
-    while (left < right) {
-      if ((left & 1) !== 0) {
-        maxResolutionMs = Math.max(maxResolutionMs, this.treeMaxResolution[left]!);
-        gapCount += this.treeGapCount[left]!;
-        left++;
-      }
-      if ((right & 1) !== 0) {
-        right--;
-        maxResolutionMs = Math.max(maxResolutionMs, this.treeMaxResolution[right]!);
-        gapCount += this.treeGapCount[right]!;
-      }
-      left >>= 1;
-      right >>= 1;
-    }
-    return { maxResolutionMs, gapCount };
-  }
-
-  private scanQuality(first: SpanLocation, last: SpanLocation, maxResolutionMs: number): boolean {
-    let blockIndex = first.blockIndex;
-    let spanIndex = first.spanIndex;
-    let previousEnd = this.blocks[blockIndex]!.startTime[spanIndex]!;
-    while (compareLocations({ blockIndex, spanIndex }, last) <= 0) {
-      const block = this.blocks[blockIndex]!;
-      const start = block.startTime[spanIndex]!;
-      if (start > previousEnd) return false;
-      if (block.resolutionMs[spanIndex]! > maxResolutionMs) return false;
-      previousEnd = block.endTime[spanIndex]!;
-      spanIndex++;
-      if (spanIndex >= block.length) {
-        blockIndex++;
-        spanIndex = 0;
-      }
-    }
-    return true;
-  }
-
   private selectBoundaryOwner(location: SpanLocation, t: number): SpanLocation {
     const block = this.blocks[location.blockIndex]!;
     if (t !== block.startTime[location.spanIndex]!) return location;
@@ -361,10 +251,6 @@ export class SignalSpanStore {
     return { blockIndex, spanIndex: this.blocks[blockIndex]!.length - 1 };
   }
 
-  private blocksTouch(leftIndex: number, rightIndex: number): boolean {
-    if (leftIndex < 0 || rightIndex >= this.blocks.length || leftIndex >= rightIndex) return false;
-    return this.blocks[leftIndex]!.maxTime >= this.blocks[rightIndex]!.minTime;
-  }
 
   private firstBlockEndingAfter(t: number): number {
     let lo = 0;
@@ -531,9 +417,6 @@ function appendSlice(out: SignalSpan[], span: SignalSpan): void {
   }
 }
 
-function compareLocations(a: SpanLocation, b: SpanLocation): number {
-  return a.blockIndex - b.blockIndex || a.spanIndex - b.spanIndex;
-}
 
 function validateIncoming(spans: readonly SignalSpan[]): void {
   let previousEnd = Number.NEGATIVE_INFINITY;

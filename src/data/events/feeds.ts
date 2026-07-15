@@ -32,7 +32,7 @@ const STORAGE_KEY = "chronickle.feeds";
  * ids — we want stability and speed, not cryptographic strength. Output is a
  * base36 string for compactness.
  */
-export function hashUrl(url: string): string {
+function hashUrl(url: string): string {
   let h = 0x811c9dc5;
   for (let i = 0; i < url.length; i++) {
     h ^= url.charCodeAt(i);
@@ -59,7 +59,7 @@ export class FeedRegistry {
   private readonly freeIndices: number[] = [];
   private nextIndex = 0;
 
-  private constructor() {}
+  private constructor() { }
 
   /**
    * Seed a registry from an explicit default feed list (owned by `main.ts`).

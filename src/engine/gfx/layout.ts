@@ -7,7 +7,7 @@ export const MIN_SIGNAL_ROW_HEIGHT = 130;
 /** Coverage/resolution diagnostics at the bottom of every price row. */
 export const COVERAGE_BAR_HEIGHT = 18;
 /** Reference height that defines the logarithmic vertical scale spacing. */
-export const HEATMAP_FIELD_HEIGHT = 640;
+const HEATMAP_FIELD_HEIGHT = 640;
 /** Maximum horizontal supersampling used when viewing sub-pixel scales. */
 const MAX_SAMPLE_DENSITY = 8;
 /** Maximum horizontal decimation used when viewing very broad scales. */
@@ -15,8 +15,8 @@ const MAX_SAMPLE_STRIDE = 64;
 /** Pointer hit target around each draggable horizontal boundary. */
 export const RESIZE_HANDLE_RADIUS = 6;
 
-export const MIN_SIGMA = 14;
-export const MAX_SIGMA_CAP = 128;
+const MIN_SIGMA = 14;
+const MAX_SIGMA_CAP = 128;
 
 export function maxSigmaFor(numPx: number): number {
   return Math.max(MIN_SIGMA, Math.min(MAX_SIGMA_CAP, numPx / 4));

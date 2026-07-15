@@ -45,7 +45,6 @@ export function createYahooAdapter(opts: YahooAdapterOptions): PriceAdapter {
 
   return createPollingSignalSource({
     minFetchPoints: 128,
-    serializeRequests: true,
     sourceWideBackoff: true,
     now,
 

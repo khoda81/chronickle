@@ -20,17 +20,7 @@
  */
 
 import type { Frame } from "./context.ts";
-import {
-  timeTicks,
-  timeTickInterval,
-  timeSecond,
-  timeMinute,
-  timeHour,
-  timeDay,
-  timeMonth,
-  timeYear,
-  type TimeInterval,
-} from "d3-time";
+import { timeTicks } from "d3-time";
 
 const TICK_COLOR = "#2a2f3a";
 const LABEL_COLOR = "#6b7280";
@@ -75,7 +65,7 @@ const YEAR_FMT = new Intl.DateTimeFormat("en-US", {
  * - year:               `YYYY`
  * - null (ms-level):    full `mm/dd HH:MM`
  */
-function formatTick(t: number, interval: TimeInterval | null): string {
+function formatTick(t: number): string {
   const d = new Date(t);
   if (d.getSeconds() !== 0) return TIME_FMT.format(t).replace(",", "");
   if (d.getMinutes() !== 0) return DATETIME_FMT.format(t).replace(",", "");
@@ -97,7 +87,7 @@ export const Axis = {
 };
 
 class AxisImpl implements AxisLayer {
-  constructor(private readonly frame: Frame) {}
+  constructor(private readonly frame: Frame) { }
 
   drawTimeAxis(y: number, minTickPx: number = DEFAULT_MIN_TICK_PX): void {
     if (!(minTickPx > 0)) {
@@ -114,13 +104,12 @@ class AxisImpl implements AxisLayer {
     const count = Math.max(1, Math.floor(screenSpan / minTickPx));
     const start = new Date(tLo);
     const stop = new Date(tHi);
-    const interval = timeTickInterval(start, stop, count);
     const ticks = timeTicks(start, stop, count);
 
     for (const d of ticks) {
       const t = d.getTime();
       frame.vlineAt(t, y, y + 4, TICK_COLOR);
-      frame.textAt(formatTick(t, interval), t, y - 6, LABEL_FONT, LABEL_COLOR);
+      frame.textAt(formatTick(t), t, y - 6, LABEL_FONT, LABEL_COLOR);
     }
   }
 }

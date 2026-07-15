@@ -18,7 +18,6 @@ import type { Range } from "./range.ts";
 export class DataTransform {
   private readonly timeSpan: number;
   private readonly screenSpan: number;
-  private readonly ySpan: number;
 
   constructor(
     /** Visible time window (epoch ms). */
@@ -30,7 +29,6 @@ export class DataTransform {
   ) {
     this.timeSpan = timeDomain.max - timeDomain.min;
     this.screenSpan = screenDomain.max - screenDomain.min;
-    this.ySpan = yDomain.max - yDomain.min;
   }
 
   /** Map a time value to a screen x pixel. */

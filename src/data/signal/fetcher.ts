@@ -8,8 +8,6 @@ export interface AdapterDemand {
   readonly range: Range;
   /** Maximum acceptable native sample spacing requested by the consumer. */
   readonly maxDeltaTMs: number;
-  /** Wall-clock time at which this demand snapshot was created. */
-  readonly requestedAtMs: number;
 }
 
 /** A demand after the adapter has selected an exchange-native resolution. */
@@ -65,8 +63,6 @@ export interface PriceAdapter {
 
 /** Low-level HTTP implementation used by the generic polling coordinator. */
 export interface RangeLoader {
-  /** Retained for source declarations; the coordinator itself is single-lane. */
-  readonly serializeRequests?: boolean;
   /** Minimum useful request size. The coordinator may fetch more than demanded. */
   readonly minFetchPoints?: number;
   /** Keep live polling warm for this long after the last live demand disappears. */
@@ -86,7 +82,6 @@ interface Work {
   readonly kind: "history" | "live";
   readonly requiredRange: Range;
   readonly plan: AdapterPlan;
-  readonly fetchRange: Range;
   readonly controller: AbortController;
   attempt: number;
   retryAtMs: number | null;
@@ -209,12 +204,11 @@ export function createPollingSignalSource(fetcher: RangeLoader): PriceAdapter {
         return out;
       };
 
-      const currentPlans = (): AdapterPlan[] => {
-        const wallNow = now();
-        return demands
-          .map((demand) => adapter.plan({ ...demand, requestedAtMs: wallNow }))
-          .sort((a, b) => a.resolutionMs - b.resolutionMs || b.range.max - a.range.max);
-      };
+      const currentPlans = (): AdapterPlan[] =>
+        demands
+          .map((demand) => adapter.plan({ ...demand }))
+          .sort((a, b) => a.resolutionMs - b.resolutionMs || b.range.max - a.range.max)
+        ;
 
       const desiredLivePlan = (plans: readonly AdapterPlan[]): AdapterPlan | null => {
         const wallNow = now();
@@ -241,7 +235,6 @@ export function createPollingSignalSource(fetcher: RangeLoader): PriceAdapter {
             live.plan = {
               ...live.plan,
               range: desired.range,
-              requestedAtMs: desired.requestedAtMs,
             };
             live.retainedUntilMs = Number.POSITIVE_INFINITY;
           } else {
@@ -265,7 +258,6 @@ export function createPollingSignalSource(fetcher: RangeLoader): PriceAdapter {
               live.plan = {
                 ...live.plan,
                 range: desired.range,
-                requestedAtMs: desired.requestedAtMs,
               };
             }
           }
@@ -322,8 +314,7 @@ export function createPollingSignalSource(fetcher: RangeLoader): PriceAdapter {
         return {
           kind,
           requiredRange,
-          plan: { ...plan, range: fetchRange, requestedAtMs: wallNow },
-          fetchRange,
+          plan: { ...plan, range: fetchRange },
           controller: new AbortController(),
           attempt: 0,
           retryAtMs: null,
@@ -523,9 +514,6 @@ function expandRange(
 function validateDemand(demand: AdapterDemand): void {
   if (!(demand.maxDeltaTMs > 0) || !Number.isFinite(demand.maxDeltaTMs)) {
     throw new Error(`PriceAdapter: invalid requested resolution ${demand.maxDeltaTMs}`);
-  }
-  if (!Number.isFinite(demand.requestedAtMs)) {
-    throw new Error(`PriceAdapter: invalid wall clock ${demand.requestedAtMs}`);
   }
 }
 

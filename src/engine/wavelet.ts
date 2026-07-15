@@ -13,7 +13,7 @@ export interface WaveletOptions {
   readonly causalWarmup: number;
 }
 
-export const DEFAULT_WAVELET_OPTIONS: WaveletOptions = {
+const DEFAULT_WAVELET_OPTIONS: WaveletOptions = {
   gaussianCutoff: 5,
   causalStages: 4,
   causalWarmup: 4,

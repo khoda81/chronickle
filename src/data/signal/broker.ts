@@ -225,7 +225,7 @@ export class Broker {
       // candle boundary and remains the displayed value until the next open.
       // Extending that final step to its expected lifetime prevents the moving
       // wall clock from manufacturing millisecond-sized "uncovered" tails.
-      this.ingestObserved(points, result.resolutionMs, result.searchedRange.max, true);
+      this.ingestObserved(points, result.resolutionMs);
     }
     this.fetchedCoverage.add(result.requestedMaxDeltaTMs, result.searchedRange);
   }
@@ -233,8 +233,6 @@ export class Broker {
   private ingestObserved(
     points: readonly PricePoint[],
     nominalResolutionMs: number,
-    observedThroughMs: number,
-    searchedThroughRequestEnd: boolean,
   ): void {
     const spans: SignalSpan[] = [];
     for (let index = 1; index < points.length; index++) {
@@ -242,7 +240,7 @@ export class Broker {
       const current = points[index]!;
       const observedDelta = current.t - previous.t;
       if (!(observedDelta > 0)) continue;
-      const range = Range.create(previous.t, current.t);
+
       spans.push({
         startTime: previous.t,
         endTime: current.t,
@@ -259,15 +257,11 @@ export class Broker {
     const last = points[points.length - 1];
     if (last !== undefined) {
       const expectedUntil = last.t + nominalResolutionMs;
-      const heldUntil = searchedThroughRequestEnd
-        ? expectedUntil
-        : Math.min(expectedUntil, observedThroughMs);
-      if (last.t < heldUntil) {
-        const range = Range.create(last.t, heldUntil);
+      if (last.t < expectedUntil) {
         const logPrice = Math.log(last.price);
         spans.push({
           startTime: last.t,
-          endTime: heldUntil,
+          endTime: expectedUntil,
           startValue: logPrice,
           endValue: logPrice,
           resolutionMs: nominalResolutionMs,

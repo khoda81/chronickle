@@ -97,24 +97,7 @@ export const DEFAULT_PALETTE: PaletteName = "blue-orange";
 
 export const RAMP_RESOLUTION = 4096;
 
-let activePalette: RampPalette = PALETTES[DEFAULT_PALETTE];
 const lutByPalette = new Map<PaletteName, Uint8ClampedArray>();
-
-/**
- * Switch the active palette by name. Invalidates the cached LUT so the next
- * `rampLut()` rebuilds it. The name is type-checked at compile time, so no
- * runtime throw is needed.
- */
-export function setRampPalette(name: PaletteName): void {
-  const p = PALETTES[name];
-  if (p === activePalette) return;
-  activePalette = p;
-}
-
-/** Current palette name. */
-export function rampPaletteName(): PaletteName {
-  return activePalette.name as PaletteName;
-}
 
 /**
  * Return the 256-entry RGBA ramp (RAMP_RESOLUTION * 4 bytes). Stops are
@@ -123,7 +106,7 @@ export function rampPaletteName(): PaletteName {
  *
  * @throws if stops are malformed.
  */
-export function rampLut(name: PaletteName = rampPaletteName()): Uint8ClampedArray {
+export function rampLut(name: PaletteName): Uint8ClampedArray {
   const cached = lutByPalette.get(name);
   if (cached !== undefined) return cached;
   const lut = buildLut(PALETTES[name]);
@@ -244,16 +227,4 @@ function sampleLinearRgb(
 export function rampIndex(norm: number): number {
   const n = Math.min(1, Math.max(0, norm));
   return Math.min(RAMP_RESOLUTION - 1, Math.floor(n * (RAMP_RESOLUTION - 1)));
-}
-
-/**
- * Format a ramp entry as an `rgb(...)` string. Avoids per-call allocation of
- * intermediate arrays.
- */
-export function rampCss(buf: Uint8ClampedArray, idx: number): string {
-  const o = idx * 4;
-  const r = buf[o]!;
-  const g = buf[o + 1]!;
-  const b = buf[o + 2]!;
-  return `rgb(${r}, ${g}, ${b})`;
 }

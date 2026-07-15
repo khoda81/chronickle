@@ -83,7 +83,7 @@ export async function fetchFeed(
  * Parse RSS 2.0 / Atom 1.0 XML into a ParsedFeed.
  * @throws on malformed XML, Cloudflare HTML block, or zero items.
  */
-export function parseRssXml(xml: string, feedId: string): ParsedFeed {
+function parseRssXml(xml: string, feedId: string): ParsedFeed {
   const doc = new DOMParser().parseFromString(xml, "application/xml");
 
   const parseError = doc.querySelector("parsererror");

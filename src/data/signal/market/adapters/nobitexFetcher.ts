@@ -15,7 +15,7 @@
 
 import { createPollingSignalSource, type PriceAdapter } from "../../fetcher.ts";
 import { pickResolution } from "../../resolution.ts";
-import { fetchOhlc, NobitexOhlcResponse, ohlcToPriceSeries } from "./nobitex.ts";
+import { fetchOhlc, ohlcToPriceSeries } from "./nobitex.ts";
 import { PricePoint } from "../../../../domain.ts";
 
 const MS = 1000;

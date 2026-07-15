@@ -38,9 +38,6 @@ export interface FeedWalkerOptions {
   readonly timeoutMs?: number;
 }
 
-// TODO: Instead of a cap, handle cycling archive links by detecting repeated URLs
-/** Safety cap against a misbehaving feed whose "next" link cycles. */
-const MAX_PAGES = 200;
 
 export class FeedWalker {
   private readonly feed: RssFeed;
