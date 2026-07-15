@@ -8,7 +8,7 @@ import type {
   Subscription,
   ReadRequest,
   SignalView,
-} from "../data/price/broker.ts";
+} from "../data/signal/broker.ts";
 import { Range } from "./range.ts";
 import { DataTransform } from "./transform.ts";
 import { transformTouchRange } from "./gesture.ts";

@@ -8,7 +8,7 @@
  * Endpoint: https://api-fxpractice.oanda.com/v3/instruments/{SYMBOL}/candles
  */
 
-import { PricePoint, PriceSeries } from "../../../domain.ts";
+import { PricePoint, PriceSeries } from "../../../../domain.ts";
 
 const OANDA_PRACTICE_API = "https://api-fxpractice.oanda.com/v3/instruments";
 

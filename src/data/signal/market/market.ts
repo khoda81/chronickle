@@ -1,8 +1,8 @@
-import type { PriceAdapter } from "./fetcher.ts";
-import { createBinanceAdapter } from "./exchanges/binanceFetcher.ts";
-import { createNobitexAdapter } from "./exchanges/nobitexFetcher.ts";
-import { createYahooAdapter } from "./exchanges/yahoo.ts";
-import { fetchBinanceSymbols, fetchNobitexSymbols, type MarketSymbol } from "./symbols.ts";
+import type { PriceAdapter } from "../fetcher.ts";
+import { createBinanceAdapter } from "./adapters/binanceFetcher.ts";
+import { createNobitexAdapter } from "./adapters/nobitexFetcher.ts";
+import { createYahooAdapter } from "./adapters//yahoo.ts";
+import { fetchBinanceSymbols, fetchNobitexSymbols, type MarketSymbol } from "../symbols.ts";
 
 export type MarketSourceId = "nobitex" | "binance" | "yahoo";
 

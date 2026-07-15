@@ -1,7 +1,7 @@
 /** Range-aware Yahoo Finance chart adapter for futures, equities, and indices. */
 
-import type { PricePoint } from "../../../domain.ts";
-import { createPollingSignalSource, type AdapterBatch, type PriceAdapter } from "../fetcher.ts";
+import type { PricePoint } from "../../../../domain.ts";
+import { createPollingSignalSource, type AdapterBatch, type PriceAdapter } from "../../fetcher.ts";
 
 const YAHOO_CHART_API = "https://query2.finance.yahoo.com/v8/finance/chart";
 const CORS_PROXY = "https://corsproxy.io/?url=";

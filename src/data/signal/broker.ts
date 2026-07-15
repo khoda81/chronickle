@@ -7,12 +7,11 @@ import { SettledCoverageIndex, type CoverageSegment } from "./coverage.ts";
 import type { AcquisitionActivity, AdapterDelivery as SignalDelivery, AdapterSession, PriceAdapter as SignalSource } from "./fetcher.ts";
 import { SignalSpanStore, type SignalSpan } from "./store.ts";
 
-export type QueryStatus = "complete" | "partial" | "empty";
+
 
 export interface SignalView {
   readonly value: Float64Array;
   /** Renderer-requested maximum sample spacing. */
-  readonly targetResolutionMs: number;
   readonly coverage: readonly CoverageSegment[];
   readonly revision: number;
 }
@@ -58,7 +57,6 @@ export class Broker {
   private revision = 0;
   private adapterActivities: readonly AcquisitionActivity[] = [];
   private valueBuffer: Float64Array<ArrayBufferLike> = new Float64Array(0);
-  private resolutionBuffer: Float64Array<ArrayBufferLike> = new Float64Array(0);
 
   constructor(adapter: SignalSource, opts: BrokerOptions = {}) {
     this.now = opts.now ?? Date.now;
@@ -102,7 +100,6 @@ export class Broker {
       value.fill(NaN);
       return {
         value,
-        targetResolutionMs: maxDeltaTMs,
         coverage: [],
         revision: this.revision,
       };
@@ -111,12 +108,10 @@ export class Broker {
     const queryRange = Range.create(evalTime[0]!, evalTime[evalTime.length - 1]!);
     const wallNow = this.now();
     const historicalRange = clampToNow(queryRange, wallNow);
-    const sampled = this.store.sample(evalTime, wallNow, this.valueBuffer, this.resolutionBuffer);
+    const sampled = this.store.sample(evalTime, wallNow, this.valueBuffer);
     this.valueBuffer = sampled.value;
-    this.resolutionBuffer = sampled.resolutionMs;
     const value = sampled.value;
 
-    let finiteCount = 0;
     let leadingNaN = 0;
     while (leadingNaN < value.length && !Number.isFinite(value[leadingNaN]!)) leadingNaN++;
     let trailingNaN = 0;
@@ -126,12 +121,7 @@ export class Broker {
     ) {
       trailingNaN++;
     }
-    for (let index = 0; index < value.length; index++) {
-      if (Number.isFinite(value[index]!)) finiteCount++;
-    }
 
-    const resolved = historicalRange === null || this.isResolved(historicalRange, maxDeltaTMs);
-    const status: QueryStatus = finiteCount === 0 ? "empty" : resolved ? "complete" : "partial";
     const readyCoverage = new RangeSet();
     if (historicalRange !== null) {
       this.store.addReadyBlockers(readyCoverage, maxDeltaTMs, historicalRange);
@@ -152,7 +142,6 @@ export class Broker {
 
     return {
       value,
-      targetResolutionMs: maxDeltaTMs,
       coverage: resolution,
       revision: this.revision,
     };
@@ -194,7 +183,6 @@ export class Broker {
     this.fetchedCoverage.clear();
     this.adapterActivities = [];
     this.valueBuffer = new Float64Array(0);
-    this.resolutionBuffer = new Float64Array(0);
     this.adapterSession.clearCache();
     this.revision++;
     this.notify();
@@ -219,19 +207,6 @@ export class Broker {
         .filter((subscription) => !subscription.disposed)
         .map((subscription) => ({ ...subscription.demand, requestedAtMs })),
     );
-  }
-
-  private isResolved(range: Range, maxDeltaTMs: number): boolean {
-    if (
-      this.store.answers(range, maxDeltaTMs) ||
-      this.fetchedCoverage.answers(range, maxDeltaTMs)
-    ) {
-      return true;
-    }
-    const answered = new RangeSet();
-    this.store.addReadyBlockers(answered, maxDeltaTMs, range);
-    this.fetchedCoverage.addBlockers(answered, maxDeltaTMs, range);
-    return answered.covers(range);
   }
 
   private ingest(result: SignalDelivery): void {
@@ -306,7 +281,7 @@ export class Broker {
   private readySegments(evalTime: Float64Array, wallNow: number): CoverageSegment[] {
     return this.store.segments(evalTime, wallNow).map((span) => ({
       range: Range.create(span.startTime, span.endTime),
-      resolutionMs: span.resolutionMs,
+      samplePeriodMs: span.resolutionMs,
       state: "ready" as const,
     }));
   }

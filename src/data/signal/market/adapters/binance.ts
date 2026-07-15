@@ -7,7 +7,7 @@
  * Endpoint: https://api.binance.com/api/v3/klines
  */
 
-import { PricePoint, PriceSeries } from "../../../domain.ts";
+import { PricePoint, PriceSeries } from "../../../../domain.ts";
 
 const BINANCE_KLINES = "https://api.binance.com/api/v3/klines";
 

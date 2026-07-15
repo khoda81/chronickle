@@ -3,6 +3,6 @@ export * from "./store.ts";
 export * from "./broker.ts";
 export * from "./resolution.ts";
 export * from "./coverage.ts";
-export * from "./markets.ts";
+export * from "./market/market.ts";
 export * from "./symbols.ts";
-export * from "./exchanges/index.ts";
+export * from "./market/index.ts";

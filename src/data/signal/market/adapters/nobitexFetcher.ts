@@ -13,10 +13,10 @@
  *   43200 ("720"), 86400 ("D"), 172800 ("2D"), 259200 ("3D")
  */
 
-import { createPollingSignalSource, type PriceAdapter } from "../fetcher.ts";
-import { pickResolution } from "../resolution.ts";
+import { createPollingSignalSource, type PriceAdapter } from "../../fetcher.ts";
+import { pickResolution } from "../../resolution.ts";
 import { fetchOhlc, NobitexOhlcResponse, ohlcToPriceSeries } from "./nobitex.ts";
-import { PricePoint } from "../../../domain.ts";
+import { PricePoint } from "../../../../domain.ts";
 
 const MS = 1000;
 

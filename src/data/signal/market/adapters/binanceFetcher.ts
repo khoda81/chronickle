@@ -1,9 +1,9 @@
 /** Range-capable Binance kline adapter. */
 
-import type { PricePoint } from "../../../domain.ts";
-import { Range } from "../../../engine/range.ts";
-import { createPollingSignalSource, type PriceAdapter } from "../fetcher.ts";
-import { pickResolution } from "../resolution.ts";
+import type { PricePoint } from "../../../../domain.ts";
+import { Range } from "../../../../engine/range.ts";
+import { createPollingSignalSource, type PriceAdapter } from "../../fetcher.ts";
+import { pickResolution } from "../../resolution.ts";
 
 const BINANCE_KLINES = "https://api.binance.com/api/v3/klines";
 const LIMIT = 1_000;

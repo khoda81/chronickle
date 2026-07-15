@@ -7,19 +7,19 @@ import {
   type Subscription,
   type ReadRequest,
   type SignalView,
-} from "../src/data/price/broker.ts";
-import { SettledCoverageIndex } from "../src/data/price/coverage.ts";
-import { createBinanceAdapter } from "../src/data/price/exchanges/binanceFetcher.ts";
-import { chooseYahooInterval, createYahooAdapter } from "../src/data/price/exchanges/yahoo.ts";
+} from "../src/data/signal/broker.ts";
+import { SettledCoverageIndex } from "../src/data/signal/coverage.ts";
+import { createBinanceAdapter } from "../src/data/signal/market/adapters/binanceFetcher.ts";
+import { chooseYahooInterval, createYahooAdapter } from "../src/data/signal/market/yahoo.ts";
 import {
   createPollingSignalSource,
   type AdapterBatch,
   type AdapterDemand,
   type PriceAdapter,
-} from "../src/data/price/fetcher.ts";
-import { marketSource } from "../src/data/price/markets.ts";
-import { filterMarketSymbols, parseNobitexMarketKey } from "../src/data/price/symbols.ts";
-import { SignalSpanStore } from "../src/data/price/store.ts";
+} from "../src/data/signal/fetcher.ts";
+import { marketSource } from "../src/data/signal/market/market.ts";
+import { filterMarketSymbols, parseNobitexMarketKey } from "../src/data/signal/symbols.ts";
+import { SignalSpanStore } from "../src/data/signal/store.ts";
 import { Range } from "../src/engine/range.ts";
 import { fitStackLayout, heatmapScaleWindow } from "../src/engine/gfx/layout.ts";
 import { placeTooltip } from "../src/ui/tooltip.ts";

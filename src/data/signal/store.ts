@@ -19,7 +19,6 @@ export interface PriceResolutionSpan {
 
 export interface PriceSampleResult {
   readonly value: Float64Array;
-  readonly resolutionMs: Float64Array;
 }
 
 interface SpanBlock {
@@ -138,42 +137,12 @@ export class SignalSpanStore {
     evalTime: Float64Array,
     wallNow: number,
     reuseValue?: Float64Array,
-    reuseResolution?: Float64Array,
   ): PriceSampleResult {
     if (!Number.isFinite(wallNow)) throw new Error(`PriceSpanStore.sample: invalid now ${wallNow}`);
     const value =
       reuseValue?.length === evalTime.length ? reuseValue : new Float64Array(evalTime.length);
-    const resolution =
-      reuseResolution?.length === evalTime.length
-        ? reuseResolution
-        : new Float64Array(evalTime.length);
 
-    for (let index = 0; index < evalTime.length; index++) {
-      const t = evalTime[index]!;
-      if (!Number.isFinite(t))
-        throw new Error(`PriceSpanStore.sample: non-finite time at ${index}`);
-      if (t > wallNow) {
-        value[index] = NaN;
-        resolution[index] = NaN;
-        continue;
-      }
-
-      const location = this.findContainingSpan(t);
-      if (location === null) {
-        value[index] = NaN;
-        resolution[index] = NaN;
-        continue;
-      }
-
-      const selected = this.selectBoundaryOwner(location, t);
-      const block = this.blocks[selected.blockIndex]!;
-      value[index] =
-        t === block.endTime[selected.spanIndex]!
-          ? block.endLogPrice[selected.spanIndex]!
-          : block.startLogPrice[selected.spanIndex]!;
-      resolution[index] = block.resolutionMs[selected.spanIndex]!;
-    }
-    return { value, resolutionMs: resolution };
+    return { value };
   }
 
   /** True when selected evidence covers all of `range` at acceptable quality. */

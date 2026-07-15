@@ -3,9 +3,9 @@
 import { EventBroker, fetchFeed, defaultProxy } from "./data/index.ts";
 import { FeedRegistry } from "./data/events/feeds.ts";
 import { idToColor } from "./data/events/color.ts";
-import { Broker } from "./data/price/broker.ts";
-import { MARKET_SOURCES, marketSource, type MarketSourceId } from "./data/price/markets.ts";
-import { filterMarketSymbols, type MarketSymbol } from "./data/price/symbols.ts";
+import { Broker } from "./data/signal/broker.ts";
+import { MARKET_SOURCES, marketSource, type MarketSourceId } from "./data/signal/market/market.ts";
+import { filterMarketSymbols, type MarketSymbol } from "./data/signal/symbols.ts";
 import type { RssFeed } from "./domain.ts";
 import { DEFAULT_PALETTE, PALETTES, type PaletteName } from "./engine/ramp.ts";
 import { Range } from "./engine/range.ts";

@@ -1,4 +1,4 @@
-import type { CoverageSegment } from "../../data/price/coverage.ts";
+import type { CoverageSegment } from "../../data/signal/coverage.ts";
 import type { Frame } from "./context.ts";
 import { COVERAGE_BAR_HEIGHT } from "./layout.ts";
 
