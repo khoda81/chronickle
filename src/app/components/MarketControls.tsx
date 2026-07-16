@@ -160,11 +160,8 @@ function SymbolCombobox(props: SymbolComboboxProps) {
         </Combobox.Control>
         <Combobox.Portal>
           <Combobox.Content
-            classList={{
-              [surfaceStyles.menu!]: true,
-              [surfaceStyles.listboxPanel!]: true,
-              [styles.symbolContent!]: true,
-            }}>
+            class={styles.symbolContent}
+            classList={{ [surfaceStyles.menu!]: true, [surfaceStyles.listboxPanel!]: true }}>
             <Combobox.Listbox class={styles.symbolListbox} />
             <Show when={matches().length === 0}>
               <div class={styles.symbolEmpty}>

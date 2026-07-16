@@ -26,7 +26,7 @@ export function ChartSettings(props: ChartSettingsProps) {
         <Settings2 aria-hidden="true" />
       </Popover.Trigger>
       <Popover.Portal>
-        <Popover.Content classList={{ [surfaceStyles.menu!]: true, [styles.content!]: true }}>
+        <Popover.Content class={styles.content} classList={{ [surfaceStyles.menu!]: true }}>
           <fieldset class={styles.fieldset}>
             <legend class={styles.legend}>Kernel</legend>
             <div class={styles.kernelGrid}>

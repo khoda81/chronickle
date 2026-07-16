@@ -67,11 +67,8 @@ export function SelectField<Value extends string>(props: SelectFieldProps<Value>
       </Select.Trigger>
       <Select.Portal>
         <Select.Content
-          classList={{
-            [surfaceStyles.menu!]: true,
-            [surfaceStyles.listboxPanel!]: true,
-            [styles.content!]: true,
-          }}>
+          class={styles.content}
+          classList={{ [surfaceStyles.menu!]: true, [surfaceStyles.listboxPanel!]: true }}>
           <Select.Listbox class={styles.listbox} />
         </Select.Content>
       </Select.Portal>

@@ -19,7 +19,6 @@
 
 /* Select and combobox panels share the same clipped, scroll-hosting shell. */
 .listboxPanel {
-  composes: menu;
   display: flex;
   box-sizing: border-box;
   flex-direction: column;
