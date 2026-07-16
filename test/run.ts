@@ -1,25 +1,12 @@
 import type { NewsEvent, RssFeed } from "../src/domain.ts";
 import { EventBroker } from "../src/data/events/broker.ts";
-import {
-  Broker as PriceBroker,
-  type BrokerOptions,
-  type Subscription,
-  type ReadRequest,
-  type SignalView,
-} from "../src/data/signal/broker.ts";
+import { Broker as PriceBroker } from "../src/data/signal/broker.ts";
+import type { BrokerOptions, Subscription, ReadRequest, SignalView, BrokerDemand } from "../src/data/signal/broker.ts";
 import { SettledCoverageIndex } from "../src/data/signal/coverage.ts";
 import { createBinanceAdapter } from "../src/data/signal/market/adapters/binanceFetcher.ts";
-import {
-  chooseYahooInterval,
-  createYahooAdapter,
-} from "../src/data/signal/market/adapters/yahoo.ts";
+import { chooseYahooInterval, createYahooAdapter } from "../src/data/signal/market/adapters/yahoo.ts";
 import { logPriceSamples } from "../src/data/signal/market/price.ts";
-import {
-  createPollingSignalSource,
-  type AdapterBatch,
-  type AdapterDemand,
-  type SignalAdapter,
-} from "../src/data/signal/fetcher.ts";
+import { createPollingSignalSource, type AdapterBatch, type SignalAdapter } from "../src/data/signal/fetcher.ts";
 import { priceSignalSource } from "../src/data/signal/market/market.ts";
 import { filterMarketSymbols, parseNobitexMarketKey } from "../src/data/signal/market/symbols.ts";
 import { SignalSegmentStore } from "../src/data/signal/store.ts";
@@ -30,12 +17,7 @@ import { formatResolution } from "../src/engine/gfx/resolution.ts";
 import { eventIndexAtOrBefore, eventIndexNearPoint } from "../src/engine/hittest.ts";
 import { DataTransform } from "../src/engine/transform.ts";
 import { placeTooltip } from "../src/app/timeline/TimelineOverlayController.ts";
-import {
-  computeCenteredGaussianReference,
-  computeWaveletField,
-  kernelContext,
-  signalEdgesToDeltas,
-} from "../src/engine/wavelet.ts";
+import { computeCenteredGaussianReference, computeWaveletField, kernelContext, signalEdgesToDeltas } from "../src/engine/wavelet.ts";
 
 type Test = { readonly name: string; readonly run: () => void | Promise<void> };
 const tests: Test[] = [];
@@ -140,7 +122,11 @@ function adaptFetcher(fetcher: Fetcher, now: () => number): SignalAdapter {
     retryDelayMs: fetcher.retryDelayMs?.bind(fetcher),
     clearCache: fetcher.clearCache?.bind(fetcher),
     async fetchInterval(plan, signal) {
-      const result = await fetcher.fetchInterval({ ...plan, signal });
+      const result = await fetcher.fetchInterval({
+        range: plan.range,
+        maxDeltaTMs: plan.resolutionMs,
+        signal,
+      });
       return {
         samples: logPriceSamples(result.points),
         searchedInterval: result.searchedInterval ?? plan.range,
@@ -149,7 +135,7 @@ function adaptFetcher(fetcher: Fetcher, now: () => number): SignalAdapter {
   });
 }
 
-function fetchOnce(adapter: SignalAdapter, demand: AdapterDemand): Promise<AdapterBatch> {
+function fetchOnce(adapter: SignalAdapter, demand: BrokerDemand): Promise<AdapterBatch> {
   return new Promise((resolve, reject) => {
     const session = adapter.connect({
       next: (batch) => {
@@ -168,7 +154,7 @@ function fetchOnce(adapter: SignalAdapter, demand: AdapterDemand): Promise<Adapt
 
 function retryOnce(
   adapter: SignalAdapter,
-  demand: AdapterDemand,
+  demand: BrokerDemand,
 ): Promise<{ readonly error: unknown; readonly retryAtMs: number }> {
   return new Promise((resolve) => {
     const session = adapter.connect({
@@ -571,7 +557,6 @@ test("future coverage is pending or watching without invalidating cached samples
     ],
     searchedInterval: Interval.create(50, 100),
     resolutionMs: 10,
-    requestedMaxDeltaTMs: 10,
   };
   connectedSink.next(delivery);
   const loadedRevision = broker.read(request).sampleRevision;
@@ -859,6 +844,37 @@ test("follow-now demand updates keep one live lease and do not feed notification
   broker.dispose();
 });
 
+test("empty coverage is classified by the native resolution actually searched", async () => {
+  let calls = 0;
+  const adapter = createPollingSignalSource({
+    now: () => 10_000,
+    resolve: () => 1_000,
+    async fetchInterval(plan) {
+      calls++;
+      return { samples: [], searchedInterval: plan.range };
+    },
+  });
+  const broker = new Broker(adapter, { now: () => 10_000 });
+  const subscription = broker.subscribe(
+    { range: Interval.create(0, 5_000), maxDeltaTMs: 5_000 },
+    () => undefined,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  subscription.update({ range: Interval.create(0, 5_000), maxDeltaTMs: 1_500 });
+  const view = broker.read({
+    evalTime: new Float64Array([0, 2_500, 5_000]),
+    maxSampleGapMs: 1_500,
+  });
+  assert(calls === 1, "native fine coverage was refetched for a nearby zoom level");
+  assert(
+    view.coverage.some((segment) => segment.state === "empty"),
+    "settled native-resolution coverage disappeared at a finer requested threshold",
+  );
+  subscription.dispose();
+  broker.dispose();
+});
+
 test("adapter expands tiny demands and broker caches the complete delivery", async () => {
   let calls = 0;
   let fetched: Interval | null = null;
@@ -897,6 +913,26 @@ test("adapter expands tiny demands and broker caches the complete delivery", asy
   assert(calls === 1, "broker discarded useful data outside the original demand");
   subscription.dispose();
   broker.dispose();
+});
+
+test("a demand ending at wall now remains historical", () => {
+  const states: string[] = [];
+  const adapter = createPollingSignalSource({
+    now: () => 10_000,
+    resolve: () => 1_000,
+    fetchInterval: () => new Promise<AdapterBatch>(() => undefined),
+  });
+  const session = adapter.connect({
+    next: () => undefined,
+    status: (activities) => {
+      states.splice(0, states.length, ...activities.map((activity) => activity.state));
+    },
+    error: () => undefined,
+  });
+
+  session.setDemands([{ range: Interval.create(0, 10_000), maxDeltaTMs: 1_000 }]);
+  assert(!states.includes("watching"), "half-open demand end was treated as live");
+  session.dispose();
 });
 
 test("adapter keeps a live lease warm for its configured grace period", async () => {
@@ -1429,7 +1465,7 @@ test("Yahoo adapter supports WTI and Brent futures with range-aware intervals", 
     assert(calls === 1, "same Yahoo candle window caused another HTTP request");
     assert(
       cached.searchedInterval.start <= secondInterval.start &&
-        cached.searchedInterval.end >= secondInterval.end,
+      cached.searchedInterval.end >= secondInterval.end,
       "cached expanded response did not cover the requested range",
     );
 

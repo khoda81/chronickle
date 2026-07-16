@@ -49,6 +49,7 @@ export function pickResolution(nativePeriodsMs: readonly number[], maxDeltaTMs: 
     prev = p;
   }
 
+  // TODO: Can't this be a binary search?
   // Find the largest period that is <= maxDeltaTMs (coarsest satisfying).
   // nativePeriodsMs is ascending, so walk from the end.
   for (let i = nativePeriodsMs.length - 1; i >= 0; i--) {

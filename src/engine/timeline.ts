@@ -3,7 +3,7 @@
 import type { EventSet, NewsEvent } from "../domain.ts";
 import { TIMELINE_OVERLAY_METRICS } from "../ui/timelineOverlayMetrics.ts";
 import type { EventQueryResult } from "../data/events/broker.ts";
-import type { BrokerDemand, Subscription, ReadRequest, SignalView } from "../data/signal/broker.ts";
+import type { Subscription, ReadRequest, SignalView } from "../data/signal/broker.ts";
 import type { MutableSample } from "../data/signal/sample.ts";
 import { Interval } from "../core/interval.ts";
 import { DataTransform } from "./transform.ts";
@@ -23,6 +23,7 @@ import {
   COVERAGE_BAR_HEIGHT,
   heatmapScaleWindow,
 } from "./gfx/layout.ts";
+import { BrokerDemand } from "../data/index.ts";
 
 export type DataReader = (request: ReadRequest) => SignalView;
 export type SampleAtReader = (time: number, out: MutableSample) => boolean;
@@ -346,7 +347,7 @@ export class Timeline {
     this.state.timeInterval = range;
     this.plot.setTimeInterval(range);
     const playback = { mode: "paused", anchor: this.captureNowAnchor(now) } as const;
-    this.setPlayback(playback)
+    this.setPlayback(playback);
     this.notifyViewportChange();
     this.reqDraw();
   }
@@ -407,8 +408,8 @@ export class Timeline {
     this.layoutDirty = false;
     const collapsedRowIds = removeCollapsedRows
       ? this.signalRows
-        .filter((_, index) => this.rowHeights[index]! <= ROW_REMOVE_THRESHOLD)
-        .map((row) => row.id)
+          .filter((_, index) => this.rowHeights[index]! <= ROW_REMOVE_THRESHOLD)
+          .map((row) => row.id)
       : [];
     this.callbacks.onLayoutChange?.(this.getLayout(), collapsedRowIds);
   }
@@ -523,9 +524,12 @@ export class Timeline {
         this.resizingBoundary === 0
           ? index === 0
           : this.resizingBoundary !== null &&
-          (index === this.resizingBoundary - 1 || index === this.resizingBoundary);
+            (index === this.resizingBoundary - 1 || index === this.resizingBoundary);
       const collapseProgress = rowTouchesActiveBoundary
-        ? Math.max(0, Math.min(1, 1 - (rowHeight - ROW_REMOVE_THRESHOLD) / ROW_COLLAPSE_HINT_HEIGHT))
+        ? Math.max(
+            0,
+            Math.min(1, 1 - (rowHeight - ROW_REMOVE_THRESHOLD) / ROW_COLLAPSE_HINT_HEIGHT),
+          )
         : 0;
       this.overlay?.setRowCollapseProgress(row.id, collapseProgress);
       if (rowHeight <= COVERAGE_BAR_HEIGHT + 2) {
@@ -1213,9 +1217,9 @@ export class Timeline {
     const previous = this.state.hovered;
     const index =
       (this.pointerInside || this.eventTooltipHovered || this.crosshairPinned) &&
-        !this.dragging &&
-        this.resizingBoundary === null &&
-        this.boundaryAt(this.pointerPy) === null
+      !this.dragging &&
+      this.resizingBoundary === null &&
+      this.boundaryAt(this.pointerPy) === null
         ? eventIndexAtOrBefore(this.state.events, tx, this.pointerPx)
         : null;
     this.state.hovered = index;
@@ -1304,7 +1308,7 @@ function positionSignalTooltip(
   id: string,
   anchorX: number,
   anchorY: number,
-  vlineX: number,
+  cursorX: number,
   text: string,
 ): void {
   const ctx = frame.ctx;
@@ -1321,14 +1325,13 @@ function positionSignalTooltip(
     ? anchorX - gap - width
     : Math.max(margin, Math.min(frame.width - width - margin, anchorX + gap));
 
-  const connectorX = fitsLeft ? x + width : x;
   const y = Math.max(margin, Math.min(frame.height - height - margin, anchorY - height / 2));
 
   ctx.strokeStyle = "rgba(226, 232, 240, 0.58)";
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(vlineX, anchorY);
-  ctx.lineTo(connectorX, anchorY);
+  ctx.moveTo(anchorX, anchorY);
+  ctx.lineTo(cursorX, anchorY);
   ctx.stroke();
   ctx.beginPath();
   ctx.arc(anchorX, anchorY, 2.5, 0, Math.PI * 2);

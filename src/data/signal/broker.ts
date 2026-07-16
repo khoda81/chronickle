@@ -2,12 +2,7 @@
 
 import { Interval, IntervalSet } from "../../core/interval.ts";
 import { SettledCoverageIndex, type CoverageSegment } from "./coverage.ts";
-import type {
-  AcquisitionActivity,
-  AdapterDelivery as SignalDelivery,
-  AdapterSession,
-  SignalAdapter,
-} from "./fetcher.ts";
+import type { AcquisitionActivity, AdapterDelivery, AdapterSession, SignalAdapter } from "./fetcher.ts";
 import { normalizeSamples, type MutableSample, type Sample } from "./sample.ts";
 import { SignalSegmentStore, type HeldSignalSegment } from "./store.ts";
 
@@ -23,9 +18,9 @@ export interface ReadRequest {
   readonly maxSampleGapMs: number;
 }
 
-/** Fetch/cache demand independent of a particular sampling grid. */
 export interface BrokerDemand {
   readonly range: Interval;
+  /** Maximum acceptable native sample spacing requested by the consumer. */
   readonly maxDeltaTMs: number;
 }
 
@@ -45,7 +40,6 @@ export interface BrokerOptions {
 interface DemandSubscription {
   demand: BrokerDemand;
   readonly fn: () => void;
-  disposed: boolean;
 }
 
 export class Broker {
@@ -137,24 +131,21 @@ export class Broker {
   }
 
   subscribe(demand: BrokerDemand, fn: () => void): Subscription {
-    const entry: DemandSubscription = {
-      demand: validateDemand(demand),
-      fn,
-      disposed: false,
-    };
+    const entry: DemandSubscription = { demand: validateDemand(demand), fn };
+    let disposed = false;
     this.demandSubscriptions.add(entry);
     this.syncAdapterDemands();
     return {
       update: (demand) => {
-        if (entry.disposed) throw new Error("Broker subscription is disposed");
+        if (disposed) throw new Error("Broker subscription is disposed");
         const next = validateDemand(demand);
         if (sameDemand(entry.demand, next)) return;
         entry.demand = next;
         this.syncAdapterDemands();
       },
       dispose: () => {
-        if (entry.disposed) return;
-        entry.disposed = true;
+        if (disposed) return;
+        disposed = true;
         this.demandSubscriptions.delete(entry);
         this.syncAdapterDemands();
       },
@@ -188,20 +179,18 @@ export class Broker {
 
   private syncAdapterDemands(): void {
     this.adapterSession.setDemands(
-      [...this.demandSubscriptions]
-        .filter((subscription) => !subscription.disposed)
-        .map((subscription) => ({ ...subscription.demand })),
+      [...this.demandSubscriptions].map((subscription) => subscription.demand),
     );
   }
 
-  private ingest(result: SignalDelivery): boolean {
+  private ingest(result: AdapterDelivery): boolean {
     const clipped = clipSamples(normalizeSamples(result.samples), result.searchedInterval);
     const samples = clipped.samples;
     if (clipped.discardedFutureCount > 0) {
       this.onWarning(
         `[Broker] discarded ${clipped.discardedFutureCount} future point(s); ` +
-          `searched range ended at ${result.searchedInterval.end}, ` +
-          `latest returned timestamp was ${clipped.latestFutureT}`,
+        `searched range ended at ${result.searchedInterval.end}, ` +
+        `latest returned timestamp was ${clipped.latestFutureT}`,
       );
     }
     let changed = false;
@@ -213,7 +202,7 @@ export class Broker {
       // wall clock from manufacturing millisecond-sized "uncovered" tails.
       changed = this.ingestObserved(samples, result.resolutionMs);
     }
-    this.fetchedCoverage.add(result.requestedMaxDeltaTMs, result.searchedInterval);
+    this.fetchedCoverage.add(result.resolutionMs, result.searchedInterval);
     return changed;
   }
 
@@ -262,8 +251,9 @@ export class Broker {
             : activity.state === "watching"
               ? "watching"
               : "pending",
-        ...(activity.message === undefined ? {} : { message: activity.message }),
-        ...(activity.retryAtMs === undefined ? {} : { retryAtMs: activity.retryAtMs }),
+        ...(activity.state === "failed"
+          ? { message: activity.message, retryAtMs: activity.retryAtMs }
+          : {}),
       });
     }
     return out;
@@ -306,16 +296,12 @@ function validateDemand(demand: BrokerDemand): BrokerDemand {
 }
 
 function sameDemand(a: BrokerDemand, b: BrokerDemand): boolean {
-  return (
-    a.range.start === b.range.start &&
-    a.range.end === b.range.end &&
-    a.maxDeltaTMs === b.maxDeltaTMs
-  );
+  return Interval.equals(a.range, b.range) && a.maxDeltaTMs === b.maxDeltaTMs;
 }
 
 function clampToNow(range: Interval, now: number): Interval {
   if (!Number.isFinite(now)) throw new Error(`Broker: invalid wall clock ${now}`);
-  return Interval.create(range.start, Math.min(range.end, now));
+  return Interval.clampEnd(range, now);
 }
 
 function coverageLabelRank(state: CoverageSegment["state"]): number {

@@ -1,16 +1,12 @@
 /** Demand-aware adapter scheduling for sampled real-valued time series. */
 
 import { Interval, IntervalSet } from "../../core/interval.ts";
+import { BrokerDemand } from "./broker.ts";
 import type { Sample } from "./sample.ts";
 
-export interface AdapterDemand {
+/** Concrete source request after native resolution selection and range expansion. */
+export interface AdapterPlan {
   readonly range: Interval;
-  /** Maximum acceptable native sample spacing requested by the consumer. */
-  readonly maxDeltaTMs: number;
-}
-
-/** A demand after the adapter has selected an exchange-native resolution. */
-export interface AdapterPlan extends AdapterDemand {
   readonly resolutionMs: number;
 }
 
@@ -21,31 +17,33 @@ export interface AdapterBatch {
   readonly searchedInterval: Interval;
 }
 
-/** A cache delivery is self-describing; it is not tied to a broker request. */
+/** A cache delivery is self-describing and independent of a broker request. */
 export interface AdapterDelivery extends AdapterBatch {
   readonly resolutionMs: number;
-  readonly requestedMaxDeltaTMs: number;
 }
 
-export type AdapterActivityState = "fetching" | "watching" | "failed";
-
-export interface AcquisitionActivity {
-  readonly state: AdapterActivityState;
+interface AcquisitionActivityBase {
   readonly range: Interval;
   readonly resolutionMs: number;
-  readonly message?: string;
-  readonly retryAtMs?: number;
 }
+
+export type AcquisitionActivity =
+  | (AcquisitionActivityBase & { readonly state: "fetching" | "watching" })
+  | (AcquisitionActivityBase & {
+      readonly state: "failed";
+      readonly message: string;
+      readonly retryAtMs: number;
+    });
 
 export interface SignalSink {
   next(batch: AdapterDelivery): void;
   status(activities: readonly AcquisitionActivity[]): void;
-  error(error: unknown, activity: AcquisitionActivity): void;
+  error(error: unknown, activity: Extract<AcquisitionActivity, { readonly state: "failed" }>): void;
 }
 
 /** One long-lived acquisition session per broker/source. */
 export interface AdapterSession {
-  setDemands(demands: readonly AdapterDemand[]): void;
+  setDemands(demands: readonly BrokerDemand[]): void;
   clearCache(): void;
   dispose(): void;
 }
@@ -69,28 +67,60 @@ export interface IntervalLoader {
   readonly sourceWideBackoff?: boolean;
   readonly now?: () => number;
 
-  resolve(demand: AdapterDemand): number;
+  resolve(demand: BrokerDemand): number;
   fetchInterval(plan: AdapterPlan, signal: AbortSignal): Promise<AdapterBatch>;
   retryDelayMs?(error: unknown, attempt: number): number;
   clearCache?(): void;
 }
 
-interface Work {
-  readonly kind: "history" | "live";
-  readonly requiredInterval: Interval;
-  readonly plan: AdapterPlan;
-  readonly controller: AbortController;
-  attempt: number;
-  retryAtMs: number | null;
-  failureMessage: string | null;
+interface ResolvedDemand {
+  readonly range: Interval;
+  readonly resolutionMs: number;
 }
 
+interface Work {
+  readonly kind: "history" | "live";
+  /** Unexpanded gap whose completion advances scheduling. */
+  readonly requiredInterval: Interval;
+  /** Expanded source request. */
+  readonly plan: AdapterPlan;
+  readonly attempt: number;
+}
+
+interface RunningWork {
+  readonly state: "fetching";
+  readonly work: Work;
+  readonly controller: AbortController;
+}
+
+interface FailedWork {
+  readonly state: "failed";
+  readonly work: Work;
+  readonly retryAtMs: number;
+  readonly message: string;
+}
+
+type ActiveWork = RunningWork | FailedWork;
+
 interface LiveLease {
-  plan: AdapterPlan;
+  plan: ResolvedDemand;
   cursorMs: number;
-  nextAtMs: number;
-  retainedUntilMs: number;
-  statusInterval: Interval;
+  pollAtMs: number;
+  /** `null` while current demand keeps the lease indefinitely. */
+  expiresAtMs: number | null;
+  activityRange: Interval;
+}
+
+interface ScheduledReconcile {
+  readonly handle: ReturnType<typeof setTimeout>;
+  readonly atMs: number;
+}
+
+interface PollingPolicy {
+  readonly minFetchPoints: number;
+  readonly liveRetentionMs: number;
+  readonly livePollDelayMs: number | null;
+  readonly publicationGraceMs: number;
 }
 
 const DEFAULT_RETRY = (attempt: number): number => Math.min(30_000, 2_000 * 2 ** (attempt - 1));
@@ -99,410 +129,492 @@ const DEFAULT_MIN_FETCH_POINTS = 128;
 const DEFAULT_LIVE_RETENTION_MS = 15_000;
 
 /**
- * Turn a range fetcher into a demand-aware adapter. There is one bounded work
- * lane and at most one live lease, so redraws cannot multiply polling loops.
+ * Turn a range loader into a demand-aware adapter. A session owns one serialized
+ * work lane and at most one live lease, so redraws cannot multiply polling loops.
  */
-export function createPollingSignalSource(fetcher: IntervalLoader): SignalAdapter {
-  const now = fetcher.now ?? Date.now;
-  const planDemand = (demand: AdapterDemand): AdapterPlan => {
-    validateDemand(demand);
-    const resolutionMs = fetcher.resolve(demand);
-    if (!(resolutionMs > 0 && Number.isFinite(resolutionMs))) {
-      throw new Error(`SignalAdapter: invalid native resolution ${resolutionMs}`);
-    }
-    return { ...demand, resolutionMs };
+export function createPollingSignalSource(loader: IntervalLoader): SignalAdapter {
+  const policy = createPolicy(loader);
+  return {
+    connect: (sink) => new PollingSession(loader, policy, sink),
   };
-
-  const adapter: SignalAdapter = {
-    connect(sink) {
-      let disposed = false;
-      let demands: readonly AdapterDemand[] = [];
-      const coverage = new Map<number, IntervalSet>();
-      let active: Work | null = null;
-      let live: LiveLease | null = null;
-      let timer: ReturnType<typeof setTimeout> | null = null;
-      let timerAtMs = Number.POSITIVE_INFINITY;
-      let sourceRetryAt = -Infinity;
-      let statusKey = "";
-
-      const schedule = (atMs: number): void => {
-        if (disposed) return;
-        if (timer !== null && timerAtMs <= atMs) return;
-        if (timer !== null) clearTimeout(timer);
-        timerAtMs = atMs;
-        timer = setTimeout(
-          () => {
-            timer = null;
-            timerAtMs = Number.POSITIVE_INFINITY;
-            reconcile();
-          },
-          Math.max(0, atMs - now()),
-        );
-      };
-
-      const emitStatus = (): void => {
-        if (disposed) return;
-        const activities: AcquisitionActivity[] = [];
-        if (live !== null) {
-          activities.push({
-            state: "watching",
-            range: live.statusInterval,
-            resolutionMs: live.plan.resolutionMs,
-          });
-        }
-        if (active !== null) {
-          const message = active.failureMessage ?? undefined;
-          activities.push({
-            state: active.retryAtMs === null ? "fetching" : "failed",
-            range: active.plan.range,
-            resolutionMs: active.plan.resolutionMs,
-            ...(message === undefined ? {} : { message, retryAtMs: active.retryAtMs! }),
-          });
-        }
-        const nextKey = activities
-          .map(
-            (item) =>
-              `${item.state}:${item.range.start}:${item.range.end}:${item.resolutionMs}:${item.retryAtMs ?? ""}:${item.message ?? ""}`,
-          )
-          .join("|");
-        if (nextKey === statusKey) return;
-        statusKey = nextKey;
-        sink.status(activities);
-      };
-
-      const coverageFor = (resolutionMs: number): IntervalSet => {
-        let ranges = coverage.get(resolutionMs);
-        if (ranges === undefined) {
-          ranges = new IntervalSet();
-          coverage.set(resolutionMs, ranges);
-        }
-        return ranges;
-      };
-
-      const addCoverage = (resolutionMs: number, range: Interval): void => {
-        coverageFor(resolutionMs).add(range);
-      };
-
-      const blockers = (resolutionMs: number, target: Interval): IntervalSet => {
-        const out = new IntervalSet();
-        for (const [availableResolutionMs, ranges] of coverage) {
-          if (availableResolutionMs > resolutionMs) continue;
-          for (const overlap of ranges.intersections(target)) out.add(overlap);
-        }
-        if (live !== null && live.plan.resolutionMs <= resolutionMs) {
-          const wallNow = now();
-          const tailMin = Math.max(live.plan.range.start, wallNow - 2 * live.plan.resolutionMs);
-          if (tailMin < wallNow) {
-            const tail = Interval.intersection(Interval.create(tailMin, wallNow), target);
-            out.add(tail);
-          }
-        }
-        return out;
-      };
-
-      const currentPlans = (): AdapterPlan[] =>
-        demands
-          .map((demand) => planDemand({ ...demand }))
-          .sort((a, b) => a.resolutionMs - b.resolutionMs || b.range.end - a.range.end);
-
-      const desiredLivePlan = (plans: readonly AdapterPlan[]): AdapterPlan | null => {
-        const wallNow = now();
-        return plans.find((plan) => reachesBoundary(plan.range, wallNow)) ?? null;
-      };
-
-      const createLiveLease = (plan: AdapterPlan, wallNow: number): LiveLease => {
-        const cursorMs = Math.max(plan.range.start, wallNow - 2 * plan.resolutionMs);
-        return {
-          plan,
-          cursorMs,
-          nextAtMs: wallNow,
-          retainedUntilMs: Number.POSITIVE_INFINITY,
-          statusInterval: Interval.create(Math.min(cursorMs, wallNow - plan.resolutionMs), wallNow),
-        };
-      };
-
-      const updateLiveLease = (plans: readonly AdapterPlan[]): void => {
-        const wallNow = now();
-        const desired = desiredLivePlan(plans);
-        if (desired !== null) {
-          if (live === null || live.plan.resolutionMs > desired.resolutionMs) {
-            live = createLiveLease(desired, wallNow);
-          } else if (live.plan.resolutionMs === desired.resolutionMs) {
-            live.plan = {
-              ...live.plan,
-              range: desired.range,
-            };
-            live.retainedUntilMs = Number.POSITIVE_INFINITY;
-          } else {
-            if (!Number.isFinite(live.retainedUntilMs)) {
-              live.retainedUntilMs =
-                wallNow + (fetcher.liveRetentionMs ?? DEFAULT_LIVE_RETENTION_MS);
-            }
-            if (wallNow >= live.retainedUntilMs) {
-              live = createLiveLease(desired, wallNow);
-            } else {
-              live.plan = {
-                ...live.plan,
-                range: desired.range,
-              };
-            }
-          }
-          return;
-        }
-        if (live === null) return;
-        if (!Number.isFinite(live.retainedUntilMs)) {
-          live.retainedUntilMs = wallNow + (fetcher.liveRetentionMs ?? DEFAULT_LIVE_RETENTION_MS);
-        }
-        if (wallNow >= live.retainedUntilMs) live = null;
-      };
-
-      const isStillWanted = (work: Work, plans: readonly AdapterPlan[]): boolean => {
-        if (work.kind === "live")
-          return live !== null && live.plan.resolutionMs === work.plan.resolutionMs;
-        return plans.some(
-          (plan) =>
-            plan.resolutionMs >= work.plan.resolutionMs &&
-            !Interval.isEmpty(Interval.intersection(plan.range, work.requiredInterval)),
-        );
-      };
-
-      const nextHistoricalWork = (plans: readonly AdapterPlan[], wallNow: number): Work | null => {
-        for (const plan of plans) {
-          const target = clampToNow(plan.range, wallNow);
-          if (Interval.isEmpty(target)) continue;
-          const gaps = blockers(plan.resolutionMs, target).gaps(target);
-          const gap = reachesBoundary(plan.range, wallNow) ? gaps[gaps.length - 1] : gaps[0];
-          if (gap === undefined) continue;
-          return makeWork("history", plan, gap, wallNow);
-        }
-        return null;
-      };
-
-      const nextLiveWork = (wallNow: number): Work | null => {
-        if (live === null || wallNow < live.nextAtMs) return null;
-        const min = Math.min(live.cursorMs, wallNow - live.plan.resolutionMs);
-        if (!(min < wallNow)) return null;
-        return makeWork("live", live.plan, Interval.create(min, wallNow), wallNow);
-      };
-
-      const makeWork = (
-        kind: Work["kind"],
-        plan: AdapterPlan,
-        requiredInterval: Interval,
-        wallNow: number,
-      ): Work => {
-        const fetchInterval = expandInterval(
-          requiredInterval,
-          plan.resolutionMs,
-          wallNow,
-          fetcher.minFetchPoints,
-        );
-        return {
-          kind,
-          requiredInterval,
-          plan: { ...plan, range: fetchInterval },
-          controller: new AbortController(),
-          attempt: 0,
-          retryAtMs: null,
-          failureMessage: null,
-        };
-      };
-
-      const finishWork = (work: Work, batch: AdapterBatch): void => {
-        validateBatch(work.requiredInterval, batch);
-        sink.next({
-          ...batch,
-          resolutionMs: work.plan.resolutionMs,
-          requestedMaxDeltaTMs: work.plan.maxDeltaTMs,
-        });
-        addCoverage(work.plan.resolutionMs, batch.searchedInterval);
-
-        if (work.kind === "live" && live !== null) {
-          const wallNow = now();
-          const last = batch.samples[batch.samples.length - 1];
-          live.cursorMs = Math.max(
-            batch.searchedInterval.end,
-            last === undefined ? -Infinity : last.t + work.plan.resolutionMs,
-          );
-          live.statusInterval = work.requiredInterval;
-          const pollDelay = fetcher.livePollDelayMs ?? defaultPollDelay(work.plan.resolutionMs);
-          const expectedNext = last === undefined ? -Infinity : last.t + work.plan.resolutionMs;
-          live.nextAtMs =
-            expectedNext > wallNow
-              ? expectedNext + (fetcher.publicationGraceMs ?? PUBLICATION_GRACE_MS)
-              : wallNow + pollDelay;
-        }
-      };
-
-      const start = (work: Work): void => {
-        active = work;
-        work.failureMessage = null;
-        emitStatus();
-        void (async () => {
-          try {
-            const batch = await fetcher.fetchInterval(work.plan, work.controller.signal);
-            if (disposed || active !== work) return;
-            finishWork(work, batch);
-            active = null;
-            emitStatus();
-            reconcile();
-          } catch (error) {
-            if (disposed || active !== work || isAbort(error)) return;
-            work.attempt++;
-            const proposed =
-              fetcher.retryDelayMs?.(error, work.attempt) ?? DEFAULT_RETRY(work.attempt);
-            const delay = validDelay(proposed)
-              ? Math.max(100, proposed)
-              : DEFAULT_RETRY(work.attempt);
-            work.retryAtMs = now() + delay;
-            work.failureMessage = error instanceof Error ? error.message : String(error);
-            if (fetcher.sourceWideBackoff === true) {
-              sourceRetryAt = Math.max(sourceRetryAt, work.retryAtMs);
-            }
-            const activity: AcquisitionActivity = {
-              state: "failed",
-              range: work.plan.range,
-              resolutionMs: work.plan.resolutionMs,
-              message: error instanceof Error ? error.message : String(error),
-              retryAtMs: work.retryAtMs,
-            };
-            emitStatus();
-            sink.error(error, activity);
-            schedule(work.retryAtMs);
-          }
-        })();
-      };
-
-      const reconcile = (): void => {
-        if (disposed) return;
-        const wallNow = now();
-        const plans = currentPlans();
-        updateLiveLease(plans);
-
-        if (active !== null) {
-          if (!isStillWanted(active, plans)) {
-            active.controller.abort();
-            active = null;
-            emitStatus();
-          } else if (active.retryAtMs !== null) {
-            if (wallNow < active.retryAtMs) {
-              schedule(active.retryAtMs);
-              return;
-            }
-            active.retryAtMs = null;
-            start(active);
-            return;
-          } else {
-            return;
-          }
-        }
-
-        if (fetcher.sourceWideBackoff === true && wallNow < sourceRetryAt) {
-          schedule(sourceRetryAt);
-          return;
-        }
-
-        const liveWork = nextLiveWork(wallNow);
-        if (liveWork !== null) {
-          start(liveWork);
-          return;
-        }
-        const historicalWork = nextHistoricalWork(plans, wallNow);
-        if (historicalWork !== null) {
-          start(historicalWork);
-          return;
-        }
-
-        emitStatus();
-        if (live !== null) {
-          const nextAt = Math.min(live.nextAtMs, live.retainedUntilMs);
-          if (Number.isFinite(nextAt)) schedule(nextAt);
-        }
-      };
-
-      return {
-        setDemands(nextDemands) {
-          if (disposed) throw new Error("Signal adapter session is disposed");
-          for (const demand of nextDemands) validateDemand(demand);
-          demands = nextDemands.map((demand) => ({ ...demand }));
-          reconcile();
-        },
-
-        clearCache() {
-          if (disposed) throw new Error("Signal adapter session is disposed");
-          active?.controller.abort();
-          active = null;
-          live = null;
-          coverage.clear();
-          sourceRetryAt = -Infinity;
-          if (timer !== null) clearTimeout(timer);
-          timer = null;
-          timerAtMs = Number.POSITIVE_INFINITY;
-          statusKey = "";
-          fetcher.clearCache?.();
-          emitStatus();
-          reconcile();
-        },
-
-        dispose() {
-          if (disposed) return;
-          disposed = true;
-          active?.controller.abort();
-          active = null;
-          live = null;
-          demands = [];
-          if (timer !== null) clearTimeout(timer);
-          timer = null;
-          timerAtMs = Number.POSITIVE_INFINITY;
-        },
-      };
-    },
-  };
-
-  return adapter;
 }
 
-function expandInterval(
+class PollingSession implements AdapterSession {
+  private disposed = false;
+  /** Resolved once when demand changes; ordered finest-first, then newest-first. */
+  private plans: readonly ResolvedDemand[] = [];
+  private readonly coverage = new Map<number, IntervalSet>();
+  private active: ActiveWork | null = null;
+  private live: LiveLease | null = null;
+  private scheduled: ScheduledReconcile | null = null;
+  private sourceBackoffUntilMs: number | null = null;
+  private lastActivities: readonly AcquisitionActivity[] = [];
+
+  constructor(
+    private readonly loader: IntervalLoader,
+    private readonly policy: PollingPolicy,
+    private readonly sink: SignalSink,
+  ) {}
+
+  setDemands(demands: readonly BrokerDemand[]): void {
+    this.assertOpen();
+    this.plans = resolveDemands(this.loader, demands);
+    this.reconcile();
+  }
+
+  clearCache(): void {
+    this.assertOpen();
+    this.abortActive();
+    this.live = null;
+    this.coverage.clear();
+    this.sourceBackoffUntilMs = null;
+    this.cancelScheduled();
+    this.loader.clearCache?.();
+    this.emitStatus();
+    this.reconcile();
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.abortActive();
+    this.live = null;
+    this.plans = [];
+    this.cancelScheduled();
+  }
+
+  private assertOpen(): void {
+    if (this.disposed) throw new Error("Signal adapter session is disposed");
+  }
+
+  private now(): number {
+    const value = (this.loader.now ?? Date.now)();
+    if (!Number.isFinite(value)) throw new Error(`SignalAdapter: invalid wall clock ${value}`);
+    return value;
+  }
+
+  private reconcile = (): void => {
+    if (this.disposed) return;
+    const wallNow = this.now();
+    this.updateLiveLease(wallNow);
+
+    if (this.active !== null) {
+      if (!this.isStillWanted(this.active.work)) {
+        this.abortActive();
+        this.emitStatus();
+      } else if (this.active.state === "failed") {
+        if (wallNow < this.active.retryAtMs) {
+          this.schedule(this.active.retryAtMs);
+          return;
+        }
+        const work = this.active.work;
+        this.active = null;
+        this.start(work);
+        return;
+      } else {
+        return;
+      }
+    }
+
+    if (this.sourceBackoffUntilMs !== null) {
+      if (wallNow < this.sourceBackoffUntilMs) {
+        this.schedule(this.sourceBackoffUntilMs);
+        return;
+      }
+      this.sourceBackoffUntilMs = null;
+    }
+
+    const work = this.nextLiveWork(wallNow) ?? this.nextHistoricalWork(wallNow);
+    if (work !== null) {
+      this.start(work);
+      return;
+    }
+
+    this.emitStatus();
+    if (this.live !== null) {
+      const nextAtMs =
+        this.live.expiresAtMs === null
+          ? this.live.pollAtMs
+          : Math.min(this.live.pollAtMs, this.live.expiresAtMs);
+      this.schedule(nextAtMs);
+    }
+  };
+
+  private schedule(atMs: number): void {
+    if (this.disposed) return;
+    if (!Number.isFinite(atMs)) return;
+    if (this.scheduled !== null && this.scheduled.atMs <= atMs) return;
+    this.cancelScheduled();
+    const handle = setTimeout(
+      () => {
+        this.scheduled = null;
+        this.reconcile();
+      },
+      Math.max(0, atMs - this.now()),
+    );
+    this.scheduled = { handle, atMs };
+  }
+
+  private cancelScheduled(): void {
+    if (this.scheduled === null) return;
+    clearTimeout(this.scheduled.handle);
+    this.scheduled = null;
+  }
+
+  private emitStatus(): void {
+    if (this.disposed) return;
+    const activities: AcquisitionActivity[] = [];
+    if (this.live !== null) {
+      activities.push({
+        state: "watching",
+        range: this.live.activityRange,
+        resolutionMs: this.live.plan.resolutionMs,
+      });
+    }
+    if (this.active !== null) {
+      const { plan } = this.active.work;
+      if (this.active.state === "fetching") {
+        activities.push({ state: "fetching", range: plan.range, resolutionMs: plan.resolutionMs });
+      } else {
+        activities.push({
+          state: "failed",
+          range: plan.range,
+          resolutionMs: plan.resolutionMs,
+          message: this.active.message,
+          retryAtMs: this.active.retryAtMs,
+        });
+      }
+    }
+    if (sameActivities(activities, this.lastActivities)) return;
+    this.lastActivities = activities;
+    this.sink.status(activities);
+  }
+
+  private coverageFor(resolutionMs: number): IntervalSet {
+    let ranges = this.coverage.get(resolutionMs);
+    if (ranges === undefined) {
+      ranges = new IntervalSet();
+      this.coverage.set(resolutionMs, ranges);
+    }
+    return ranges;
+  }
+
+  private blockers(resolutionMs: number, target: Interval, wallNow: number): IntervalSet {
+    const out = new IntervalSet();
+    for (const [availableResolutionMs, ranges] of this.coverage) {
+      if (availableResolutionMs > resolutionMs) continue;
+      for (const overlap of ranges.intersections(target)) out.add(overlap);
+    }
+    if (this.live !== null && this.live.plan.resolutionMs <= resolutionMs) {
+      const tail = Interval.create(
+        Math.max(this.live.plan.range.start, wallNow - 2 * this.live.plan.resolutionMs),
+        wallNow,
+      );
+      out.add(Interval.intersection(tail, target));
+    }
+    return out;
+  }
+
+  private desiredLivePlan(wallNow: number): ResolvedDemand | null {
+    return this.plans.find((plan) => Interval.contains(plan.range, wallNow)) ?? null;
+  }
+
+  private createLiveLease(plan: ResolvedDemand, wallNow: number): LiveLease {
+    const activityRange = liveTail(plan, wallNow);
+    return {
+      plan,
+      cursorMs: activityRange.start,
+      pollAtMs: wallNow,
+      expiresAtMs: null,
+      activityRange,
+    };
+  }
+
+  private updateLiveLease(wallNow: number): void {
+    const desired = this.desiredLivePlan(wallNow);
+    if (desired === null) {
+      if (this.live === null) return;
+      this.live.expiresAtMs ??= wallNow + this.policy.liveRetentionMs;
+      if (wallNow >= this.live.expiresAtMs) this.live = null;
+      return;
+    }
+
+    if (this.live === null || this.live.plan.resolutionMs > desired.resolutionMs) {
+      this.live = this.createLiveLease(desired, wallNow);
+      return;
+    }
+
+    if (this.live.plan.resolutionMs === desired.resolutionMs) {
+      this.live.plan = desired;
+      this.live.expiresAtMs = null;
+      return;
+    }
+
+    // Keep the existing finer lease briefly instead of immediately downgrading.
+    this.live.expiresAtMs ??= wallNow + this.policy.liveRetentionMs;
+    if (wallNow >= this.live.expiresAtMs) {
+      this.live = this.createLiveLease(desired, wallNow);
+    } else {
+      this.live.plan = { ...this.live.plan, range: desired.range };
+    }
+  }
+
+  private isStillWanted(work: Work): boolean {
+    if (work.kind === "live") {
+      return this.live !== null && this.live.plan.resolutionMs === work.plan.resolutionMs;
+    }
+    return this.plans.some(
+      (plan) =>
+        plan.resolutionMs >= work.plan.resolutionMs &&
+        Interval.overlaps(plan.range, work.requiredInterval),
+    );
+  }
+
+  private nextHistoricalWork(wallNow: number): Work | null {
+    for (const plan of this.plans) {
+      const target = Interval.clampEnd(plan.range, wallNow);
+      if (Interval.isEmpty(target)) continue;
+      const gaps = this.blockers(plan.resolutionMs, target, wallNow).gaps(target);
+      const gap = Interval.contains(plan.range, wallNow) ? gaps[gaps.length - 1] : gaps[0];
+      if (gap !== undefined) return this.makeWork("history", plan, gap, wallNow);
+    }
+    return null;
+  }
+
+  private nextLiveWork(wallNow: number): Work | null {
+    if (this.live === null || wallNow < this.live.pollAtMs) return null;
+    const required = Interval.create(
+      Math.min(this.live.cursorMs, wallNow - this.live.plan.resolutionMs),
+      wallNow,
+    );
+    if (Interval.isEmpty(required)) return null;
+    return this.makeWork("live", this.live.plan, required, wallNow);
+  }
+
+  private makeWork(
+    kind: Work["kind"],
+    demand: ResolvedDemand,
+    requiredInterval: Interval,
+    wallNow: number,
+  ): Work {
+    return {
+      kind,
+      requiredInterval,
+      plan: {
+        range: expandFetchInterval(
+          requiredInterval,
+          demand.resolutionMs,
+          wallNow,
+          this.policy.minFetchPoints,
+        ),
+        resolutionMs: demand.resolutionMs,
+      },
+      attempt: 0,
+    };
+  }
+
+  private start(work: Work): void {
+    const running: RunningWork = {
+      state: "fetching",
+      work,
+      controller: new AbortController(),
+    };
+    this.active = running;
+    this.emitStatus();
+    if (this.active === running) void this.run(running);
+  }
+
+  private async run(running: RunningWork): Promise<void> {
+    let batch: AdapterBatch;
+    try {
+      batch = await this.loader.fetchInterval(running.work.plan, running.controller.signal);
+      if (this.disposed || this.active !== running) return;
+      validateBatch(running.work.requiredInterval, batch);
+    } catch (error) {
+      if (this.disposed || this.active !== running || isAbort(error)) return;
+      this.failWork(running.work, error);
+      return;
+    }
+
+    // Sink failures are consumer bugs, not acquisition failures. Keep delivery
+    // outside the loader retry boundary so they are never blamed on the source.
+    this.finishWork(running.work, batch);
+    if (this.disposed || this.active !== running) return;
+    this.active = null;
+    this.emitStatus();
+    this.reconcile();
+  }
+
+  private finishWork(work: Work, batch: AdapterBatch): void {
+    // Commit coordinator state before delivery. Sink callbacks may synchronously
+    // clear the cache or replace demands; those operations must win reentrantly.
+    this.coverageFor(work.plan.resolutionMs).add(batch.searchedInterval);
+
+    if (
+      work.kind === "live" &&
+      this.live !== null &&
+      this.live.plan.resolutionMs === work.plan.resolutionMs
+    ) {
+      const wallNow = this.now();
+      const last = batch.samples[batch.samples.length - 1];
+      const expectedNextMs = last === undefined ? null : last.t + work.plan.resolutionMs;
+      this.live.cursorMs = Math.max(batch.searchedInterval.end, expectedNextMs ?? -Infinity);
+      this.live.activityRange = work.requiredInterval;
+      this.live.pollAtMs =
+        expectedNextMs !== null && expectedNextMs > wallNow
+          ? expectedNextMs + this.policy.publicationGraceMs
+          : wallNow + (this.policy.livePollDelayMs ?? defaultPollDelay(work.plan.resolutionMs));
+    }
+
+    this.sink.next({ ...batch, resolutionMs: work.plan.resolutionMs });
+  }
+
+  private failWork(work: Work, error: unknown): void {
+    const attempt = work.attempt + 1;
+    const proposed = this.loader.retryDelayMs?.(error, attempt) ?? DEFAULT_RETRY(attempt);
+    const delayMs = validDelay(proposed) ? Math.max(100, proposed) : DEFAULT_RETRY(attempt);
+    const retryAtMs = this.now() + delayMs;
+    const message = error instanceof Error ? error.message : String(error);
+    const failed: FailedWork = {
+      state: "failed",
+      work: { ...work, attempt },
+      retryAtMs,
+      message,
+    };
+    this.active = failed;
+    if (this.loader.sourceWideBackoff === true) {
+      this.sourceBackoffUntilMs = Math.max(this.sourceBackoffUntilMs ?? -Infinity, retryAtMs);
+    }
+    const activity: Extract<AcquisitionActivity, { readonly state: "failed" }> = {
+      state: "failed",
+      range: work.plan.range,
+      resolutionMs: work.plan.resolutionMs,
+      message,
+      retryAtMs,
+    };
+    this.emitStatus();
+    if (this.active === failed) this.schedule(retryAtMs);
+    this.sink.error(error, activity);
+  }
+
+  private abortActive(): void {
+    if (this.active?.state === "fetching") this.active.controller.abort();
+    this.active = null;
+  }
+}
+
+function createPolicy(loader: IntervalLoader): PollingPolicy {
+  return {
+    minFetchPoints: Math.ceil(
+      positiveFinite(loader.minFetchPoints ?? DEFAULT_MIN_FETCH_POINTS, "minFetchPoints"),
+    ),
+    liveRetentionMs: nonNegativeFinite(
+      loader.liveRetentionMs ?? DEFAULT_LIVE_RETENTION_MS,
+      "liveRetentionMs",
+    ),
+    livePollDelayMs:
+      loader.livePollDelayMs === undefined
+        ? null
+        : positiveFinite(loader.livePollDelayMs, "livePollDelayMs"),
+    publicationGraceMs: nonNegativeFinite(
+      loader.publicationGraceMs ?? PUBLICATION_GRACE_MS,
+      "publicationGraceMs",
+    ),
+  };
+}
+
+function resolveDemands(
+  loader: IntervalLoader,
+  demands: readonly BrokerDemand[],
+): ResolvedDemand[] {
+  const plans = demands.map((demand) => {
+    validateDemand(demand);
+    const resolutionMs = loader.resolve(demand);
+    if (!(resolutionMs > 0) || !Number.isFinite(resolutionMs)) {
+      throw new Error(`SignalAdapter: invalid native resolution ${resolutionMs}`);
+    }
+    return { range: demand.range, resolutionMs };
+  });
+  plans.sort(
+    (a, b) =>
+      a.resolutionMs - b.resolutionMs || b.range.end - a.range.end || b.range.start - a.range.start,
+  );
+  return plans.filter(
+    (plan, index) =>
+      index === 0 ||
+      plan.resolutionMs !== plans[index - 1]!.resolutionMs ||
+      !Interval.equals(plan.range, plans[index - 1]!.range),
+  );
+}
+
+function expandFetchInterval(
   required: Interval,
   resolutionMs: number,
   wallNow: number,
-  configuredMinPoints: number | undefined,
+  minFetchPoints: number,
 ): Interval {
-  const minPoints = configuredMinPoints ?? DEFAULT_MIN_FETCH_POINTS;
-  if (!(minPoints >= 1) || !Number.isFinite(minPoints)) {
-    throw new Error(`SignalAdapter: invalid minFetchPoints ${minPoints}`);
-  }
-  const minSpan = Math.ceil(minPoints) * resolutionMs;
-  let min = Math.floor(required.start / resolutionMs) * resolutionMs;
-  let max = Math.min(wallNow, Math.ceil(required.end / resolutionMs) * resolutionMs);
-  if (!(min < max)) max = Math.min(wallNow, Math.max(required.end, min + resolutionMs));
-  if (max - min < minSpan) {
+  const minSpan = minFetchPoints * resolutionMs;
+  let start = Math.floor(required.start / resolutionMs) * resolutionMs;
+  let end = Math.min(wallNow, Math.ceil(required.end / resolutionMs) * resolutionMs);
+  if (!(start < end)) end = Math.min(wallNow, Math.max(required.end, start + resolutionMs));
+
+  if (end - start < minSpan) {
     if (required.end >= wallNow - 2 * resolutionMs) {
-      min = max - minSpan;
+      start = end - minSpan;
     } else {
-      const missing = minSpan - (max - min);
-      min -= Math.ceil(missing / 2 / resolutionMs) * resolutionMs;
-      max = Math.min(wallNow, min + minSpan);
-      if (max < required.end) {
-        max = required.end;
-        min = max - minSpan;
+      const missing = minSpan - (end - start);
+      start -= Math.ceil(missing / 2 / resolutionMs) * resolutionMs;
+      end = Math.min(wallNow, start + minSpan);
+      if (end < required.end) {
+        end = required.end;
+        start = end - minSpan;
       }
     }
   }
-  if (!(min < max)) throw new Error("SignalAdapter: could not construct a non-empty fetch range");
-  return Interval.create(min, max);
+
+  const expanded = Interval.create(start, end);
+  if (Interval.isEmpty(expanded)) {
+    throw new Error("SignalAdapter: could not construct a non-empty fetch range");
+  }
+  return expanded;
 }
 
-function validateDemand(demand: AdapterDemand): void {
+function liveTail(plan: ResolvedDemand, wallNow: number): Interval {
+  return Interval.create(Math.max(plan.range.start, wallNow - 2 * plan.resolutionMs), wallNow);
+}
+
+function validateDemand(demand: BrokerDemand): void {
   if (!(demand.maxDeltaTMs > 0) || !Number.isFinite(demand.maxDeltaTMs)) {
     throw new Error(`SignalAdapter: invalid requested resolution ${demand.maxDeltaTMs}`);
   }
 }
 
 function validateBatch(requiredInterval: Interval, batch: AdapterBatch): void {
-  if (Interval.isEmpty(Interval.intersection(requiredInterval, batch.searchedInterval))) {
+  if (!Interval.overlaps(requiredInterval, batch.searchedInterval)) {
     throw new Error("SignalAdapter: searched range made no progress on the required range");
   }
+}
+
+function sameActivities(
+  a: readonly AcquisitionActivity[],
+  b: readonly AcquisitionActivity[],
+): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((activity, index) => sameActivity(activity, b[index]!));
+}
+
+function sameActivity(a: AcquisitionActivity, b: AcquisitionActivity): boolean {
+  if (
+    a.state !== b.state ||
+    a.resolutionMs !== b.resolutionMs ||
+    !Interval.equals(a.range, b.range)
+  ) {
+    return false;
+  }
+  return (
+    a.state !== "failed" ||
+    (b.state === "failed" && a.message === b.message && a.retryAtMs === b.retryAtMs)
+  );
 }
 
 function defaultPollDelay(resolutionMs: number): number {
@@ -513,15 +625,20 @@ function validDelay(value: number): boolean {
   return value >= 0 && Number.isFinite(value);
 }
 
-/** True when the interval reaches or crosses a boundary such as wall-clock now. */
-function reachesBoundary(interval: Interval, boundary: number): boolean {
-  return interval.start <= boundary && interval.end >= boundary;
-}
-
-function clampToNow(range: Interval, now: number): Interval {
-  return Interval.create(range.start, Math.min(range.end, now));
-}
-
 function isAbort(error: unknown): boolean {
-  return error instanceof DOMException && error.name === "AbortError";
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function positiveFinite(value: number, name: string): number {
+  if (!(value > 0) || !Number.isFinite(value)) {
+    throw new Error(`SignalAdapter: invalid ${name} ${value}`);
+  }
+  return value;
+}
+
+function nonNegativeFinite(value: number, name: string): number {
+  if (value < 0 || !Number.isFinite(value)) {
+    throw new Error(`SignalAdapter: invalid ${name} ${value}`);
+  }
+  return value;
 }

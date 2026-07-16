@@ -37,9 +37,10 @@ prices and converts them to log-price samples before crossing this boundary.
 6. `setDemands` replaces the session's complete interest snapshot. The adapter
    may keep a live transport warm after live interest disappears, but must not
    multiply work when the viewport moves.
-7. A delivery reports the range actually searched. Empty results still settle
-   that searched range. Partial API responses report only the part searched so
-   the remaining gap can be scheduled later.
+7. A delivery reports the range actually searched and the native resolution
+   used. Empty results still settle that searched range at that actual quality.
+   Partial API responses report only the part searched so the remaining gap can
+   be scheduled later.
 8. Reads are side-effect-free. Only subscriptions change acquisition demand.
 9. Visible future time has no samples and is presented as `pending` or
    `watching`. A demand containing the adapter's current clock is live demand.

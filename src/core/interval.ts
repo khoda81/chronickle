@@ -44,6 +44,19 @@ export const Interval = {
     return value >= interval.start && value < interval.end;
   },
 
+  equals(a: Interval, b: Interval): boolean {
+    return a.start === b.start && a.end === b.end;
+  },
+
+  overlaps(a: Interval, b: Interval): boolean {
+    return a.start < b.end && b.start < a.end;
+  },
+
+  clampEnd(interval: Interval, end: number): Interval {
+    if (!Number.isFinite(end)) throw new Error(`Interval end clamp must be finite: ${end}`);
+    return this.create(interval.start, Math.min(interval.end, end));
+  },
+
   pan(interval: Interval, delta: number): Interval {
     if (!Number.isFinite(delta)) throw new Error(`Pan delta must be finite: ${delta}`);
     return this.create(interval.start + delta, interval.end + delta);
