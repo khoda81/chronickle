@@ -7,7 +7,9 @@ import type { Subscription, ReadRequest, SignalView } from "../data/signal/broke
 import type { MutableSample } from "../data/signal/sample.ts";
 import { Interval } from "../core/interval.ts";
 import { DataTransform } from "./transform.ts";
-import { transformTouchInterval } from "./gesture.ts";
+import { transformTouchInterval, type GestureInputKind } from "./gesture.ts";
+import { TimelineGestureController, type GestureTarget } from "./timelineGestureController.ts";
+import type { CanvasPoint, MutableCanvasSize } from "./coordinates.ts";
 import { Plot } from "./plot.ts";
 import { eventIndexAtOrBefore, eventIndexNearPoint } from "./hittest.ts";
 import type { PaletteName } from "./ramp.ts";
@@ -161,6 +163,8 @@ export class Timeline {
   private readonly overlay: TimelineOverlaySink | undefined;
   private readonly config: TimelineConfig;
   private readonly signal: AbortSignal;
+  private readonly canvasSize: MutableCanvasSize = { width: 0, height: 0 };
+  private readonly gestures: TimelineGestureController;
   private signalRows: readonly SignalRow[];
   // Mutable render-state mirrors. App state owns persistence; Timeline owns live gestures.
   private rowHeights: number[];
@@ -177,25 +181,7 @@ export class Timeline {
   private rafId: number | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private state: TimelineState;
-  private dragging = false;
-  private resizingBoundary: number | null = null;
-  private verticalPanRow: number | null = null;
-  private dragPointerId: number | null = null;
-  private lastX = 0;
-  private lastY = 0;
-  private gestureStartX = 0;
-  private gestureStartY = 0;
-  private gestureMoved = false;
-  private touchAId: number | null = null;
-  private touchAX = 0;
-  private touchAY = 0;
-  private touchBId: number | null = null;
-  private touchBX = 0;
-  private touchBY = 0;
   private nowTimer: number | null = null;
-  private pointerInside = false;
-  private pointerPx = 0;
-  private pointerPy = 0;
   private crosshairPinned = false;
   private eventTooltipHovered = false;
   private hoverClearTimer: number | null = null;
@@ -241,7 +227,42 @@ export class Timeline {
       newsHeight: restoredRowHeight(opts.initialNewsHeight, DEFAULT_NEWS_HEIGHT),
       playback: normalizePlayback(opts.initialPlayback),
     };
-    this.bindEvents();
+    this.gestures = new TimelineGestureController({
+      canvas: this.canvas,
+      viewport: this.canvasSize,
+      wheelLineHeight: this.config.wheelLineHeight,
+      signal: this.signal,
+      host: {
+        targetAt: point => this.gestureTargetAt(point),
+        gestureStarted: () => this.onGestureStarted(),
+        gestureEnded: (input, cancelled, finished, pointerInside) =>
+          this.onGestureEnded(input, cancelled, finished, pointerInside),
+        panTimeByPixels: (deltaX, viewportWidth) => this.panTimeByPixels(deltaX, viewportWidth),
+        panRow: (row, deltaY) => this.panRowVertically(row, deltaY),
+        resizeBoundary: (index, deltaY) => this.resizeBoundaryBy(index, deltaY),
+        pinchTime: (
+          viewportWidth,
+          previousCenterX,
+          currentCenterX,
+          previousDistance,
+          currentDistance,
+        ) =>
+          this.pinchTime(
+            viewportWidth,
+            previousCenterX,
+            currentCenterX,
+            previousDistance,
+            currentDistance,
+          ),
+        wheel: (point, deltaX, deltaY, shiftKey) =>
+          this.onGestureWheel(point, deltaX, deltaY, shiftKey),
+        hoverMoved: (point, pointerInside) => this.onGestureHoverMove(point, pointerInside),
+        pointerLeft: () => this.onGesturePointerLeave(),
+        tap: point => this.onGestureTap(point),
+        doubleTap: point => this.onGestureDoubleTap(point),
+      },
+    });
+
     if (typeof ResizeObserver !== "undefined") {
       this.resizeObserver = new ResizeObserver(() => this.resize());
       this.resizeObserver.observe(this.canvas);
@@ -421,27 +442,10 @@ export class Timeline {
     this.layoutDirty = false;
     const collapsedRowIds = removeCollapsedRows
       ? this.signalRows
-          .filter((_, index) => this.rowHeights[index]! <= ROW_REMOVE_THRESHOLD)
-          .map(row => row.id)
+        .filter((_, index) => this.rowHeights[index]! <= ROW_REMOVE_THRESHOLD)
+        .map(row => row.id)
       : [];
     this.callbacks.onLayoutChange?.(this.getLayout(), collapsedRowIds);
-  }
-
-  private bindEvents(): void {
-    const { signal } = this;
-
-    this.canvas.addEventListener("pointerdown", this.onPointerDown, { signal });
-
-    window.addEventListener("pointermove", this.onPointerMove, { signal });
-    window.addEventListener("pointerup", this.onPointerUp, { signal });
-    window.addEventListener("pointercancel", this.onPointerCancel, { signal });
-
-    this.canvas.addEventListener("wheel", this.onWheel, { passive: false, signal });
-
-    this.canvas.addEventListener("pointermove", this.onHoverMove, { signal });
-    this.canvas.addEventListener("pointerleave", this.onHoverLeave, { signal });
-    this.canvas.addEventListener("click", this.onClick, { signal });
-    this.canvas.addEventListener("dblclick", this.onDoubleClick, { signal });
   }
 
   private resize(): void {
@@ -450,6 +454,8 @@ export class Timeline {
     const rect = this.canvas.getBoundingClientRect();
     this.canvas.width = Math.floor(rect.width * dpr);
     this.canvas.height = Math.floor(rect.height * dpr);
+    this.canvasSize.width = this.plot.cssWidth;
+    this.canvasSize.height = this.plot.cssHeight;
     this.fitLayout();
     this.reqDraw();
   }
@@ -523,16 +529,16 @@ export class Timeline {
       const rowHeight = this.rowHeights[index]!;
       const waveletMode = this.rowWaveletModes[index]!;
       this.overlay?.setRowTop(row.id, rowY);
+      const activeBoundary = this.gestures.activeBoundary;
       const rowTouchesActiveBoundary =
-        this.resizingBoundary === 0
+        activeBoundary === 0
           ? index === 0
-          : this.resizingBoundary !== null &&
-            (index === this.resizingBoundary - 1 || index === this.resizingBoundary);
+          : activeBoundary !== null && (index === activeBoundary - 1 || index === activeBoundary);
       const collapseProgress = rowTouchesActiveBoundary
         ? Math.max(
-            0,
-            Math.min(1, 1 - (rowHeight - ROW_REMOVE_THRESHOLD) / ROW_COLLAPSE_HINT_HEIGHT),
-          )
+          0,
+          Math.min(1, 1 - (rowHeight - ROW_REMOVE_THRESHOLD) / ROW_COLLAPSE_HINT_HEIGHT),
+        )
         : 0;
       this.overlay?.setRowCollapseProgress(row.id, collapseProgress);
       if (rowHeight <= COVERAGE_BAR_HEIGHT + 2) {
@@ -620,7 +626,7 @@ export class Timeline {
       return;
     }
 
-    const x = Math.max(0, Math.min(width, this.pointerPx));
+    const x = Math.max(0, Math.min(width, this.gestures.pointer.x));
     const time =
       this.state.timeInterval.start +
       (x / width) * (this.state.timeInterval.end - this.state.timeInterval.start);
@@ -630,11 +636,10 @@ export class Timeline {
   /** Shared visibility contract for the crosshair and all hover-owned labels. */
   private canShowHoverOverlay(): boolean {
     return (
-      (this.pointerInside || this.eventTooltipHovered || this.crosshairPinned) &&
-      !this.dragging &&
-      this.resizingBoundary === null &&
+      (this.gestures.pointerInside || this.eventTooltipHovered || this.crosshairPinned) &&
+      !this.gestures.active &&
       this.latestNumPx > 0 &&
-      this.boundaryAt(this.pointerPy) === null
+      this.boundaryAt(this.gestures.pointer.y) === null
     );
   }
 
@@ -642,7 +647,7 @@ export class Timeline {
     this.overlay?.hideSignalTooltips();
     if (!this.canShowHoverOverlay() || this.overlay === undefined) return;
 
-    const x = Math.max(0, Math.min(frame.width, this.pointerPx));
+    const x = Math.max(0, Math.min(frame.width, this.gestures.pointer.x));
     const hoverTime =
       this.state.timeInterval.start +
       (x / frame.width) * (this.state.timeInterval.end - this.state.timeInterval.start);
@@ -801,336 +806,133 @@ export class Timeline {
     this.callbacks.onPlaybackChange?.(this.state.playback);
   }
 
-  private onPointerDown = (event: PointerEvent): void => {
-    this.updatePointer(event);
+  private gestureTargetAt(point: CanvasPoint): GestureTarget {
+    const boundary = this.boundaryAt(point.y);
+    return boundary === null
+      ? { kind: "viewport", row: this.rowAt(point.y) }
+      : { kind: "boundary", index: boundary };
+  }
+
+  private onGestureStarted(): void {
     this.crosshairPinned = false;
+    this.clearHover();
     this.reqDraw();
-    if (event.pointerType === "touch") {
-      this.onTouchDown(event);
-      return;
-    }
+  }
 
-    this.gestureStartX = event.clientX;
-    this.gestureStartY = event.clientY;
-    this.gestureMoved = false;
-    this.dragPointerId = event.pointerId;
-    const boundary = this.boundaryAt(this.pointerPy);
-    if (boundary !== null) {
-      this.resizingBoundary = boundary;
-      this.verticalPanRow = null;
-      this.dragging = false;
-      this.lastY = this.pointerPy;
-      if (this.clearHover()) this.reqDraw();
-      this.canvas.style.cursor = "ns-resize";
-      this.canvas.setPointerCapture?.(event.pointerId);
-      event.preventDefault();
-      return;
+  private onGestureEnded(
+    input: GestureInputKind,
+    cancelled: boolean,
+    finished: boolean,
+    pointerInside: boolean,
+  ): void {
+    this.flushLayoutChange(finished);
+    if (input === "touch" && finished) {
+      this.crosshairPinned = !cancelled && pointerInside;
     }
-    this.dragging = true;
-    this.lastX = event.clientX;
-    this.lastY = this.pointerPy;
-    this.verticalPanRow = this.rowAt(this.pointerPy);
-    this.canvas.setPointerCapture?.(event.pointerId);
-  };
+    if (cancelled) this.clearHover();
+    else if (input === "touch" && finished) this.updateHoverAtCurrentTransform();
+    if (finished && !pointerInside) this.scheduleHoverClear();
+    this.reqDraw();
+  }
 
-  private onPointerMove = (event: PointerEvent): void => {
-    if (event.pointerType === "touch") {
-      this.onTouchMove(event);
-      return;
-    }
-    if (event.pointerId !== this.dragPointerId) return;
-    if (this.resizingBoundary !== null) {
-      this.updatePointer(event);
-      const y = this.pointerPy;
-      this.moveBoundary(this.resizingBoundary, y - this.lastY);
-      this.lastY = y;
-      this.markGestureMoved(event.clientX, event.clientY);
-      this.reqDraw();
-      return;
-    }
-    if (!this.dragging) return;
-    this.updatePointer(event);
-    const dx = event.clientX - this.lastX;
-    const dy = this.pointerPy - this.lastY;
-    this.lastX = event.clientX;
-    this.lastY = this.pointerPy;
-    this.markGestureMoved(event.clientX, event.clientY);
-    const rect = this.canvas.getBoundingClientRect();
-    if (rect.width <= 0) return;
+  private panTimeByPixels(deltaX: number, viewportWidth: number): void {
+    if (deltaX === 0 || !(viewportWidth > 0)) return;
     const span = this.state.timeInterval.end - this.state.timeInterval.start;
-    if (dx !== 0) {
-      this.panTimeInterval(Interval.pan(this.state.timeInterval, -(dx / rect.width) * span));
-    }
-    this.panRowVertically(this.verticalPanRow, dy);
-  };
+    this.panTimeInterval(Interval.pan(this.state.timeInterval, -(deltaX / viewportWidth) * span));
+  }
 
-  private onPointerUp = (event: PointerEvent): void => {
-    if (event.pointerType === "touch") {
-      this.onTouchEnd(event);
-      return;
-    }
-    if (event.pointerId !== this.dragPointerId) return;
-    this.dragging = false;
-    this.resizingBoundary = null;
-    this.flushLayoutChange(true);
-    this.verticalPanRow = null;
-    this.dragPointerId = null;
-    if (this.canvas.hasPointerCapture?.(event.pointerId)) {
-      this.canvas.releasePointerCapture(event.pointerId);
-    }
-    this.updatePointer(event);
+  private resizeBoundaryBy(index: number, deltaY: number): void {
+    this.moveBoundary(index, deltaY);
     this.reqDraw();
-  };
+  }
 
-  private onPointerCancel = (event: PointerEvent): void => {
-    if (event.pointerType === "touch") {
-      this.onTouchEnd(event, true);
-      return;
+  private pinchTime(
+    viewportWidth: number,
+    previousCenterX: number,
+    currentCenterX: number,
+    previousDistance: number,
+    currentDistance: number,
+  ): void {
+    const transformed = transformTouchInterval(
+      this.state.timeInterval,
+      viewportWidth,
+      previousCenterX,
+      currentCenterX,
+      previousDistance,
+      currentDistance,
+    );
+    if (Math.abs(currentCenterX - previousCenterX) >= 0.5) {
+      this.panTimeInterval(transformed);
+    } else {
+      this.setTimeInterval(transformed);
     }
-    if (event.pointerId !== this.dragPointerId) return;
-    this.dragPointerId = null;
-    this.dragging = false;
-    this.resizingBoundary = null;
-    this.flushLayoutChange(true);
-    this.verticalPanRow = null;
-    this.reqDraw();
-  };
+  }
 
-  private onWheel = (event: WheelEvent): void => {
-    event.preventDefault();
-    this.updatePointer(event);
-    const rect = this.canvas.getBoundingClientRect();
+  private onGestureWheel(
+    point: CanvasPoint,
+    deltaX: number,
+    deltaY: number,
+    shiftKey: boolean,
+  ): void {
     const cssWidth = this.plot.cssWidth;
-    const cssHeight = this.plot.cssHeight;
-    if (cssWidth <= 0 || rect.width <= 0) return;
-    const px = (event.clientX - rect.left) * (cssWidth / rect.width);
-    let dy = event.deltaY;
-    if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) dy *= this.config.wheelLineHeight;
-    else if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) dy *= cssHeight;
+    if (!(cssWidth > 0)) return;
     const span = this.state.timeInterval.end - this.state.timeInterval.start;
-    const dt = (this.config.timeScrollSensitivity * span * event.deltaX) / cssWidth;
+    const dt = (this.config.timeScrollSensitivity * span * deltaX) / cssWidth;
     if (dt !== 0) {
       this.panTimeInterval(Interval.pan(this.state.timeInterval, dt));
     }
-    if (event.shiftKey) {
-      this.setPriceScale(this.state.logGain - dy * this.config.wheelSensitivity);
+    if (shiftKey) {
+      this.setPriceScale(this.state.logGain - deltaY * this.config.wheelSensitivity);
       return;
     }
-    const tx = new DataTransform(
-      this.state.timeInterval,
-      Interval.create(0, cssWidth),
-      Interval.create(0, cssHeight),
-    );
-    const factor = Math.exp(-dy * this.config.wheelSensitivity);
-    this.panTimeInterval(Interval.zoom(this.state.timeInterval, tx.xToTime(px), factor));
-  };
+    if (deltaY === 0) return;
+    const anchorTime =
+      this.state.timeInterval.start +
+      (point.x / cssWidth) * (this.state.timeInterval.end - this.state.timeInterval.start);
+    const factor = Math.exp(-deltaY * this.config.wheelSensitivity);
+    this.panTimeInterval(Interval.zoom(this.state.timeInterval, anchorTime, factor));
+  }
 
-  private onHoverMove = (event: PointerEvent): void => {
-    this.updatePointer(event);
-    if (this.pointerInside) this.cancelScheduledHoverClear();
-    const boundary = this.boundaryAt(this.pointerPy);
+  private onGestureHoverMove(point: CanvasPoint, pointerInside: boolean): void {
+    if (pointerInside) this.cancelScheduledHoverClear();
+    const boundary = this.boundaryAt(point.y);
     this.canvas.style.cursor =
       boundary !== null
         ? "ns-resize"
-        : this.clickableEventIndexAtCurrentTransform() !== null
+        : this.clickableEventIndexAtCurrentTransform(point) !== null
           ? "pointer"
           : "";
-    if (this.dragging || this.resizingBoundary !== null) return;
     this.updateHoverAtCurrentTransform();
     this.reqDraw();
-  };
+  }
 
-  private onHoverLeave = (): void => {
-    this.pointerInside = false;
+  private onGesturePointerLeave(): void {
     this.scheduleHoverClear();
-  };
+  }
 
-  private onClick = (event: MouseEvent): void => {
-    if (this.gestureMoved) {
-      this.gestureMoved = false;
-      return;
-    }
-    this.updatePointer(event);
-    const clickedEventIndex = this.clickableEventIndexAtCurrentTransform();
+  private onGestureTap(point: CanvasPoint): void {
+    const clickedEventIndex = this.clickableEventIndexAtCurrentTransform(point);
     if (this.updateHoverAtCurrentTransform()) this.reqDraw();
     this.reqDraw();
     if (clickedEventIndex !== null) {
       const clicked = this.eventAt(clickedEventIndex);
       window.open(clicked.link, "_blank", "noopener,noreferrer");
     }
-  };
+  }
 
-  private onDoubleClick = (event: MouseEvent): void => {
-    event.preventDefault();
-    this.updatePointer(event);
+  private onGestureDoubleTap(point: CanvasPoint): void {
     // A marker activation wins over the chart-level navigation gesture.
-    if (this.clickableEventIndexAtCurrentTransform() !== null) return;
+    if (this.clickableEventIndexAtCurrentTransform(point) !== null) return;
     this.crosshairPinned = false;
     this.followNowAtRightEdge();
-  };
-
-  private onTouchDown(event: PointerEvent): void {
-    if (this.touchAId === null) {
-      this.touchAId = event.pointerId;
-      this.touchAX = event.clientX;
-      this.touchAY = event.clientY;
-      this.gestureStartX = event.clientX;
-      this.gestureStartY = event.clientY;
-      this.gestureMoved = false;
-      const boundary = this.boundaryAt(this.pointerPy);
-      if (boundary !== null) {
-        this.resizingBoundary = boundary;
-        this.verticalPanRow = null;
-        this.lastY = this.pointerPy;
-        this.canvas.style.cursor = "ns-resize";
-      } else {
-        this.resizingBoundary = null;
-        this.verticalPanRow = this.rowAt(this.pointerPy);
-        this.lastY = this.pointerPy;
-      }
-      this.dragging = true;
-    } else if (this.touchBId === null && event.pointerId !== this.touchAId) {
-      this.touchBId = event.pointerId;
-      this.touchBX = event.clientX;
-      this.touchBY = event.clientY;
-      this.resizingBoundary = null;
-      this.gestureMoved = true;
-      if (this.clearHover()) this.reqDraw();
-    }
-    this.canvas.setPointerCapture?.(event.pointerId);
-    event.preventDefault();
-  }
-
-  private onTouchMove(event: PointerEvent): void {
-    const movingA = event.pointerId === this.touchAId;
-    const movingB = event.pointerId === this.touchBId;
-    if (!movingA && !movingB) return;
-
-    const previousAX = this.touchAX;
-    const previousAY = this.touchAY;
-    const previousBX = this.touchBX;
-    const previousBY = this.touchBY;
-    if (movingA) {
-      this.touchAX = event.clientX;
-      this.touchAY = event.clientY;
-    } else {
-      this.touchBX = event.clientX;
-      this.touchBY = event.clientY;
-    }
-
-    this.updatePointer(event);
-    if (this.touchBId !== null) {
-      const rect = this.canvas.getBoundingClientRect();
-      if (rect.width > 0) {
-        const previousCenterX = (previousAX + previousBX) / 2 - rect.left;
-        const currentCenterX = (this.touchAX + this.touchBX) / 2 - rect.left;
-        const previousCenterY = (previousAY + previousBY) / 2;
-        const currentCenterY = (this.touchAY + this.touchBY) / 2;
-        const previousDistance = Math.hypot(previousBX - previousAX, previousBY - previousAY);
-        const currentDistance = Math.hypot(
-          this.touchBX - this.touchAX,
-          this.touchBY - this.touchAY,
-        );
-        const transformedInterval = transformTouchInterval(
-          this.state.timeInterval,
-          rect.width,
-          previousCenterX,
-          currentCenterX,
-          previousDistance,
-          currentDistance,
-        );
-        if (Math.abs(currentCenterX - previousCenterX) >= 0.5) {
-          this.panTimeInterval(transformedInterval);
-        } else {
-          this.setTimeInterval(transformedInterval);
-        }
-        if (rect.height > 0) {
-          this.panRowVertically(
-            this.verticalPanRow,
-            (currentCenterY - previousCenterY) * (this.plot.cssHeight / rect.height),
-          );
-        }
-      }
-      event.preventDefault();
-      return;
-    }
-
-    if (this.resizingBoundary !== null) {
-      const y = this.pointerPy;
-      this.moveBoundary(this.resizingBoundary, y - this.lastY);
-      this.lastY = y;
-      this.markGestureMoved(event.clientX, event.clientY);
-      this.reqDraw();
-      event.preventDefault();
-      return;
-    }
-
-    const rect = this.canvas.getBoundingClientRect();
-    if (rect.width > 0) {
-      const dx = this.touchAX - previousAX;
-      const span = this.state.timeInterval.end - this.state.timeInterval.start;
-      if (dx !== 0) {
-        this.panTimeInterval(Interval.pan(this.state.timeInterval, -(dx / rect.width) * span));
-      }
-      if (rect.height > 0) {
-        this.panRowVertically(
-          this.verticalPanRow,
-          (this.touchAY - previousAY) * (this.plot.cssHeight / rect.height),
-        );
-      }
-    }
-    this.markGestureMoved(event.clientX, event.clientY);
-    event.preventDefault();
-  }
-
-  private onTouchEnd(event: PointerEvent, cancelled = false): void {
-    this.updatePointer(event);
-    if (event.pointerId === this.touchAId) {
-      if (this.touchBId !== null) {
-        this.touchAId = this.touchBId;
-        this.touchAX = this.touchBX;
-        this.touchAY = this.touchBY;
-        this.touchBId = null;
-      } else {
-        this.touchAId = null;
-      }
-    } else if (event.pointerId === this.touchBId) {
-      this.touchBId = null;
-    } else {
-      return;
-    }
-
-    if (this.canvas.hasPointerCapture?.(event.pointerId)) {
-      this.canvas.releasePointerCapture(event.pointerId);
-    }
-    this.resizingBoundary = null;
-    if (this.touchAId === null) {
-      this.dragging = false;
-      this.verticalPanRow = null;
-      this.crosshairPinned = !cancelled && this.pointerInside;
-      this.canvas.style.cursor = "";
-    } else {
-      this.dragging = true;
-      this.gestureStartX = this.touchAX;
-      this.gestureStartY = this.touchAY;
-    }
-    this.flushLayoutChange(this.touchAId === null);
-    if (cancelled) {
-      this.pointerInside = false;
-      this.clearHover();
-    } else if (this.touchAId === null) {
-      this.updateHoverAtCurrentTransform();
-    }
-    this.reqDraw();
   }
 
   private scheduleHoverClear(): void {
     if (
-      this.pointerInside ||
+      this.gestures.pointerInside ||
       this.eventTooltipHovered ||
       this.crosshairPinned ||
-      this.dragging ||
-      this.resizingBoundary !== null ||
+      this.gestures.active ||
       this.hoverClearTimer !== null
     ) {
       return;
@@ -1139,11 +941,10 @@ export class Timeline {
     this.hoverClearTimer = window.setTimeout(() => {
       this.hoverClearTimer = null;
       if (
-        this.pointerInside ||
+        this.gestures.pointerInside ||
         this.eventTooltipHovered ||
         this.crosshairPinned ||
-        this.dragging ||
-        this.resizingBoundary !== null
+        this.gestures.active
       ) {
         return;
       }
@@ -1158,34 +959,10 @@ export class Timeline {
     this.hoverClearTimer = null;
   }
 
-  private markGestureMoved(clientX: number, clientY: number): void {
-    if (
-      !this.gestureMoved &&
-      Math.hypot(clientX - this.gestureStartX, clientY - this.gestureStartY) >= 5
-    ) {
-      this.gestureMoved = true;
-    }
-  }
-
   private eventAt(index: number): NewsEvent {
     const event = this.state.events.events[index];
     if (event === undefined) throw new Error(`Event index out of range: ${index}`);
     return event;
-  }
-
-  private updatePointer(event: Pick<PointerEvent, "clientX" | "clientY">): void {
-    const rect = this.canvas.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) {
-      this.pointerInside = false;
-      return;
-    }
-    this.pointerInside =
-      event.clientX >= rect.left &&
-      event.clientX <= rect.right &&
-      event.clientY >= rect.top &&
-      event.clientY <= rect.bottom;
-    this.pointerPx = (event.clientX - rect.left) * (this.plot.cssWidth / rect.width);
-    this.pointerPy = (event.clientY - rect.top) * (this.plot.cssHeight / rect.height);
   }
 
   private updateHoverAtCurrentTransform(): boolean {
@@ -1200,32 +977,28 @@ export class Timeline {
     return this.updateHover(tx, this.state.newsHeight / 2, width, height);
   }
 
-  private clickableEventIndexAtCurrentTransform(): number | null {
+  private clickableEventIndexAtCurrentTransform(
+    point: CanvasPoint = this.gestures.pointer,
+  ): number | null {
     const width = this.plot.cssWidth;
     const height = this.plot.cssHeight;
-    if (!(width > 0) || !(height > 0) || !this.pointerInside) return null;
+    if (!(width > 0) || !(height > 0) || !this.gestures.pointerInside) return null;
     const tx = new DataTransform(
       this.state.timeInterval,
       Interval.create(0, width),
       Interval.create(0, height),
     );
-    return eventIndexNearPoint(
-      this.state.events,
-      tx,
-      this.pointerPx,
-      this.pointerPy,
-      this.state.newsHeight / 2,
-    );
+    return eventIndexNearPoint(this.state.events, tx, point, this.state.newsHeight / 2);
   }
 
   private updateHover(tx: DataTransform, eventY: number, width: number, height: number): boolean {
     const previous = this.state.hovered;
+    const point = this.gestures.pointer;
     const index =
-      (this.pointerInside || this.eventTooltipHovered || this.crosshairPinned) &&
-      !this.dragging &&
-      this.resizingBoundary === null &&
-      this.boundaryAt(this.pointerPy) === null
-        ? eventIndexAtOrBefore(this.state.events, tx, this.pointerPx)
+      (this.gestures.pointerInside || this.eventTooltipHovered || this.crosshairPinned) &&
+        !this.gestures.active &&
+        this.boundaryAt(point.y) === null
+        ? eventIndexAtOrBefore(this.state.events, tx, point.x)
         : null;
     this.state.hovered = index;
     if (index === null) {

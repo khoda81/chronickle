@@ -1,12 +1,25 @@
 import type { NewsEvent, RssFeed } from "../src/domain.ts";
 import { EventBroker } from "../src/data/events/broker.ts";
 import { Broker as PriceBroker } from "../src/data/signal/broker.ts";
-import type { BrokerOptions, Subscription, ReadRequest, SignalView, BrokerDemand } from "../src/data/signal/broker.ts";
+import type {
+  BrokerOptions,
+  Subscription,
+  ReadRequest,
+  SignalView,
+  BrokerDemand,
+} from "../src/data/signal/broker.ts";
 import { SettledCoverageIndex } from "../src/data/signal/coverage.ts";
 import { createBinanceAdapter } from "../src/data/signal/market/adapters/binanceFetcher.ts";
-import { chooseYahooInterval, createYahooAdapter } from "../src/data/signal/market/adapters/yahoo.ts";
+import {
+  chooseYahooInterval,
+  createYahooAdapter,
+} from "../src/data/signal/market/adapters/yahoo.ts";
 import { logPriceSamples } from "../src/data/signal/market/price.ts";
-import { createPollingSignalSource, type AdapterBatch, type SignalAdapter } from "../src/data/signal/fetcher.ts";
+import {
+  createPollingSignalSource,
+  type AdapterBatch,
+  type SignalAdapter,
+} from "../src/data/signal/fetcher.ts";
 import { priceSignalSource } from "../src/data/signal/market/market.ts";
 import { filterMarketSymbols, parseNobitexMarketKey } from "../src/data/signal/market/symbols.ts";
 import { SignalSegmentStore } from "../src/data/signal/store.ts";
@@ -16,8 +29,18 @@ import { fitStackLayout, heatmapScaleWindow } from "../src/engine/gfx/layout.ts"
 import { formatResolution } from "../src/engine/gfx/resolution.ts";
 import { eventIndexAtOrBefore, eventIndexNearPoint } from "../src/engine/hittest.ts";
 import { DataTransform } from "../src/engine/transform.ts";
+import { GestureSession, transformTouchInterval } from "../src/engine/gesture.ts";
+import {
+  TimelineGestureController,
+  type TimelineGestureHost,
+} from "../src/engine/timelineGestureController.ts";
 import { placeTooltip } from "../src/app/timeline/TimelineOverlayController.ts";
-import { computeCenteredGaussianReference, computeWaveletField, kernelContext, signalEdgesToDeltas } from "../src/engine/wavelet.ts";
+import {
+  computeCenteredGaussianReference,
+  computeWaveletField,
+  kernelContext,
+  signalEdgesToDeltas,
+} from "../src/engine/wavelet.ts";
 
 type Test = { readonly name: string; readonly run: () => void | Promise<void> };
 const tests: Test[] = [];
@@ -131,7 +154,7 @@ function adaptFetcher(fetcher: Fetcher, now: () => number): SignalAdapter {
     livePollDelayMs: fetcher.liveRetryDelayMs,
     publicationGraceMs: fetcher.publicationGraceMs,
     now,
-    resolve: (demand) => demand.maxDeltaTMs,
+    resolve: demand => demand.maxDeltaTMs,
     retryDelayMs: fetcher.retryDelayMs?.bind(fetcher),
     clearCache: fetcher.clearCache?.bind(fetcher),
     async fetchInterval(plan, signal) {
@@ -153,12 +176,12 @@ function fetchOnce(adapter: SignalAdapter, demand: BrokerDemand): Promise<Adapte
     const lifetime = new AbortController();
     const session = adapter.connect(
       {
-        next: (batch) => {
+        next: batch => {
           lifetime.abort();
           resolve(batch);
         },
         status: () => undefined,
-        error: (error) => {
+        error: error => {
           lifetime.abort();
           reject(error);
         },
@@ -173,7 +196,7 @@ function retryOnce(
   adapter: SignalAdapter,
   demand: BrokerDemand,
 ): Promise<{ readonly error: unknown; readonly retryAtMs: number }> {
-  return new Promise((resolve) => {
+  return new Promise(resolve => {
     const lifetime = new AbortController();
     const session = adapter.connect(
       {
@@ -211,12 +234,7 @@ function heldSegment(
   value: number,
   resolutionMs: number,
 ) {
-  return {
-    range: Interval.create(rangeStart, rangeEnd),
-    sampleTime,
-    value,
-    resolutionMs,
-  } as const;
+  return { range: Interval.create(rangeStart, rangeEnd), sampleTime, value, resolutionMs } as const;
 }
 
 function assertPoint(
@@ -231,6 +249,378 @@ function assertPoint(
 function count(items: readonly unknown[]): number {
   return items.length;
 }
+
+function clientPoint(clientX: number, clientY: number) {
+  return { clientX, clientY } as const;
+}
+
+class FakeCanvasTarget extends EventTarget {
+  readonly style = { cursor: "" };
+  readonly capturedPointers = new Set<number>();
+
+  getBoundingClientRect(): DOMRect {
+    return {
+      left: 10,
+      top: 20,
+      right: 110,
+      bottom: 70,
+      width: 100,
+      height: 50,
+      x: 10,
+      y: 20,
+      toJSON: () => ({}),
+    };
+  }
+
+  setPointerCapture(pointerId: number): void {
+    this.capturedPointers.add(pointerId);
+  }
+
+  hasPointerCapture(pointerId: number): boolean {
+    return this.capturedPointers.has(pointerId);
+  }
+
+  releasePointerCapture(pointerId: number): void {
+    this.capturedPointers.delete(pointerId);
+  }
+}
+
+interface SyntheticInputOptions {
+  readonly clientX: number;
+  readonly clientY: number;
+  readonly pointerId?: number;
+  readonly pointerType?: string;
+  readonly deltaX?: number;
+  readonly deltaY?: number;
+  readonly deltaMode?: number;
+  readonly shiftKey?: boolean;
+}
+
+function syntheticInput(type: string, options: SyntheticInputOptions): Event {
+  const event = new Event(type, { cancelable: true });
+  for (const [key, value] of Object.entries(options)) {
+    Object.defineProperty(event, key, { value });
+  }
+  return event;
+}
+
+function withFakeWindow(run: (target: EventTarget) => void): void {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const target = new EventTarget();
+  Object.defineProperty(globalThis, "window", { configurable: true, value: target });
+  try {
+    run(target);
+  } finally {
+    if (descriptor === undefined) delete (globalThis as { window?: unknown }).window;
+    else Object.defineProperty(globalThis, "window", descriptor);
+  }
+}
+
+test("gesture session suppresses exactly one click after a real drag", () => {
+  const gesture = new GestureSession();
+  assert(gesture.beginPointer(1, null, 3, clientPoint(10, 20)), "pointer drag did not start");
+  const started = gesture.state;
+  assert(started.kind === "drag" && started.row === 3, "drag target row was lost");
+  const point = started.point;
+
+  gesture.move(1, clientPoint(13, 24));
+  assert(gesture.state === started, "pointer move replaced the gesture state object");
+  assert(
+    started.point === point && point.clientX === 13 && point.clientY === 24,
+    "point was not mutated in place",
+  );
+  assert(started.moved, "five-pixel drag did not cross the movement threshold");
+  assert(gesture.end(1), "pointer drag did not end");
+  assert(gesture.consumeSuppressedClick(), "drag click was not suppressed");
+  assert(!gesture.consumeSuppressedClick(), "click suppression was not consumed once");
+});
+
+test("gesture session keeps taps clickable and cancellations inert", () => {
+  const gesture = new GestureSession();
+  gesture.beginPointer(1, 2, null, clientPoint(10, 20));
+  assert(gesture.activeBoundary === 2, "resize boundary was not represented by state");
+  gesture.move(1, clientPoint(12, 21));
+  gesture.end(1);
+  assert(!gesture.consumeSuppressedClick(), "sub-threshold tap was suppressed");
+
+  gesture.beginPointer(2, null, null, clientPoint(0, 0));
+  gesture.move(2, clientPoint(20, 0));
+  gesture.end(2, true);
+  assert(!gesture.consumeSuppressedClick(), "cancelled gesture leaked click suppression");
+});
+
+test("gesture session transitions touch drag through pinch without parallel flags", () => {
+  const gesture = new GestureSession();
+  assert(gesture.beginTouch(4, null, 7, clientPoint(10, 20)), "first touch did not start");
+  assert(gesture.beginTouch(5, null, 9, clientPoint(30, 40)), "second touch did not start pinch");
+  const pinch = gesture.state;
+  assert(pinch.kind === "pinch" && pinch.row === 7, "pinch did not retain the first touch row");
+  assert(
+    !gesture.beginTouch(6, null, null, clientPoint(50, 60)),
+    "third touch was incorrectly tracked",
+  );
+
+  gesture.move(5, clientPoint(35, 45));
+  assert(
+    pinch.secondary.clientX === 35 && pinch.secondary.clientY === 45,
+    "pinch point did not update",
+  );
+  assert(gesture.end(4), "first pinch pointer did not end");
+  const remaining = gesture.state;
+  assert(
+    remaining.kind === "drag" &&
+      remaining.input === "touch" &&
+      remaining.pointerId === 5 &&
+      remaining.row === 7 &&
+      remaining.moved,
+    "pinch did not become a moved drag for the remaining touch",
+  );
+  assert(gesture.end(5), "remaining touch did not end");
+  assert(gesture.consumeSuppressedClick(), "pinch-generated click was not suppressed");
+});
+
+test("pinch transform combines centroid movement and scale in one interval update", () => {
+  const transformed = transformTouchInterval(Interval.create(0, 100), 100, 50, 60, 20, 40);
+  assert(
+    transformed.start === 20 && transformed.end === 70,
+    "pinch scale and translation were applied in the wrong coordinate frame",
+  );
+});
+
+test("timeline gesture controller owns native drag events and canvas projection", () => {
+  withFakeWindow(windowTarget => {
+    const canvasTarget = new FakeCanvasTarget();
+    const canvas = canvasTarget as unknown as HTMLCanvasElement;
+    const lifetime = new AbortController();
+    let starts = 0;
+    let ends = 0;
+    let taps = 0;
+    let targetX = Number.NaN;
+    let targetY = Number.NaN;
+    let panX = Number.NaN;
+    let panWidth = Number.NaN;
+    let panRow = Number.NaN;
+    let panY = Number.NaN;
+
+    const host: TimelineGestureHost = {
+      targetAt(point) {
+        targetX = point.x;
+        targetY = point.y;
+        return { kind: "viewport", row: 4 };
+      },
+      gestureStarted() {
+        starts++;
+      },
+      gestureEnded() {
+        ends++;
+      },
+      panTimeByPixels(deltaX, viewportWidth) {
+        panX = deltaX;
+        panWidth = viewportWidth;
+      },
+      panRow(row, deltaY) {
+        panRow = row ?? Number.NaN;
+        panY = deltaY;
+      },
+      resizeBoundary() {},
+      pinchTime() {},
+      wheel() {},
+      hoverMoved() {},
+      pointerLeft() {},
+      tap() {
+        taps++;
+      },
+      doubleTap() {},
+    };
+    const controller = new TimelineGestureController({
+      canvas,
+      viewport: { width: 200, height: 100 },
+      wheelLineHeight: 16,
+      host,
+      signal: lifetime.signal,
+    });
+
+    canvasTarget.dispatchEvent(
+      syntheticInput("pointerdown", {
+        clientX: 60,
+        clientY: 30,
+        pointerId: 1,
+        pointerType: "mouse",
+      }),
+    );
+    windowTarget.dispatchEvent(
+      syntheticInput("pointermove", {
+        clientX: 70,
+        clientY: 35,
+        pointerId: 1,
+        pointerType: "mouse",
+      }),
+    );
+    windowTarget.dispatchEvent(
+      syntheticInput("pointerup", { clientX: 70, clientY: 35, pointerId: 1, pointerType: "mouse" }),
+    );
+    canvasTarget.dispatchEvent(syntheticInput("click", { clientX: 70, clientY: 35 }));
+
+    assert(targetX === 100 && targetY === 20, "client point was not projected into canvas space");
+    assert(panX === 10 && panWidth === 100, "horizontal drag was not normalized");
+    assert(panRow === 4 && panY === 10, "vertical drag was not normalized to canvas pixels");
+    assert(starts === 1 && ends === 1 && !controller.active, "drag lifecycle was not closed");
+    assert(taps === 0, "drag-generated click reached the timeline host");
+    assert(canvasTarget.capturedPointers.size === 0, "pointer capture was not released");
+
+    lifetime.abort();
+    canvasTarget.dispatchEvent(
+      syntheticInput("pointerdown", {
+        clientX: 60,
+        clientY: 30,
+        pointerId: 2,
+        pointerType: "mouse",
+      }),
+    );
+    assert(starts === 1, "aborted controller still received native events");
+  });
+});
+
+test("timeline gesture controller combines two touch pointers into one pinch update", () => {
+  withFakeWindow(windowTarget => {
+    const canvasTarget = new FakeCanvasTarget();
+    const lifetime = new AbortController();
+    let previousCenterX = Number.NaN;
+    let currentCenterX = Number.NaN;
+    let previousDistance = Number.NaN;
+    let currentDistance = Number.NaN;
+    let row = Number.NaN;
+    let verticalDelta = Number.NaN;
+    const finishedStates: boolean[] = [];
+    const host: TimelineGestureHost = {
+      targetAt: () => ({ kind: "viewport", row: 6 }),
+      gestureStarted() {},
+      gestureEnded(_input, _cancelled, finished) {
+        finishedStates.push(finished);
+      },
+      panTimeByPixels() {},
+      panRow(nextRow, deltaY) {
+        row = nextRow ?? Number.NaN;
+        verticalDelta = deltaY;
+      },
+      resizeBoundary() {},
+      pinchTime(_viewportWidth, previousCenter, currentCenter, previousSpan, currentSpan) {
+        previousCenterX = previousCenter;
+        currentCenterX = currentCenter;
+        previousDistance = previousSpan;
+        currentDistance = currentSpan;
+      },
+      wheel() {},
+      hoverMoved() {},
+      pointerLeft() {},
+      tap() {},
+      doubleTap() {},
+    };
+    const controller = new TimelineGestureController({
+      canvas: canvasTarget as unknown as HTMLCanvasElement,
+      viewport: { width: 200, height: 100 },
+      wheelLineHeight: 16,
+      host,
+      signal: lifetime.signal,
+    });
+    canvasTarget.dispatchEvent(
+      syntheticInput("pointerdown", {
+        clientX: 30,
+        clientY: 30,
+        pointerId: 1,
+        pointerType: "touch",
+      }),
+    );
+    canvasTarget.dispatchEvent(
+      syntheticInput("pointerdown", {
+        clientX: 70,
+        clientY: 30,
+        pointerId: 2,
+        pointerType: "touch",
+      }),
+    );
+    const move = syntheticInput("pointermove", {
+      clientX: 90,
+      clientY: 40,
+      pointerId: 2,
+      pointerType: "touch",
+    });
+    windowTarget.dispatchEvent(move);
+
+    assert(previousCenterX === 40 && currentCenterX === 50, "pinch centroid was incorrect");
+    assert(previousDistance === 40, "previous pinch distance was incorrect");
+    approx(currentDistance, Math.hypot(60, 10));
+    assert(row === 6 && verticalDelta === 10, "pinch vertical pan used the wrong row or scale");
+    assert(move.defaultPrevented, "touch move default action was not prevented");
+
+    windowTarget.dispatchEvent(
+      syntheticInput("pointerup", { clientX: 30, clientY: 30, pointerId: 1, pointerType: "touch" }),
+    );
+    assert(controller.active, "ending one pinch pointer ended the complete gesture");
+    windowTarget.dispatchEvent(
+      syntheticInput("pointerup", { clientX: 90, clientY: 40, pointerId: 2, pointerType: "touch" }),
+    );
+    assert(!controller.active, "remaining touch did not finish the gesture");
+    assert(
+      finishedStates.length === 2 && !finishedStates[0] && finishedStates[1],
+      "touch completion states were not preserved",
+    );
+    lifetime.abort();
+  });
+});
+
+test("timeline gesture controller normalizes wheel units without allocating a point", () => {
+  withFakeWindow(() => {
+    const canvasTarget = new FakeCanvasTarget();
+    const lifetime = new AbortController();
+    let pointX = Number.NaN;
+    let pointY = Number.NaN;
+    let wheelX = Number.NaN;
+    let wheelY = Number.NaN;
+    let shifted = false;
+    const host: TimelineGestureHost = {
+      targetAt: () => ({ kind: "viewport", row: null }),
+      gestureStarted() {},
+      gestureEnded() {},
+      panTimeByPixels() {},
+      panRow() {},
+      resizeBoundary() {},
+      pinchTime() {},
+      wheel(point, deltaX, deltaY, shiftKey) {
+        pointX = point.x;
+        pointY = point.y;
+        wheelX = deltaX;
+        wheelY = deltaY;
+        shifted = shiftKey;
+      },
+      hoverMoved() {},
+      pointerLeft() {},
+      tap() {},
+      doubleTap() {},
+    };
+    new TimelineGestureController({
+      canvas: canvasTarget as unknown as HTMLCanvasElement,
+      viewport: { width: 200, height: 100 },
+      wheelLineHeight: 16,
+      host,
+      signal: lifetime.signal,
+    });
+    const wheel = syntheticInput("wheel", {
+      clientX: 35,
+      clientY: 45,
+      deltaX: 2,
+      deltaY: 3,
+      deltaMode: 1,
+      shiftKey: true,
+    });
+    canvasTarget.dispatchEvent(wheel);
+
+    assert(pointX === 50 && pointY === 50, "wheel anchor used the wrong coordinate space");
+    assert(wheelX === 32 && wheelY === 48 && shifted, "wheel line units were not normalized");
+    assert(wheel.defaultPrevented, "wheel default action was not prevented");
+    lifetime.abort();
+  });
+});
 
 test("persisted UI state rejects unsupported future schemas", () => {
   const fallback = {
@@ -276,7 +666,7 @@ test("stack layout fills the canvas and preserves every resizable row", () => {
   assert(layout.rowHeights.length === 3, "a price row disappeared");
   assert(layout.newsHeight >= 64, "news row fell below its preferred minimum");
   assert(
-    layout.rowHeights.every((height) => height > 0),
+    layout.rowHeights.every(height => height > 0),
     "a signal row collapsed unexpectedly",
   );
 
@@ -288,7 +678,7 @@ test("stack layout fills the canvas and preserves every resizable row", () => {
     compact.newsHeight + compact.rowHeights.reduce((sum, height) => sum + height, 0);
   approx(compactUsed, 240, 1e-9);
   assert(
-    compact.rowHeights.every((height) => height > 0),
+    compact.rowHeights.every(height => height > 0),
     "compact row collapsed",
   );
 });
@@ -368,9 +758,12 @@ test("event hover selects the last visible event at or before the pointer", () =
   assert(eventIndexAtOrBefore(events, tx, 29) === 0, "hover selected a future event");
   assert(eventIndexAtOrBefore(events, tx, 30) === 1, "hover missed an exact event");
   assert(eventIndexAtOrBefore(events, tx, 100) === 2, "hover missed the final event");
-  assert(eventIndexNearPoint(events, tx, 31, 20, 20) === 1, "click hit-test missed a marker");
   assert(
-    eventIndexNearPoint(events, tx, 31, 35, 20) === null,
+    eventIndexNearPoint(events, tx, { x: 31, y: 20 }, 20) === 1,
+    "click hit-test missed a marker",
+  );
+  assert(
+    eventIndexNearPoint(events, tx, { x: 31, y: 35 }, 20) === null,
     "click hit-test ignored row distance",
   );
 
@@ -378,7 +771,7 @@ test("event hover selects the last visible event at or before the pointer", () =
     events: [events.events[0]!, events.events[1]!, { ...events.events[1]!, title: "latest" }],
   };
   assert(
-    eventIndexNearPoint(coincident, tx, 30, 20, 20) === 2,
+    eventIndexNearPoint(coincident, tx, { x: 30, y: 20 }, 20) === 2,
     "click hit-test did not choose the last coincident event",
   );
 });
@@ -456,10 +849,7 @@ test("broker read is side-effect-free and viewport subscriptions drive fetching"
     },
   };
   const broker = new Broker(fetcher, { now: () => 10_000 });
-  const request = {
-    evalTime: new Float64Array([0, 1_000, 2_000]),
-    maxSampleGapMs: 1_000,
-  };
+  const request = { evalTime: new Float64Array([0, 1_000, 2_000]), maxSampleGapMs: 1_000 };
 
   const empty = broker.read(request);
   assert(calls === 0, "read unexpectedly started a network request");
@@ -470,7 +860,7 @@ test("broker read is side-effect-free and viewport subscriptions drive fetching"
     () => notifications++,
   );
   assert(Number(calls) === 1, "subscription did not ensure its requested range");
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
   assert(notifications >= 1, "subscription was not notified when its read changed");
   const loaded = broker.read(request);
   approx(Math.exp(loaded.value[0]!), 100, 1e-10);
@@ -496,16 +886,16 @@ test("broker trusts the adapter plan, not irregular observation spacing", async 
   });
   const broker = new Broker(adapter, { now: () => 20_000 });
   broker.subscribe({ range: Interval.create(0, 10_000), maxDeltaTMs: 5_000 }, () => undefined);
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
 
   const result = broker.read({
     evalTime: new Float64Array([0, 5_000, 10_000]),
     maxSampleGapMs: 5_000,
   });
-  const ready = result.coverage.filter((segment) => segment.state === "ready");
+  const ready = result.coverage.filter(segment => segment.state === "ready");
   assert(ready.length > 0, "adapter observations were not cached");
   assert(
-    ready.every((segment) => segment.samplePeriodMs === 1_000),
+    ready.every(segment => segment.samplePeriodMs === 1_000),
     "broker inferred resolution from an irregular timestamp gap",
   );
 });
@@ -520,7 +910,7 @@ test("leaving now updates the adapter session instead of creating another subscr
       return {
         setDemands(demands) {
           const hasLiveDemand = demands.some(
-            (demand) => demand.range.start <= 10_000 && demand.range.end >= 10_000,
+            demand => demand.range.start <= 10_000 && demand.range.end >= 10_000,
           );
           if (hadLiveDemand && !hasLiveDemand) liveDisposed++;
           hadLiveDemand = hasLiveDemand;
@@ -570,17 +960,14 @@ test("future coverage is pending or watching without invalidating cached samples
   const adapter: SignalAdapter = {
     connect(nextSink) {
       sink = nextSink;
-      return {
-        setDemands: () => undefined,
-        clearCache: () => undefined,
-      };
+      return { setDemands: () => undefined, clearCache: () => undefined };
     },
   };
   const broker = new Broker(adapter, { now: () => 100 });
   const request = { evalTime: new Float64Array([50, 100, 150]), maxSampleGapMs: 10 };
   const pending = broker.read(request);
   assert(
-    pending.coverage.some((segment) => segment.state === "pending" && segment.range.start === 100),
+    pending.coverage.some(segment => segment.state === "pending" && segment.range.start === 100),
     "visible future was not marked pending",
   );
   const initialRevision = pending.sampleRevision;
@@ -589,9 +976,7 @@ test("future coverage is pending or watching without invalidating cached samples
   const watching = broker.read(request);
   assert(watching.sampleRevision === initialRevision, "status-only update invalidated samples");
   assert(
-    watching.coverage.some(
-      (segment) => segment.state === "watching" && segment.range.start === 100,
-    ),
+    watching.coverage.some(segment => segment.state === "watching" && segment.range.start === 100),
     "live future was not marked watching",
   );
   const delivery = {
@@ -716,19 +1101,15 @@ test("broker fetches finer data after coarse observations are cached", async () 
       for (let t = range.start - resolutionMs; t <= range.end; t += resolutionMs) {
         points.push({ t, price: 100 + t / 1_000_000 });
       }
-      return {
-        points,
-        resolutionHintMs: resolutionMs,
-        searchedInterval: range,
-      };
+      return { points, resolutionHintMs: resolutionMs, searchedInterval: range };
     },
   };
   const broker = new Broker(fetcher);
   const evalTime = new Float64Array([0, 5_000, 10_000]);
   broker.query({ evalTime, maxSampleGapMs: 5_000 });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
   broker.query({ evalTime, maxSampleGapMs: 1_000 });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
   assert(requests.includes(5_000), "coarse level was not fetched");
   assert(requests.includes(1_000), "fine level was suppressed by coarse coverage");
 });
@@ -744,15 +1125,12 @@ test("live adapter subscriptions fetch elapsed wall-clock time without UI reload
     },
   };
   const broker = new Broker(fetcher, { now: () => now });
-  broker.query({
-    evalTime: new Float64Array([0, 10_000, 20_000]),
-    maxSampleGapMs: 1_000,
-  });
+  broker.query({ evalTime: new Float64Array([0, 10_000, 20_000]), maxSampleGapMs: 1_000 });
   assert(requests[0]!.end === 10_000, "future time leaked into the fetch range");
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
 
   now = 12_000;
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await new Promise(resolve => setTimeout(resolve, 10));
   assert(requests.length >= 2, "adapter did not fetch elapsed wall-clock time");
   assert(
     requests[1]!.start <= 10_000 && requests[1]!.end >= 12_000,
@@ -780,7 +1158,7 @@ test("last-point expected lifetime suppresses moving-now micro-requests", async 
   const broker = new Broker(fetcher, { now: () => now });
   const evalTime = new Float64Array([0, 5, 10, 15]);
   broker.query({ evalTime, maxSampleGapMs: 5 });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
   assert(count(requests) === 1, "initial live request was not issued");
 
   now = 8;
@@ -790,7 +1168,7 @@ test("last-point expected lifetime suppresses moving-now micro-requests", async 
   assert(count(requests) === 1, "wall-clock movement refetched the same candle");
 
   now = 11.001;
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await new Promise(resolve => setTimeout(resolve, 10));
   assert(count(requests) === 2, "crossing the publication grace did not refresh");
   assert(
     requests[1]!.start <= 10 && requests[1]!.end >= 11.001,
@@ -823,14 +1201,14 @@ test("a lagging live endpoint is polled on its refresh cadence, not every redraw
     () => notifications++,
   );
   broker.query({ evalTime, maxSampleGapMs: 5_000 });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
 
   now = 10_003;
   broker.query({ evalTime, maxSampleGapMs: 5_000 });
   assert(count(requests) === 1, "redraw bypassed the live refresh lease");
 
   now = 10_007;
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await new Promise(resolve => setTimeout(resolve, 10));
   assert(notifications >= 2, "live refresh timer did not invalidate the subscriber");
   const polled = count(requests);
   assert(polled >= 2, "adapter did not poll the lagging live endpoint");
@@ -859,7 +1237,7 @@ test("follow-now demand updates keep one live lease and do not feed notification
     { range: Interval.create(2_000, 20_000), maxDeltaTMs: 1_000 },
     () => notifications++,
   );
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
   assert(calls === 1, "initial live lease did not fetch");
   const settledNotifications = notifications;
 
@@ -876,12 +1254,9 @@ test("follow-now demand updates keep one live lease and do not feed notification
     notifications === settledNotifications,
     `follow updates fed ${notifications - settledNotifications} status notifications back`,
   );
-  const status = broker.read({
-    evalTime: new Float64Array([0, now]),
-    maxSampleGapMs: 1_000,
-  });
+  const status = broker.read({ evalTime: new Float64Array([0, now]), maxSampleGapMs: 1_000 });
   assert(
-    status.coverage.some((segment) => segment.state === "watching"),
+    status.coverage.some(segment => segment.state === "watching"),
     "live lease was missing from acquisition diagnostics",
   );
   broker.close();
@@ -902,7 +1277,7 @@ test("empty coverage is classified by the native resolution actually searched", 
     { range: Interval.create(0, 5_000), maxDeltaTMs: 5_000 },
     () => undefined,
   );
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
 
   subscription.update({ range: Interval.create(0, 5_000), maxDeltaTMs: 1_500 });
   const view = broker.read({
@@ -911,7 +1286,7 @@ test("empty coverage is classified by the native resolution actually searched", 
   });
   assert(calls === 1, "native fine coverage was refetched for a nearby zoom level");
   assert(
-    view.coverage.some((segment) => segment.state === "empty"),
+    view.coverage.some(segment => segment.state === "empty"),
     "settled native-resolution coverage disappeared at a finer requested threshold",
   );
   broker.close();
@@ -941,7 +1316,7 @@ test("adapter expands tiny demands and broker caches the complete delivery", asy
     { range: Interval.create(50_000, 50_001), maxDeltaTMs: 1_000 },
     () => undefined,
   );
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
   const expanded = fetched as Interval | null;
   assert(
     expanded !== null && expanded.end - expanded.start >= 8_000,
@@ -967,8 +1342,8 @@ test("a demand ending at wall now remains historical", () => {
   const session = adapter.connect(
     {
       next: () => undefined,
-      status: (activities) => {
-        states.splice(0, states.length, ...activities.map((activity) => activity.state));
+      status: activities => {
+        states.splice(0, states.length, ...activities.map(activity => activity.state));
       },
       error: () => undefined,
     },
@@ -997,15 +1372,15 @@ test("adapter keeps a live lease warm for its configured grace period", async ()
   const session = adapter.connect(
     {
       next: () => undefined,
-      status: (activities) => {
-        latestStates = activities.map((activity) => activity.state);
+      status: activities => {
+        latestStates = activities.map(activity => activity.state);
       },
       error: () => undefined,
     },
     lifetime.signal,
   );
   session.setDemands([{ range: Interval.create(0, 20_000), maxDeltaTMs: 1_000 }]);
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
   session.setDemands([]);
   assert(latestStates.includes("watching"), "live lease closed without its grace period");
 
@@ -1031,15 +1406,15 @@ test("returned future points are discarded while the last valid sample is held",
   };
   const broker = new Broker(fetcher, {
     now: () => 7_500,
-    onWarning: (message) => warnings.push(message),
+    onWarning: message => warnings.push(message),
   });
   const evalTime = new Float64Array([0, 5_000, 10_000]);
   broker.query({ evalTime, maxSampleGapMs: 5_000 });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
   const result = broker.query({ evalTime, maxSampleGapMs: 5_000 });
-  const ready = result.coverage.filter((segment) => segment.state === "ready");
+  const ready = result.coverage.filter(segment => segment.state === "ready");
   assert(
-    ready.every((segment) => segment.range.end <= 7_500),
+    ready.every(segment => segment.range.end <= 7_500),
     "presented coverage entered the future",
   );
   assert(Number.isNaN(result.value[2]!), "future value was rendered");
@@ -1048,7 +1423,7 @@ test("returned future points are discarded while the last valid sample is held",
   assert(latest.t === 5_000, "future clamp selected the wrong timestamp");
   approx(Math.exp(latest.value), 11, 1e-12);
   assert(
-    warnings.some((message) => message.includes("10000")),
+    warnings.some(message => message.includes("10000")),
     "future API point was silent",
   );
 });
@@ -1146,7 +1521,7 @@ test("searched market closures do not create an intermediate-zoom fetch storm", 
   const broker = new Broker(fetcher, { now: () => 11_000 });
   const evalTime = new Float64Array([0, 5_500, 11_000]);
   broker.query({ evalTime, maxSampleGapMs: 1_001.25 });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
 
   const intermediate = broker.query({ evalTime, maxSampleGapMs: 5_432.1 });
   assert(calls === 1, `market closure triggered ${calls - 1} redundant request(s)`);
@@ -1174,7 +1549,7 @@ test("broker trusts the returned searched range, not the requested range", async
   const broker = new Broker(fetcher, { now: () => 20_000 });
   const evalTime = new Float64Array([0, 5_000, 10_000]);
   broker.query({ evalTime, maxSampleGapMs: 1_000 });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
   broker.query({ evalTime, maxSampleGapMs: 1_000 });
   assert(requests.length === 2, `bounded scheduler started ${requests.length} calls`);
   assert(
@@ -1203,7 +1578,7 @@ test("empty and coarse evidence never suppress a finer request", async () => {
   const broker = new Broker(fetcher, { now: () => 10_000 });
   const evalTime = new Float64Array([0, 5_000, 10_000]);
   broker.query({ evalTime, maxSampleGapMs: 1_000 });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
 
   broker.query({ evalTime, maxSampleGapMs: 5_000 });
   assert(count(requests) === 1, "observed finer/equal data did not satisfy coarse query");
@@ -1223,7 +1598,7 @@ test("finer pending work suppresses only coarser duplicate requests", () => {
   const evalTime = new Float64Array([0, 5_000, 10_000]);
   const first = broker.query({ evalTime, maxSampleGapMs: 1_000 });
   assert(
-    first.coverage.some((segment) => segment.state === "pending"),
+    first.coverage.some(segment => segment.state === "pending"),
     "pending hidden",
   );
   broker.query({ evalTime, maxSampleGapMs: 5_000 });
@@ -1250,7 +1625,7 @@ test("moving demand aborts stale serialized work before starting the latest rang
           reject(new DOMException("Disposed", "AbortError"));
         };
         signal.addEventListener("abort", abort, { once: true });
-        finish = (result) => {
+        finish = result => {
           signal.removeEventListener("abort", abort);
           activeCalls--;
           resolve(result);
@@ -1264,7 +1639,7 @@ test("moving demand aborts stale serialized work before starting the latest rang
   assert(calls === 2, "latest viewport did not replace stale serialized work");
   assert(aborted === 1 && maxActiveCalls === 1, "stale and current requests overlapped");
   finish({ points: [], searchedInterval: Interval.create(2_000, 3_000) });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
   broker.close();
 });
 
@@ -1280,7 +1655,7 @@ test("source-wide backoff suppresses new moving-tail ranges", async () => {
   };
   const broker = new Broker(fetcher, { now: () => 3_000, onError: () => undefined });
   broker.query({ evalTime: new Float64Array([0, 1_000]), maxSampleGapMs: 1_000 });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
   broker.query({ evalTime: new Float64Array([2_000, 3_000]), maxSampleGapMs: 1_000 });
   assert(calls === 1, "a disjoint moving-tail range bypassed source-wide backoff");
   broker.close();
@@ -1290,30 +1665,26 @@ test("subscriber failures are not reclassified as fetch failures", async () => {
   const errors: string[] = [];
   const fetcher: Fetcher = {
     async fetchInterval({ range }) {
-      return {
-        points: [{ t: 500, price: 100 }],
-        resolutionHintMs: 1_000,
-        searchedInterval: range,
-      };
+      return { points: [{ t: 500, price: 100 }], resolutionHintMs: 1_000, searchedInterval: range };
     },
   };
   const broker = new Broker(fetcher, {
     now: () => 1_000,
-    onError: (message) => errors.push(message),
+    onError: message => errors.push(message),
   });
   const query = { evalTime: new Float64Array([0, 1_000]), maxSampleGapMs: 1_000 };
   broker.subscribe({ range: Interval.create(0, 1_000), maxDeltaTMs: 1_000 }, () => {
     throw new Error("UI failed");
   });
   broker.query(query);
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
   const result = broker.query(query);
   assert(
-    result.coverage.every((segment) => segment.state !== "failed"),
+    result.coverage.every(segment => segment.state !== "failed"),
     "subscriber exception became a failed exchange range",
   );
   assert(errors.includes("[Broker] subscriber failed"), "subscriber exception was hidden");
-  assert(!errors.some((message) => message.includes("fetch failed")), "fetch was blamed for UI");
+  assert(!errors.some(message => message.includes("fetch failed")), "fetch was blamed for UI");
   const cached = broker.cachedInterval();
   assert(
     cached !== null && cached.start === 500 && cached.end === 1_500,
@@ -1327,7 +1698,7 @@ test("a late coarse response cannot overwrite an earlier fine response", async (
   let resolveFine!: (result: FetchIntervalResult) => void;
   const fetcher: Fetcher = {
     fetchInterval({ maxDeltaTMs }) {
-      return new Promise((resolve) => {
+      return new Promise(resolve => {
         if (maxDeltaTMs === 5_000) resolveCoarse = resolve;
         else resolveFine = resolve;
       });
@@ -1349,7 +1720,7 @@ test("a late coarse response cannot overwrite an earlier fine response", async (
     ],
     searchedInterval: Interval.create(0, 5_000),
   });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
   resolveCoarse({
     points: [
       { t: 0, price: 10 },
@@ -1357,7 +1728,7 @@ test("a late coarse response cannot overwrite an earlier fine response", async (
     ],
     searchedInterval: Interval.create(0, 5_000),
   });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
 
   const result = broker.query({ evalTime, maxSampleGapMs: 1_000 });
   approx(Math.exp(result.value[1]!), 101, 1e-10);
@@ -1367,7 +1738,7 @@ test("clearing the price cache ignores stale in-flight responses", async () => {
   const resolvers: ((result: FetchIntervalResult) => void)[] = [];
   const fetcher: Fetcher = {
     fetchInterval() {
-      return new Promise((resolve) => resolvers.push(resolve));
+      return new Promise(resolve => resolvers.push(resolve));
     },
   };
   const broker = new Broker(fetcher, { now: () => 1_000 });
@@ -1384,7 +1755,7 @@ test("clearing the price cache ignores stale in-flight responses", async () => {
     ],
     searchedInterval: Interval.create(0, 1_000),
   });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
   const beforeFresh = broker.query({ evalTime, maxSampleGapMs: 1_000 });
   assert(beforeFresh.value.every(Number.isNaN), "stale response repopulated the cleared cache");
 
@@ -1395,7 +1766,7 @@ test("clearing the price cache ignores stale in-flight responses", async () => {
     ],
     searchedInterval: Interval.create(0, 1_000),
   });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
   const fresh = broker.query({ evalTime, maxSampleGapMs: 1_000 });
   approx(Math.exp(fresh.value[0]!), 100, 1e-10);
 });
@@ -1421,7 +1792,7 @@ test("clearing the event cache cancels stale walks and ignores their callbacks",
     () => ({
       failureReason: null,
       walk(_targetMin, onEvents, signal) {
-        return new Promise((resolve) => runs.push({ emit: onEvents, resolve, signal }));
+        return new Promise(resolve => runs.push({ emit: onEvents, resolve, signal }));
       },
     }),
     { onDebug: () => undefined },
@@ -1435,10 +1806,10 @@ test("clearing the event cache cancels stale walks and ignores their callbacks",
 
   runs[0]!.emit([{ t: 400, title: "stale", link: "old", summary: "", feedId: feed.id }]);
   runs[0]!.resolve("exhausted");
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
   runs[1]!.emit([{ t: 500, title: "fresh", link: "new", summary: "", feedId: feed.id }]);
   runs[1]!.resolve("exhausted");
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
 
   const result = broker.query(range);
   assert(
@@ -1462,10 +1833,7 @@ test("Binance adapter maps arbitrary symbols and range resolution", async () => 
   }) as typeof fetch;
   try {
     const adapter = createBinanceAdapter({ symbol: "ethusdt" });
-    const demand = {
-      range: Interval.create(0, 7_200_000),
-      maxDeltaTMs: 3_600_000,
-    };
+    const demand = { range: Interval.create(0, 7_200_000), maxDeltaTMs: 3_600_000 };
     const result = await fetchOnce(adapter, demand);
     const url = new URL(requestedUrl);
     assert(url.searchParams.get("symbol") === "ETHUSDT", "symbol was not normalized");
@@ -1486,12 +1854,7 @@ test("Yahoo adapter supports WTI and Brent futures with range-aware intervals", 
     return new Response(
       JSON.stringify({
         chart: {
-          result: [
-            {
-              timestamp: [0, 3_600],
-              indicators: { quote: [{ open: [75.5, 76.25] }] },
-            },
-          ],
+          result: [{ timestamp: [0, 3_600], indicators: { quote: [{ open: [75.5, 76.25] }] } }],
           error: null,
         },
       }),
@@ -1500,10 +1863,7 @@ test("Yahoo adapter supports WTI and Brent futures with range-aware intervals", 
   }) as typeof fetch;
   try {
     const adapter = createYahooAdapter({ symbol: "bz=f", now: () => 7_200_000 });
-    const demand = {
-      range: Interval.create(0, 7_200_000),
-      maxDeltaTMs: 3_600_000,
-    };
+    const demand = { range: Interval.create(0, 7_200_000), maxDeltaTMs: 3_600_000 };
     const result = await fetchOnce(adapter, demand);
     const target = new URL(requestedUrl).searchParams.get("url") ?? "";
     assert(target.includes("/BZ%3DF?"), "Brent symbol was not encoded in Yahoo request");
@@ -1511,32 +1871,22 @@ test("Yahoo adapter supports WTI and Brent futures with range-aware intervals", 
     assert(result.samples.length === 2 && result.samples[1]!.t === 3_600_000, "bad Yahoo rows");
 
     const secondInterval = Interval.create(1_000, 7_200_000);
-    const cached = await fetchOnce(adapter, {
-      range: secondInterval,
-      maxDeltaTMs: 3_600_000,
-    });
+    const cached = await fetchOnce(adapter, { range: secondInterval, maxDeltaTMs: 3_600_000 });
     assert(calls === 1, "same Yahoo candle window caused another HTTP request");
     assert(
       cached.searchedInterval.start <= secondInterval.start &&
-      cached.searchedInterval.end >= secondInterval.end,
+        cached.searchedInterval.end >= secondInterval.end,
       "cached expanded response did not cover the requested range",
     );
 
     const cacheLifetime = new AbortController();
     const cacheSession = adapter.connect(
-      {
-        next: () => undefined,
-        status: () => undefined,
-        error: () => undefined,
-      },
+      { next: () => undefined, status: () => undefined, error: () => undefined },
       cacheLifetime.signal,
     );
     cacheSession.clearCache();
     cacheLifetime.abort();
-    await fetchOnce(adapter, {
-      range: secondInterval,
-      maxDeltaTMs: 3_600_000,
-    });
+    await fetchOnce(adapter, { range: secondInterval, maxDeltaTMs: 3_600_000 });
     assert(Number(calls) === 2, "explicit reload did not clear Yahoo's response cache");
   } finally {
     globalThis.fetch = originalFetch;
@@ -1552,10 +1902,7 @@ test("Yahoo adapter supports WTI and Brent futures with range-aware intervals", 
 test("Yahoo honors Retry-After on HTTP 429", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () =>
-    new Response("rate limited", {
-      status: 429,
-      headers: { "retry-after": "7" },
-    })) as typeof fetch;
+    new Response("rate limited", { status: 429, headers: { "retry-after": "7" } })) as typeof fetch;
   try {
     const adapter = createYahooAdapter({ symbol: "CL=F", now: () => 120_000 });
     const retry = await retryOnce(adapter, {
@@ -1594,14 +1941,14 @@ test("broker exposes failures and uses the fetcher's retry policy", async () => 
   const broker = new Broker(fetcher, { onError: () => undefined });
   const evalTime = new Float64Array([0, 1_000]);
   broker.query({ evalTime, maxSampleGapMs: 1_000 });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
   const result = broker.query({ evalTime, maxSampleGapMs: 1_000 });
-  const failed = result.coverage.find((segment) => segment.state === "failed");
+  const failed = result.coverage.find(segment => segment.state === "failed");
   assert(failed !== undefined, "failed request was still presented as pending");
   assert(failed.message === "upstream unavailable", "failure detail was lost");
   broker.query({ evalTime, maxSampleGapMs: 1_000 });
   assert(Number(calls) === 1, "failure backoff did not suppress a retry");
-  await new Promise((resolve) => setTimeout(resolve, 120));
+  await new Promise(resolve => setTimeout(resolve, 120));
   broker.query({ evalTime, maxSampleGapMs: 1_000 });
   assert(Number(calls) === 2, "request did not retry after adapter backoff elapsed");
   broker.close();

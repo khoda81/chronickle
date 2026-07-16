@@ -422,10 +422,10 @@ class PollingSession implements AdapterSession {
     let batch: AdapterBatch;
     try {
       batch = await this.loader.fetchInterval(running.work.plan, running.controller.signal);
-      if (this.active !== running) return;
+      if (this.signal.aborted || this.active !== running) return;
       validateBatch(running.work.requiredInterval, batch);
     } catch (error) {
-      if (this.active !== running) return;
+      if (this.signal.aborted || this.active !== running || isAbort(error)) return;
       this.failWork(running.work, error);
       return;
     }
@@ -433,11 +433,12 @@ class PollingSession implements AdapterSession {
     // Sink failures are consumer bugs, not acquisition failures. Keep delivery
     // outside the loader retry boundary so they are never blamed on the source.
     this.finishWork(running.work, batch);
-    if (this.active !== running) return;
+    if (this.signal.aborted || this.active !== running) return;
     this.active = null;
     this.emitStatus();
     this.reconcile();
   }
+
   private finishWork(work: Work, batch: AdapterBatch): void {
     // Commit coordinator state before delivery. Sink callbacks may synchronously
     // clear the cache or replace demands; those operations must win reentrantly.
@@ -486,10 +487,8 @@ class PollingSession implements AdapterSession {
   }
 
   private abortActive(): void {
-    const active = this.active;
+    if (this.active?.state === "fetching") this.active.controller.abort();
     this.active = null;
-
-    if (active?.state === "fetching") active.controller.abort();
   }
 }
 
@@ -613,6 +612,10 @@ function defaultPollDelay(resolutionMs: number): number {
 
 function validDelay(value: number): boolean {
   return value >= 0 && Number.isFinite(value);
+}
+
+function isAbort(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 function positiveFinite(value: number, name: string): number {

@@ -1,4 +1,5 @@
 import type { TimelineOverlaySink } from "../../engine/timeline.ts";
+import type { MutableCanvasPoint } from "../../engine/coordinates.ts";
 import { TIMELINE_OVERLAY_METRICS } from "../../ui/timelineOverlayMetrics.ts";
 
 export type TooltipPlacement = "left" | "right";
@@ -86,8 +87,7 @@ export class TimelineOverlayController implements TimelineOverlaySink {
   private timeHover: HTMLDivElement | null = null;
   private eventTooltip: HTMLDivElement | null = null;
   private eventTooltipVisible = false;
-  private eventTooltipX = 0;
-  private eventTooltipY = 0;
+  private readonly eventTooltipAnchor: MutableCanvasPoint = { x: 0, y: 0 };
   private eventTooltipViewportWidth = 0;
   private eventTooltipViewportHeight = 0;
   private readonly rows = new Map<string, RowElements>();
@@ -186,8 +186,8 @@ export class TimelineOverlayController implements TimelineOverlaySink {
   ): void {
     this.eventTooltipVisible = visible;
     if (!visible) return;
-    this.eventTooltipX = x;
-    this.eventTooltipY = y;
+    this.eventTooltipAnchor.x = x;
+    this.eventTooltipAnchor.y = y;
     this.eventTooltipViewportWidth = viewportWidth;
     this.eventTooltipViewportHeight = viewportHeight;
     this.positionEventTooltip();
@@ -238,8 +238,8 @@ export class TimelineOverlayController implements TimelineOverlaySink {
     const tooltip = this.eventTooltip;
     if (tooltip === null || !this.eventTooltipVisible) return;
     const position = placeTooltip({
-      anchorX: this.eventTooltipX,
-      anchorY: this.eventTooltipY,
+      anchorX: this.eventTooltipAnchor.x,
+      anchorY: this.eventTooltipAnchor.y,
       width: tooltip.offsetWidth,
       height: tooltip.offsetHeight,
       viewportWidth: this.eventTooltipViewportWidth,
