@@ -204,7 +204,12 @@ function heldSegment(
   value: number,
   resolutionMs: number,
 ) {
-  return { rangeStart, rangeEnd, sampleTime, value, resolutionMs } as const;
+  return {
+    range: Interval.create(rangeStart, rangeEnd),
+    sampleTime,
+    value,
+    resolutionMs,
+  } as const;
 }
 
 function assertPoint(

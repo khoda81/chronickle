@@ -1,46 +1,53 @@
+import { lowerBoundBy, upperBoundBy } from "../../core/binarySearch.ts";
 import { Interval } from "../../core/interval.ts";
 import type { MutableSample } from "./sample.ts";
 
-const BLOCK_CAPACITY = 512;
+const MAX_BLOCK_LENGTH = 512;
 
 /**
- * Zero-order-held reconstruction of one observed sample over `[rangeStart, rangeEnd)`.
+ * Zero-order-held reconstruction of one observed sample over `range`.
  *
  * `sampleTime` identifies the observation that supplies `value`. It may precede
- * `rangeStart` when overlaying finer evidence slices an existing segment.
+ * `range.start` when overlaying finer evidence slices an existing segment.
  */
 export interface HeldSignalSegment {
-  readonly rangeStart: number;
-  readonly rangeEnd: number;
+  readonly range: Interval;
   readonly sampleTime: number;
   readonly value: number;
   readonly resolutionMs: number;
 }
 
 export interface ResolutionSpan {
-  readonly startTime: number;
-  readonly endTime: number;
+  readonly range: Interval;
   readonly resolutionMs: number;
 }
 
+/**
+ * Immutable structure-of-arrays leaf.
+ *
+ * Invariants:
+ * - every column has the same non-zero length, at most `MAX_BLOCK_LENGTH`;
+ * - `rangeStart` is strictly increasing;
+ * - every segment is non-empty and segments never overlap;
+ * - `coarsestResolutionMs` is the maximum value in `resolutionMs`;
+ * - `contiguous` iff each segment ends where the following segment starts.
+ */
 interface SegmentBlock {
   readonly rangeStart: Float64Array;
   readonly rangeEnd: Float64Array;
   readonly sampleTime: Float64Array;
   readonly value: Float64Array;
   readonly resolutionMs: Float64Array;
-  readonly length: number;
-  readonly minTime: number;
-  readonly maxTime: number;
-  readonly maxResolutionMs: number;
-  /** Gaps between segments inside this block; excludes the preceding block boundary. */
-  readonly internalGapCount: number;
+  readonly coarsestResolutionMs: number;
+  readonly contiguous: boolean;
 }
 
 interface SegmentLocation {
   readonly blockIndex: number;
   readonly segmentIndex: number;
 }
+
+const numberValue = (value: number): number => value;
 
 /**
  * Selected signal reconstruction in sorted, cache-friendly typed-array blocks.
@@ -66,7 +73,7 @@ export class SignalSegmentStore {
     const first = this.blocks[0];
     const last = this.blocks[this.blocks.length - 1];
     return first !== undefined && last !== undefined
-      ? Interval.create(first.minTime, last.maxTime)
+      ? Interval.create(blockStart(first), blockEnd(last))
       : null;
   }
 
@@ -91,15 +98,13 @@ export class SignalSegmentStore {
       return true;
     }
 
-    const incomingMin = incoming[0]!.rangeStart;
-    const incomingMax = incoming[incoming.length - 1]!.rangeEnd;
-    const firstOverlap = this.firstBlockEndingAfter(incomingMin);
-    const firstAfter = this.firstBlockStartingAtOrAfter(incomingMax);
+    const incomingRange = Interval.hull(incoming[0]!.range, incoming[incoming.length - 1]!.range);
+    const overlapping = this.overlappingBlocks(incomingRange);
 
     // Pull in one neighboring leaf on each side. This coalesces small boundary
     // fragments and keeps the leaf set dense after repeated live updates.
-    const spliceStart = Math.max(0, Math.min(firstOverlap, this.blocks.length) - 1);
-    const spliceEnd = Math.min(this.blocks.length, Math.max(firstOverlap, firstAfter) + 1);
+    const spliceStart = Math.max(0, overlapping.start - 1);
+    const spliceEnd = Math.min(this.blocks.length, overlapping.end + 1);
     const existing = flattenBlocks(this.blocks, spliceStart, spliceEnd);
     const merged = overlay(existing, incoming);
     if (segmentsEqual(existing, merged)) return false;
@@ -137,40 +142,37 @@ export class SignalSegmentStore {
     range: Interval,
   ): void {
     validateResolution(maxResolutionMs);
-    if (this.blocks.length === 0) return;
-    const firstBlock = this.firstBlockEndingAtOrAfter(range.start);
-    const lastBlock = this.lastBlockStartingAtOrBefore(range.end);
-    if (firstBlock > lastBlock) return;
+    const overlapping = this.overlappingBlocks(range);
+    if (Interval.isEmpty(overlapping)) return;
 
-    let runMin = NaN;
-    let runMax = NaN;
-    const append = (min: number, max: number): void => {
-      if (!(min < max)) return;
-      if (Number.isFinite(runMax) && min <= runMax) {
-        runMax = Math.max(runMax, max);
+    let run: Interval | null = null;
+    const append = (next: Interval): void => {
+      if (Interval.isEmpty(next)) return;
+      if (run === null) {
+        run = next;
         return;
       }
-      if (Number.isFinite(runMin)) out.add(Interval.create(runMin, runMax));
-      runMin = min;
-      runMax = max;
+      const merged = Interval.merge(run, next);
+      if (merged !== null) {
+        run = merged;
+        return;
+      }
+      out.add(run);
+      run = next;
     };
 
-    for (let blockIndex = firstBlock; blockIndex <= lastBlock; blockIndex++) {
+    for (let blockIndex = overlapping.start; blockIndex < overlapping.end; blockIndex++) {
       const block = this.blocks[blockIndex]!;
-      if (block.maxTime < range.start || block.minTime > range.end) continue;
-      if (block.maxResolutionMs <= maxResolutionMs && block.internalGapCount === 0) {
-        append(Math.max(range.start, block.minTime), Math.min(range.end, block.maxTime));
+      if (block.coarsestResolutionMs <= maxResolutionMs && block.contiguous) {
+        append(Interval.intersection(range, blockRange(block)));
         continue;
       }
-      for (let segmentIndex = 0; segmentIndex < block.length; segmentIndex++) {
+      for (let segmentIndex = 0; segmentIndex < blockLength(block); segmentIndex++) {
         if (block.resolutionMs[segmentIndex]! > maxResolutionMs) continue;
-        append(
-          Math.max(range.start, block.rangeStart[segmentIndex]!),
-          Math.min(range.end, block.rangeEnd[segmentIndex]!),
-        );
+        append(Interval.intersection(range, segmentRange(block, segmentIndex)));
       }
     }
-    if (Number.isFinite(runMin)) out.add(Interval.create(runMin, runMax));
+    if (run !== null) out.add(run);
   }
 
   /** Resolution at cell midpoints, coalesced to at most one span per cell. */
@@ -178,21 +180,23 @@ export class SignalSegmentStore {
     const out: ResolutionSpan[] = [];
     if (evalTime.length < 2) return out;
     for (let index = 0; index + 1 < evalTime.length; index++) {
-      const min = evalTime[index]!;
-      const max = Math.min(evalTime[index + 1]!, wallNow);
-      if (!(min < max)) continue;
-      const location = this.findContainingSegment(min + (max - min) / 2);
+      const range = Interval.create(evalTime[index]!, Math.min(evalTime[index + 1]!, wallNow));
+      if (Interval.isEmpty(range)) continue;
+      const location = this.findContainingSegment(range.start + Interval.span(range) / 2);
       if (location === null) continue;
       const resolutionMs = this.blocks[location.blockIndex]!.resolutionMs[location.segmentIndex]!;
       const previous = out[out.length - 1];
       if (
         previous !== undefined &&
-        previous.endTime === min &&
+        Interval.touches(previous.range, range) &&
         previous.resolutionMs === resolutionMs
       ) {
-        out[out.length - 1] = { ...previous, endTime: max };
+        out[out.length - 1] = {
+          range: Interval.hull(previous.range, range),
+          resolutionMs,
+        };
       } else {
-        out.push({ startTime: min, endTime: max, resolutionMs });
+        out.push({ range, resolutionMs });
       }
     }
     return out;
@@ -206,93 +210,63 @@ export class SignalSegmentStore {
   }
 
   private findSegmentStartingAtOrBefore(t: number): SegmentLocation | null {
-    if (this.blocks.length === 0) return null;
-    let lo = 0;
-    let hi = this.blocks.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1;
-      if (this.blocks[mid]!.minTime <= t) lo = mid + 1;
-      else hi = mid;
-    }
-    const blockIndex = lo - 1;
+    const blockIndex = upperBoundBy(this.blocks, t, blockStart) - 1;
     if (blockIndex < 0) return null;
     const block = this.blocks[blockIndex]!;
-    let innerLo = 0;
-    let innerHi = block.length;
-    while (innerLo < innerHi) {
-      const mid = (innerLo + innerHi) >>> 1;
-      if (block.rangeStart[mid]! <= t) innerLo = mid + 1;
-      else innerHi = mid;
-    }
-    const segmentIndex = innerLo - 1;
+    const segmentIndex = upperBoundBy(block.rangeStart, t, numberValue) - 1;
     return segmentIndex >= 0 ? { blockIndex, segmentIndex } : null;
   }
 
-  private firstBlockEndingAfter(t: number): number {
-    let lo = 0;
-    let hi = this.blocks.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1;
-      if (this.blocks[mid]!.maxTime <= t) lo = mid + 1;
-      else hi = mid;
-    }
-    return lo;
+  /** Exact half-open block index interval whose block hulls overlap `range`. */
+  private overlappingBlocks(range: Interval): Interval {
+    if (Interval.isEmpty(range)) return Interval.empty(0);
+    return Interval.create(
+      upperBoundBy(this.blocks, range.start, blockEnd),
+      lowerBoundBy(this.blocks, range.end, blockStart),
+    );
   }
+}
 
-  private firstBlockEndingAtOrAfter(t: number): number {
-    let lo = 0;
-    let hi = this.blocks.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1;
-      if (this.blocks[mid]!.maxTime < t) lo = mid + 1;
-      else hi = mid;
-    }
-    return lo;
-  }
+function blockLength(block: SegmentBlock): number {
+  return block.rangeStart.length;
+}
 
-  private firstBlockStartingAtOrAfter(t: number): number {
-    let lo = 0;
-    let hi = this.blocks.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1;
-      if (this.blocks[mid]!.minTime < t) lo = mid + 1;
-      else hi = mid;
-    }
-    return lo;
-  }
+function blockStart(block: SegmentBlock): number {
+  return block.rangeStart[0]!;
+}
 
-  private lastBlockStartingAtOrBefore(t: number): number {
-    let lo = 0;
-    let hi = this.blocks.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1;
-      if (this.blocks[mid]!.minTime <= t) lo = mid + 1;
-      else hi = mid;
-    }
-    return lo - 1;
-  }
+function blockEnd(block: SegmentBlock): number {
+  return block.rangeEnd[blockLength(block) - 1]!;
+}
+
+function blockRange(block: SegmentBlock): Interval {
+  return Interval.create(blockStart(block), blockEnd(block));
+}
+
+function segmentRange(block: SegmentBlock, index: number): Interval {
+  return Interval.create(block.rangeStart[index]!, block.rangeEnd[index]!);
 }
 
 function chunkSegments(segments: readonly HeldSignalSegment[]): SegmentBlock[] {
   const blocks: SegmentBlock[] = [];
-  for (let offset = 0; offset < segments.length; offset += BLOCK_CAPACITY) {
-    const length = Math.min(BLOCK_CAPACITY, segments.length - offset);
+  for (let offset = 0; offset < segments.length; offset += MAX_BLOCK_LENGTH) {
+    const length = Math.min(MAX_BLOCK_LENGTH, segments.length - offset);
     const rangeStart = new Float64Array(length);
     const rangeEnd = new Float64Array(length);
     const sampleTime = new Float64Array(length);
     const value = new Float64Array(length);
     const resolutionMs = new Float64Array(length);
-    let maxResolutionMs = Number.NEGATIVE_INFINITY;
-    let internalGapCount = 0;
+    let coarsestResolutionMs = Number.NEGATIVE_INFINITY;
+    let contiguous = true;
     for (let index = 0; index < length; index++) {
       const segment = segments[offset + index]!;
-      rangeStart[index] = segment.rangeStart;
-      rangeEnd[index] = segment.rangeEnd;
+      rangeStart[index] = segment.range.start;
+      rangeEnd[index] = segment.range.end;
       sampleTime[index] = segment.sampleTime;
       value[index] = segment.value;
       resolutionMs[index] = segment.resolutionMs;
-      maxResolutionMs = Math.max(maxResolutionMs, segment.resolutionMs);
-      if (index > 0 && rangeEnd[index - 1]! < segment.rangeStart) internalGapCount++;
+      coarsestResolutionMs = Math.max(coarsestResolutionMs, segment.resolutionMs);
+      if (index > 0 && rangeEnd[index - 1]! !== segment.range.start) contiguous = false;
     }
     blocks.push({
       rangeStart,
@@ -300,11 +274,8 @@ function chunkSegments(segments: readonly HeldSignalSegment[]): SegmentBlock[] {
       sampleTime,
       value,
       resolutionMs,
-      length,
-      minTime: rangeStart[0]!,
-      maxTime: rangeEnd[length - 1]!,
-      maxResolutionMs,
-      internalGapCount,
+      coarsestResolutionMs,
+      contiguous,
     });
   }
   return blocks;
@@ -318,10 +289,9 @@ function flattenBlocks(
   const out: HeldSignalSegment[] = [];
   for (let blockIndex = start; blockIndex < end; blockIndex++) {
     const block = blocks[blockIndex]!;
-    for (let segmentIndex = 0; segmentIndex < block.length; segmentIndex++) {
+    for (let segmentIndex = 0; segmentIndex < blockLength(block); segmentIndex++) {
       out.push({
-        rangeStart: block.rangeStart[segmentIndex]!,
-        rangeEnd: block.rangeEnd[segmentIndex]!,
+        range: segmentRange(block, segmentIndex),
         sampleTime: block.sampleTime[segmentIndex]!,
         value: block.value[segmentIndex]!,
         resolutionMs: block.resolutionMs[segmentIndex]!,
@@ -338,27 +308,29 @@ function overlay(
   const out: HeldSignalSegment[] = [];
   let existingIndex = 0;
   let incomingIndex = 0;
-  let cursor = Math.min(existing[0]?.rangeStart ?? Infinity, incoming[0]?.rangeStart ?? Infinity);
+  let cursor = Math.min(existing[0]?.range.start ?? Infinity, incoming[0]?.range.start ?? Infinity);
 
   while (Number.isFinite(cursor)) {
-    while (existingIndex < existing.length && existing[existingIndex]!.rangeEnd <= cursor) {
+    while (existingIndex < existing.length && existing[existingIndex]!.range.end <= cursor) {
       existingIndex++;
     }
-    while (incomingIndex < incoming.length && incoming[incomingIndex]!.rangeEnd <= cursor) {
+    while (incomingIndex < incoming.length && incoming[incomingIndex]!.range.end <= cursor) {
       incomingIndex++;
     }
 
     const existingActive =
-      existingIndex < existing.length && existing[existingIndex]!.rangeStart <= cursor;
+      existingIndex < existing.length && Interval.contains(existing[existingIndex]!.range, cursor);
     const incomingActive =
-      incomingIndex < incoming.length && incoming[incomingIndex]!.rangeStart <= cursor;
+      incomingIndex < incoming.length && Interval.contains(incoming[incomingIndex]!.range, cursor);
     let next = Infinity;
-    if (existingActive) next = Math.min(next, existing[existingIndex]!.rangeEnd);
-    else if (existingIndex < existing.length)
-      next = Math.min(next, existing[existingIndex]!.rangeStart);
-    if (incomingActive) next = Math.min(next, incoming[incomingIndex]!.rangeEnd);
-    else if (incomingIndex < incoming.length)
-      next = Math.min(next, incoming[incomingIndex]!.rangeStart);
+    if (existingIndex < existing.length) {
+      const range = existing[existingIndex]!.range;
+      next = Math.min(next, existingActive ? range.end : range.start);
+    }
+    if (incomingIndex < incoming.length) {
+      const range = incoming[incomingIndex]!.range;
+      next = Math.min(next, incomingActive ? range.end : range.start);
+    }
     if (!Number.isFinite(next)) break;
     if (!(next > cursor)) {
       throw new Error(`SignalSegmentStore.overlay: stalled at ${cursor} -> ${next}`);
@@ -371,8 +343,7 @@ function overlay(
           incoming[incomingIndex]!.resolutionMs <= existing[existingIndex]!.resolutionMs);
       const source = useIncoming ? incoming[incomingIndex]! : existing[existingIndex]!;
       appendSlice(out, {
-        rangeStart: cursor,
-        rangeEnd: next,
+        range: Interval.create(cursor, next),
         sampleTime: source.sampleTime,
         value: source.value,
         resolutionMs: source.resolutionMs,
@@ -387,12 +358,15 @@ function appendSlice(out: HeldSignalSegment[], segment: HeldSignalSegment): void
   const previous = out[out.length - 1];
   if (
     previous !== undefined &&
-    previous.rangeEnd === segment.rangeStart &&
+    Interval.touches(previous.range, segment.range) &&
     previous.sampleTime === segment.sampleTime &&
     previous.value === segment.value &&
     previous.resolutionMs === segment.resolutionMs
   ) {
-    out[out.length - 1] = { ...previous, rangeEnd: segment.rangeEnd };
+    out[out.length - 1] = {
+      ...previous,
+      range: Interval.hull(previous.range, segment.range),
+    };
   } else {
     out.push(segment);
   }
@@ -404,8 +378,8 @@ function segmentsEqual(a: readonly HeldSignalSegment[], b: readonly HeldSignalSe
     const left = a[index]!;
     const right = b[index]!;
     if (
-      left.rangeStart !== right.rangeStart ||
-      left.rangeEnd !== right.rangeEnd ||
+      left.range.start !== right.range.start ||
+      left.range.end !== right.range.end ||
       left.sampleTime !== right.sampleTime ||
       left.value !== right.value ||
       left.resolutionMs !== right.resolutionMs
@@ -417,27 +391,23 @@ function segmentsEqual(a: readonly HeldSignalSegment[], b: readonly HeldSignalSe
 }
 
 function validateIncoming(segments: readonly HeldSignalSegment[]): void {
-  let previousEnd = Number.NEGATIVE_INFINITY;
+  let previous: HeldSignalSegment | undefined;
   for (let index = 0; index < segments.length; index++) {
     const segment = segments[index]!;
-    if (
-      !Number.isFinite(segment.rangeStart) ||
-      !Number.isFinite(segment.rangeEnd) ||
-      !(segment.rangeStart < segment.rangeEnd)
-    ) {
-      throw new Error(`SignalSegmentStore.insertBatch: invalid range at ${index}`);
+    if (Interval.isEmpty(segment.range)) {
+      throw new Error(`SignalSegmentStore.insertBatch: empty range at ${index}`);
     }
-    if (!Number.isFinite(segment.sampleTime) || segment.sampleTime > segment.rangeStart) {
+    if (!Number.isFinite(segment.sampleTime) || segment.sampleTime > segment.range.start) {
       throw new Error(`SignalSegmentStore.insertBatch: invalid sample time at ${index}`);
     }
     if (!Number.isFinite(segment.value)) {
       throw new Error(`SignalSegmentStore.insertBatch: non-finite value at ${index}`);
     }
     validateResolution(segment.resolutionMs);
-    if (segment.rangeStart < previousEnd) {
-      throw new Error(`SignalSegmentStore.insertBatch: overlapping incoming segments at ${index}`);
+    if (previous !== undefined && !Interval.isBefore(previous.range, segment.range)) {
+      throw new Error(`SignalSegmentStore.insertBatch: unsorted or overlapping range at ${index}`);
     }
-    previousEnd = segment.rangeEnd;
+    previous = segment;
   }
 }
 

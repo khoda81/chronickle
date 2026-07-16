@@ -1,3 +1,5 @@
+import { lowerBoundBy, upperBoundBy } from "./binarySearch.ts";
+
 /**
  * A finite half-open numeric interval `[start, end)`.
  *
@@ -70,9 +72,28 @@ export const Interval = {
     return this.create(interval.start - pad, interval.end + pad);
   },
 
+  /** True when `a` is entirely before `b`; touching is allowed. */
+  isBefore(a: Interval, b: Interval): boolean {
+    return a.end <= b.start;
+  },
+
+  touches(a: Interval, b: Interval): boolean {
+    return a.end === b.start || b.end === a.start;
+  },
+
   intersection(a: Interval, b: Interval): Interval {
     const start = Math.max(a.start, b.start);
     return this.create(start, Math.min(a.end, b.end));
+  },
+
+  /** Smallest interval containing both inputs, including any gap between them. */
+  hull(a: Interval, b: Interval): Interval {
+    return this.create(Math.min(a.start, b.start), Math.max(a.end, b.end));
+  },
+
+  /** Merged interval when inputs overlap or touch; otherwise `null`. */
+  merge(a: Interval, b: Interval): Interval | null {
+    return a.end < b.start || b.end < a.start ? null : this.hull(a, b);
   },
 } as const;
 
@@ -80,6 +101,9 @@ export const Interval = {
  * A sorted set of non-empty, disjoint, non-touching half-open intervals.
  * Touching intervals are merged on insertion.
  */
+const intervalStart = (interval: Interval): number => interval.start;
+const intervalEnd = (interval: Interval): number => interval.end;
+
 export class IntervalSet {
   private readonly items: Interval[] = [];
 
@@ -97,28 +121,13 @@ export class IntervalSet {
   covers(interval: Interval): boolean {
     if (Interval.isEmpty(interval)) return true;
 
-    let lo = 0;
-    let hi = this.items.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1;
-      if (this.items[mid]!.start <= interval.start) lo = mid + 1;
-      else hi = mid;
-    }
-    const candidate = this.items[lo - 1];
+    const candidate = this.items[upperBoundBy(this.items, interval.start, intervalStart) - 1];
     return candidate !== undefined && candidate.end >= interval.end;
   }
 
   contains(value: number): boolean {
-    let lo = 0;
-    let hi = this.items.length - 1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >>> 1;
-      const interval = this.items[mid]!;
-      if (value < interval.start) hi = mid - 1;
-      else if (value >= interval.end) lo = mid + 1;
-      else return true;
-    }
-    return false;
+    const candidate = this.items[upperBoundBy(this.items, value, intervalStart) - 1];
+    return candidate !== undefined && Interval.contains(candidate, value);
   }
 
   intersections(target: Interval): readonly Interval[] {
@@ -162,14 +171,7 @@ export class IntervalSet {
       return;
     }
 
-    let lo = 0;
-    let hi = intervals.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1;
-      if (intervals[mid]!.end < start) lo = mid + 1;
-      else hi = mid;
-    }
-    const insertAt = lo;
+    const insertAt = lowerBoundBy(intervals, start, intervalEnd);
     if (insertAt === intervals.length || intervals[insertAt]!.start > end) {
       intervals.splice(insertAt, 0, interval);
       return;

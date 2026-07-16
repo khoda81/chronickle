@@ -226,8 +226,7 @@ export class Broker {
       if (!(sample.t < rangeEnd)) continue;
 
       segments.push({
-        rangeStart: sample.t,
-        rangeEnd,
+        range: Interval.create(sample.t, rangeEnd),
         sampleTime: sample.t,
         value: sample.value,
         // Quality describes the cadence that was searched, not the wall-clock
@@ -243,7 +242,7 @@ export class Broker {
 
   private readySegments(evalTime: Float64Array, wallNow: number): CoverageSegment[] {
     return this.store.segments(evalTime, wallNow).map((span) => ({
-      range: Interval.create(span.startTime, span.endTime),
+      range: span.range,
       samplePeriodMs: span.resolutionMs,
       state: "ready" as const,
     }));
