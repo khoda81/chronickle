@@ -32,10 +32,11 @@ export interface BrokerDemand {
 /** Mutable viewport interest. Updating it does not allocate a new subscription. */
 export interface Subscription {
   update(demand: BrokerDemand): void;
-  dispose(): void;
 }
 
 export interface BrokerOptions {
+  /** The broker and its acquisition session cannot outlive this signal. */
+  readonly signal: AbortSignal;
   /** Injectable wall clock for deterministic tests. */
   readonly now?: () => number;
   readonly onError?: (message: string, error?: unknown) => void;
@@ -52,6 +53,7 @@ export class Broker {
   private readonly fetchedCoverage = new SettledCoverageIndex();
   private readonly demandSubscriptions = new Set<DemandSubscription>();
   private readonly adapterSession: AdapterSession;
+  private readonly signal: AbortSignal;
   private readonly now: () => number;
   private readonly onError: (message: string, error?: unknown) => void;
   private readonly onWarning: (message: string) => void;
@@ -59,26 +61,32 @@ export class Broker {
   private adapterActivities: readonly AcquisitionActivity[] = [];
   private valueBuffer: Float64Array<ArrayBufferLike> = new Float64Array(0);
 
-  constructor(adapter: SignalAdapter, opts: BrokerOptions = {}) {
+  constructor(adapter: SignalAdapter, opts: BrokerOptions) {
+    this.signal = opts.signal;
+    this.signal.throwIfAborted();
     this.now = opts.now ?? Date.now;
     this.onError = opts.onError ?? ((message, error) => console.error(message, error));
     this.onWarning = opts.onWarning ?? (message => console.warn(message));
-    this.adapterSession = adapter.connect({
-      next: batch => {
-        if (this.ingest(batch)) this.sampleRevision++;
-        this.notify();
+    this.adapterSession = adapter.connect(
+      {
+        next: batch => {
+          if (this.ingest(batch)) this.sampleRevision++;
+          this.notify();
+        },
+        status: activities => {
+          this.adapterActivities = activities;
+          this.notify();
+        },
+        error: (error, activity) => {
+          this.onError(
+            `[Broker] adapter failed for ${activity.range.start}..${activity.range.end}; retry scheduled`,
+            error,
+          );
+        },
       },
-      status: activities => {
-        this.adapterActivities = activities;
-        this.notify();
-      },
-      error: (error, activity) => {
-        this.onError(
-          `[Broker] adapter failed for ${activity.range.start}..${activity.range.end}; retry scheduled`,
-          error,
-        );
-      },
-    });
+      this.signal,
+    );
+    this.signal.addEventListener("abort", () => this.demandSubscriptions.clear(), { once: true });
   }
 
   /**
@@ -127,31 +135,29 @@ export class Broker {
     return { value, coverage, sampleRevision: this.sampleRevision };
   }
 
-  subscribe(demand: BrokerDemand, fn: () => void): Subscription {
+  subscribe(demand: BrokerDemand, fn: () => void, signal: AbortSignal): Subscription {
+    const lifetime = AbortSignal.any([this.signal, signal]);
+    lifetime.throwIfAborted();
     const entry: DemandSubscription = { demand: validateDemand(demand), fn };
-    let disposed = false;
     this.demandSubscriptions.add(entry);
     this.syncAdapterDemands();
+    lifetime.addEventListener(
+      "abort",
+      () => {
+        if (!this.demandSubscriptions.delete(entry) || this.signal.aborted) return;
+        this.syncAdapterDemands();
+      },
+      { once: true },
+    );
     return {
       update: demand => {
-        if (disposed) throw new Error("Broker subscription is disposed");
+        lifetime.throwIfAborted();
         const next = validateDemand(demand);
         if (sameDemand(entry.demand, next)) return;
         entry.demand = next;
         this.syncAdapterDemands();
       },
-      dispose: () => {
-        if (disposed) return;
-        disposed = true;
-        this.demandSubscriptions.delete(entry);
-        this.syncAdapterDemands();
-      },
     };
-  }
-
-  dispose(): void {
-    this.adapterSession.dispose();
-    this.demandSubscriptions.clear();
   }
 
   /** Drop observations and adapter scheduling evidence, then reacquire current demands. */

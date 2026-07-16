@@ -67,7 +67,7 @@ const INVALID_PIXEL = packRgba(5, 7, 13, 255);
 
 const span = SIGMOID_MAX - SIGMOID_MIN;
 for (let i = 0; i < SIGMOID_LUT.length; i++) {
-  const x = SIGMOID_MIN + i * span / (SIGMOID_LUT.length - 1);
+  const x = SIGMOID_MIN + (i * span) / (SIGMOID_LUT.length - 1);
   SIGMOID_LUT[i] = rampIndex(1 / (1 + Math.exp(x)));
 }
 
@@ -83,7 +83,7 @@ class HeatmapImpl implements HeatmapLayer {
   constructor(
     private readonly frame: Frame,
     private readonly resources: HeatmapResources,
-  ) { }
+  ) {}
 
   drawWaveletField(
     padded: PaddedEval,

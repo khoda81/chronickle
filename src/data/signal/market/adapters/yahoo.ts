@@ -115,57 +115,49 @@ async function fetchYahooWindow(
   });
   const target = `${YAHOO_CHART_API}/${encodeURIComponent(symbol)}?${params}`;
   const url = `${opts.proxy ?? CORS_PROXY}${encodeURIComponent(target)}`;
-  const controller = new AbortController();
-  const abort = (): void => controller.abort();
-  signal.addEventListener("abort", abort, { once: true });
-  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 15_000);
-
-  try {
-    const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) {
-      throw new YahooHttpError(
-        `Yahoo Finance chart failed: ${response.status} ${response.statusText}`,
-        response.status,
-        retryAfterMs(response.headers.get("retry-after")),
-      );
-    }
-    const payload = (await response.json()) as YahooChartResponse;
-    if (payload.chart?.error !== null && payload.chart?.error !== undefined) {
-      const detail = payload.chart.error.description ?? payload.chart.error.code ?? "unknown error";
-      const rateLimited = /rate|too many/i.test(detail);
-      throw new YahooHttpError(
-        `Yahoo Finance chart failed: ${detail}`,
-        rateLimited ? 429 : 500,
-        null,
-      );
-    }
-    const result = payload.chart?.result?.[0];
-    const timestamps = result?.timestamp;
-    const opens = result?.indicators?.quote?.[0]?.open;
-    if (!Array.isArray(timestamps) || !Array.isArray(opens)) {
-      return { samples: [] };
-    }
-
-    const points: PricePoint[] = [];
-    const count = Math.min(timestamps.length, opens.length);
-    for (let index = 0; index < count; index++) {
-      const seconds = timestamps[index];
-      const price = opens[index];
-      if (
-        typeof seconds === "number" &&
-        typeof price === "number" &&
-        Number.isFinite(seconds) &&
-        Number.isFinite(price) &&
-        price > 0
-      ) {
-        points.push({ t: seconds * 1_000, price });
-      }
-    }
-    return { samples: logPriceSamples(points) };
-  } finally {
-    clearTimeout(timer);
-    signal.removeEventListener("abort", abort);
+  const response = await fetch(url, {
+    signal: AbortSignal.any([signal, AbortSignal.timeout(opts.timeoutMs ?? 15_000)]),
+  });
+  if (!response.ok) {
+    throw new YahooHttpError(
+      `Yahoo Finance chart failed: ${response.status} ${response.statusText}`,
+      response.status,
+      retryAfterMs(response.headers.get("retry-after")),
+    );
   }
+  const payload = (await response.json()) as YahooChartResponse;
+  if (payload.chart?.error !== null && payload.chart?.error !== undefined) {
+    const detail = payload.chart.error.description ?? payload.chart.error.code ?? "unknown error";
+    const rateLimited = /rate|too many/i.test(detail);
+    throw new YahooHttpError(
+      `Yahoo Finance chart failed: ${detail}`,
+      rateLimited ? 429 : 500,
+      null,
+    );
+  }
+  const result = payload.chart?.result?.[0];
+  const timestamps = result?.timestamp;
+  const opens = result?.indicators?.quote?.[0]?.open;
+  if (!Array.isArray(timestamps) || !Array.isArray(opens)) {
+    return { samples: [] };
+  }
+
+  const points: PricePoint[] = [];
+  const count = Math.min(timestamps.length, opens.length);
+  for (let index = 0; index < count; index++) {
+    const seconds = timestamps[index];
+    const price = opens[index];
+    if (
+      typeof seconds === "number" &&
+      typeof price === "number" &&
+      Number.isFinite(seconds) &&
+      Number.isFinite(price) &&
+      price > 0
+    ) {
+      points.push({ t: seconds * 1_000, price });
+    }
+  }
+  return { samples: logPriceSamples(points) };
 }
 
 interface CachedYahooResult {

@@ -94,7 +94,6 @@ export class TimelineOverlayController implements TimelineOverlaySink {
   private readonly rowTops = new Map<string, number>();
   private readonly hoverDate = new Date(0);
   private readonly visibleTooltips: HTMLDivElement[] = [];
-  private visibleTooltipCount = 0;
 
   attachStaticElements(
     nowLine: HTMLDivElement,
@@ -135,6 +134,8 @@ export class TimelineOverlayController implements TimelineOverlaySink {
     const row = this.rows.get(id);
     if (row !== undefined) {
       row.tooltip.hidden = true;
+      const visibleIndex = this.visibleTooltips.indexOf(row.tooltip);
+      if (visibleIndex >= 0) this.visibleTooltips.splice(visibleIndex, 1);
       row.header.style.removeProperty("--timeline-row-collapse-progress");
       row.header.style.removeProperty("--timeline-row-collapse-scale");
       row.header.style.removeProperty("--timeline-row-collapse-border-alpha");
@@ -211,10 +212,8 @@ export class TimelineOverlayController implements TimelineOverlaySink {
   }
 
   hideSignalTooltips(): void {
-    for (let index = 0; index < this.visibleTooltipCount; index++) {
-      this.visibleTooltips[index]!.hidden = true;
-    }
-    this.visibleTooltipCount = 0;
+    for (const tooltip of this.visibleTooltips) tooltip.hidden = true;
+    this.visibleTooltips.length = 0;
   }
 
   setSignalTooltip(
@@ -232,17 +231,7 @@ export class TimelineOverlayController implements TimelineOverlaySink {
     tooltip.style.height = `${height}px`;
     tooltip.style.transform = `translate3d(${x}px, ${y}px, 0)`;
     tooltip.hidden = false;
-    this.visibleTooltips[this.visibleTooltipCount++] = tooltip;
-  }
-
-  dispose(): void {
-    this.detachStaticElements();
-    this.eventTooltip = null;
-    this.eventTooltipVisible = false;
-    this.hideSignalTooltips();
-    this.rows.clear();
-    this.rowTops.clear();
-    this.visibleTooltips.length = 0;
+    this.visibleTooltips.push(tooltip);
   }
 
   private positionEventTooltip(): void {

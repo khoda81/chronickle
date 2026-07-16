@@ -33,6 +33,7 @@ import styles from "./App.module.css";
 const DAY_MS = 86_400_000;
 
 export function App() {
+  const lifetime = new AbortController();
   const now = Date.now();
   const persistence = createPersistedUiState({
     version: 4,
@@ -42,8 +43,11 @@ export function App() {
   });
   const saved = persistence.state();
   const registry = FeedRegistry.load(DEFAULT_FEEDS);
-  const eventBroker = new EventBroker({}, () => registry.active());
-  const brokers = new Map<string, Broker>();
+  const eventBroker = new EventBroker({}, () => registry.active(), lifetime.signal);
+  const brokerRuntimes = new Map<
+    string,
+    { readonly broker: Broker; readonly controller: AbortController }
+  >();
 
   const [status, setStatusState] = createSignal<{ message: string; kind: StatusKind }>({
     message: "Initializing…",
@@ -68,7 +72,6 @@ export function App() {
 
   let canvas!: HTMLCanvasElement;
   let timeline: Timeline | null = null;
-  let unsubscribeEvents: (() => void) | null = null;
 
   const setStatus = (message: string, kind: StatusKind = "info"): void => {
     setStatusState({ message, kind });
@@ -83,7 +86,7 @@ export function App() {
   const buildTimelineRows = (): SignalRow[] =>
     charts().map(chart => {
       const key = chartStateKey(chart);
-      const broker = brokers.get(key);
+      const broker = brokerRuntimes.get(key)?.broker;
 
       if (broker === undefined) {
         throw new Error(`Missing broker for chart ${key}`);
@@ -93,7 +96,7 @@ export function App() {
         id: key,
         read: request => broker.read(request),
         readSampleAt: (time, out) => broker.readPointAtOrBefore(time, out),
-        subscribe: (demand, onChange) => broker.subscribe(demand, onChange),
+        subscribe: (demand, onChange, signal) => broker.subscribe(demand, onChange, signal),
         palette: chart.palette,
         waveletMode: chart.waveletMode,
         verticalOffset: chart.verticalOffset,
@@ -121,11 +124,11 @@ export function App() {
     );
   };
 
-  const disposeRemovedCharts = (removed: readonly ChartState[]): void => {
+  const closeRemovedCharts = (removed: readonly ChartState[]): void => {
     for (const chart of removed) {
       const key = chartStateKey(chart);
-      brokers.get(key)?.dispose();
-      brokers.delete(key);
+      brokerRuntimes.get(key)?.controller.abort();
+      brokerRuntimes.delete(key);
     }
   };
 
@@ -153,7 +156,7 @@ export function App() {
     // remaining rows are reconciled by ID, so their demand and cached view stay warm.
     const fittedLayout = syncTimelineRows();
     if (fittedLayout !== null) storeTimelineLayout(fittedLayout);
-    disposeRemovedCharts(removed);
+    closeRemovedCharts(removed);
     setStatus(`Removed ${removedChartLabels(removed)}`);
   };
 
@@ -180,7 +183,9 @@ export function App() {
       return false;
     }
 
+    const controller = new AbortController();
     const broker = new Broker(source.createAdapter(symbol), {
+      signal: AbortSignal.any([lifetime.signal, controller.signal]),
       onError: (message, error) => {
         console.error(message, error);
         setStatus(
@@ -211,7 +216,7 @@ export function App() {
           ? initial.height
           : undefined,
     };
-    brokers.set(key, broker);
+    brokerRuntimes.set(key, { broker, controller });
     setCharts(current => [...current, chart]);
     const fittedLayout = syncTimelineRows();
     if (fittedLayout !== null) storeTimelineLayout(fittedLayout);
@@ -250,7 +255,7 @@ export function App() {
       // rows keep their existing subscriptions instead of flashing empty.
       const fittedLayout = syncTimelineRows();
       if (fittedLayout !== null) storeTimelineLayout(fittedLayout);
-      disposeRemovedCharts(removed);
+      closeRemovedCharts(removed);
       setStatus(`Removed ${removedChartLabels(removed)}`);
     }
   };
@@ -281,7 +286,7 @@ export function App() {
     refreshFeeds();
     setStatus(`Verifying ${feed.source}…`);
     try {
-      const parsed = await fetchFeed(feed, defaultProxy, 15_000);
+      const parsed = await fetchFeed(feed, defaultProxy, 15_000, lifetime.signal);
       if (parsed.title.length > 0) registry.rename(feed.id, parsed.title);
       registry.save();
       setFeeds(registry.all());
@@ -290,6 +295,7 @@ export function App() {
       setStatus(`Added feed: ${parsed.title || feed.source}`);
       return true;
     } catch (error) {
+      if (lifetime.signal.aborted) return false;
       registry.remove(feed.id);
       registry.save();
       refreshFeeds();
@@ -337,7 +343,7 @@ export function App() {
 
   const reloadTimelineData = (): void => {
     eventBroker.clearCache();
-    for (const broker of brokers.values()) broker.clearCache();
+    for (const { broker } of brokerRuntimes.values()) broker.clearCache();
     timeline?.refreshEvents();
     timeline?.reqDraw();
     setStatus(`Cleared signal and event caches; reloading ${charts().length} market row(s)…`);
@@ -346,6 +352,7 @@ export function App() {
   onMount(() => {
     timeline = new Timeline({
       canvas,
+      signal: lifetime.signal,
       signalRows: buildTimelineRows(),
       initialTimeInterval: saved.viewport,
       initialPlayback: playback(),
@@ -369,21 +376,16 @@ export function App() {
       },
     });
 
-    unsubscribeEvents = eventBroker.subscribe(() => timeline?.reqDraw());
+    eventBroker.subscribe(() => timeline?.reqDraw(), lifetime.signal);
 
     const onPageHide = (): void => persistence.flush();
-    window.addEventListener("pagehide", onPageHide);
-    onCleanup(() => window.removeEventListener("pagehide", onPageHide));
+    window.addEventListener("pagehide", onPageHide, { signal: lifetime.signal });
   });
 
   onCleanup(() => {
     persistence.flush();
-    persistence.dispose();
-    unsubscribeEvents?.();
-    timeline?.dispose();
-    timelineOverlay.dispose();
-    for (const broker of brokers.values()) broker.dispose();
-    brokers.clear();
+    lifetime.abort();
+    brokerRuntimes.clear();
   });
 
   return (

@@ -27,7 +27,11 @@ import { BrokerDemand } from "../data/index.ts";
 
 export type DataReader = (request: ReadRequest) => SignalView;
 export type SampleAtReader = (time: number, out: MutableSample) => boolean;
-export type DataSubscriber = (demand: BrokerDemand, onChange: () => void) => Subscription;
+export type DataSubscriber = (
+  demand: BrokerDemand,
+  onChange: () => void,
+  signal: AbortSignal,
+) => Subscription;
 export type EventSource = (range: Interval) => EventQueryResult;
 
 export interface SignalRow {
@@ -40,6 +44,12 @@ export interface SignalRow {
   readonly verticalOffset: number;
   /** Preferred restored height. Used only when the row has no live height yet. */
   readonly height?: number;
+}
+
+interface ActiveSignalSubscription {
+  demand: BrokerDemand | null;
+  readonly subscription: Subscription;
+  readonly controller: AbortController;
 }
 
 export interface HoverInfo {
@@ -97,6 +107,7 @@ export interface TimelineCallbacks {
 
 export interface TimelineOptions {
   readonly canvas: HTMLCanvasElement;
+  readonly signal: AbortSignal;
   readonly initialTimeInterval: Interval;
   readonly initialPlayback?: TimelinePlayback;
   readonly initialNewsHeight?: number;
@@ -149,15 +160,14 @@ export class Timeline {
   private readonly feedColorOf: (feedId: string) => string;
   private readonly overlay: TimelineOverlaySink | undefined;
   private readonly config: TimelineConfig;
+  private readonly signal: AbortSignal;
   private signalRows: readonly SignalRow[];
-  private eventListeners: AbortController | null = null;
   // Mutable render-state mirrors. App state owns persistence; Timeline owns live gestures.
   private rowHeights: number[];
   private rowPalettes: PaletteName[];
   private rowWaveletModes: WaveletMode[];
   private rowVerticalOffsets: number[];
-  private signalSubscriptions: Array<Subscription | undefined> = [];
-  private subscribedDemands: Array<BrokerDemand | null> = [];
+  private signalSubscriptions: Array<ActiveSignalSubscription | undefined> = [];
   private rowEvalTime: Float64Array[] = [];
   private rowHoverSamples: MutableSample[];
   private latestDpr = 1;
@@ -205,7 +215,9 @@ export class Timeline {
   };
 
   constructor(opts: TimelineOptions) {
+    opts.signal.throwIfAborted();
     this.canvas = opts.canvas;
+    this.signal = opts.signal;
     this.eventSource = opts.eventSource;
     this.feedColorOf = opts.feedColorOf;
     this.overlay = opts.overlay;
@@ -236,6 +248,7 @@ export class Timeline {
     }
     this.resize();
     this.reqDraw();
+    this.signal.addEventListener("abort", this.close, { once: true });
   }
 
   reqDraw(): void {
@@ -255,7 +268,9 @@ export class Timeline {
     // A row identity owns its broker subscription and render scratch state.
     // Reordering/removing one row must not tear down every other row's demand.
     for (let index = 0; index < previousRows.length; index++) {
-      if (!nextIds.has(previousRows[index]!.id)) this.signalSubscriptions[index]?.dispose();
+      if (!nextIds.has(previousRows[index]!.id)) {
+        this.signalSubscriptions[index]?.controller.abort();
+      }
     }
 
     const positiveHeights = this.rowHeights.filter(height => height > 0);
@@ -268,7 +283,6 @@ export class Timeline {
     const previousEvalTime = this.rowEvalTime;
     const previousHoverSamples = this.rowHoverSamples;
     const previousSubscriptions = this.signalSubscriptions;
-    const previousDemands = this.subscribedDemands;
 
     this.signalRows = [...rows];
     this.rowHeights = rows.map(row => {
@@ -297,10 +311,6 @@ export class Timeline {
     this.signalSubscriptions = rows.map(row => {
       const previousIndex = previousIndexById.get(row.id);
       return previousIndex === undefined ? undefined : previousSubscriptions[previousIndex];
-    });
-    this.subscribedDemands = rows.map(row => {
-      const previousIndex = previousIndexById.get(row.id);
-      return previousIndex === undefined ? null : (previousDemands[previousIndex] ?? null);
     });
 
     if (!hadSignalRows && rows.length > 0) {
@@ -370,7 +380,8 @@ export class Timeline {
     const index = this.signalRows.findIndex(row => row.id === id);
     if (index < 0 || this.rowWaveletModes[index] === mode) return;
     this.rowWaveletModes[index] = mode;
-    this.subscribedDemands[index] = null;
+    const active = this.signalSubscriptions[index];
+    if (active !== undefined) active.demand = null;
     this.reqDraw();
   }
 
@@ -389,15 +400,17 @@ export class Timeline {
     };
   }
 
-  dispose(): void {
+  private close = (): void => {
     if (this.rafId !== null) cancelAnimationFrame(this.rafId);
     if (this.nowTimer !== null) clearTimeout(this.nowTimer);
     if (this.hoverClearTimer !== null) clearTimeout(this.hoverClearTimer);
+    this.rafId = null;
+    this.nowTimer = null;
+    this.hoverClearTimer = null;
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.disposeSignalSubscriptions();
-    this.unbindEvents();
-  }
+  };
 
   private notifyViewportChange(): void {
     this.callbacks.onViewportChange?.(this.state.timeInterval, this.state.logGain);
@@ -415,13 +428,7 @@ export class Timeline {
   }
 
   private bindEvents(): void {
-    if (this.eventListeners !== null) {
-      throw new Error("Timeline events are already bound");
-    }
-
-    const controller = new AbortController();
-    this.eventListeners = controller;
-    const { signal } = controller;
+    const { signal } = this;
 
     this.canvas.addEventListener("pointerdown", this.onPointerDown, { signal });
 
@@ -435,11 +442,6 @@ export class Timeline {
     this.canvas.addEventListener("pointerleave", this.onHoverLeave, { signal });
     this.canvas.addEventListener("click", this.onClick, { signal });
     this.canvas.addEventListener("dblclick", this.onDoubleClick, { signal });
-  }
-
-  private unbindEvents(): void {
-    this.eventListeners?.abort();
-    this.eventListeners = null;
   }
 
   private resize(): void {
@@ -459,7 +461,8 @@ export class Timeline {
   }
 
   private syncPriceSubscription(index: number, demand: BrokerDemand): void {
-    const previous = this.subscribedDemands[index];
+    const active = this.signalSubscriptions[index];
+    const previous = active?.demand;
     if (
       previous !== null &&
       previous !== undefined &&
@@ -469,21 +472,24 @@ export class Timeline {
     ) {
       return;
     }
-    this.subscribedDemands[index] = demand;
-    const existing = this.signalSubscriptions[index];
-    if (existing !== undefined) {
-      existing.update(demand);
+    if (active !== undefined) {
+      active.demand = demand;
+      active.subscription.update(demand);
       return;
     }
     const row = this.signalRows[index];
     if (row === undefined) return;
-    this.signalSubscriptions[index] = row.subscribe(demand, () => this.reqDraw());
+    const controller = new AbortController();
+    this.signalSubscriptions[index] = {
+      demand,
+      controller,
+      subscription: row.subscribe(demand, () => this.reqDraw(), controller.signal),
+    };
   }
 
   private disposeSignalSubscriptions(): void {
-    for (const subscription of this.signalSubscriptions) subscription?.dispose();
+    for (const active of this.signalSubscriptions) active?.controller.abort();
     this.signalSubscriptions = [];
-    this.subscribedDemands = [];
   }
 
   private draw = (): void => {

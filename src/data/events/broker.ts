@@ -72,7 +72,11 @@ const BACKOFF_CAP_MS = 60_000;
 
 export interface EventWalker {
   readonly failureReason: string | null;
-  walk(targetMin: number, onEvents: (events: readonly NewsEvent[]) => void): Promise<WalkOutcome>;
+  walk(
+    targetMin: number,
+    onEvents: (events: readonly NewsEvent[]) => void,
+    signal: AbortSignal,
+  ): Promise<WalkOutcome>;
 }
 
 export type EventWalkerFactory = (feed: RssFeed, opts: FeedWalkerOptions) => EventWalker;
@@ -93,11 +97,12 @@ export class EventBroker {
   private readonly walkerFactory: EventWalkerFactory;
   private readonly onDebug: (message: string) => void;
   private readonly onError: (message: string, error: unknown) => void;
-  private generation = 0;
+  private generation = new AbortController();
 
   constructor(
     walkerOpts: FeedWalkerOptions = {},
     activeFeeds: () => readonly RssFeed[],
+    private readonly signal: AbortSignal,
     walkerFactory: EventWalkerFactory = (feed, opts) => new FeedWalker(feed, opts),
     diagnostics: EventBrokerDiagnostics = {},
   ) {
@@ -137,15 +142,18 @@ export class EventBroker {
     return { events: inInterval, status };
   }
 
-  /** Subscribe to cache updates. Returns an unsubscribe function. */
-  subscribe(fn: () => void): () => void {
+  /** Subscribe to cache updates for the supplied lifetime. */
+  subscribe(fn: () => void, signal: AbortSignal): void {
+    const lifetime = AbortSignal.any([this.signal, signal]);
+    lifetime.throwIfAborted();
     this.subscribers.add(fn);
-    return () => this.subscribers.delete(fn);
+    lifetime.addEventListener("abort", () => this.subscribers.delete(fn), { once: true });
   }
 
-  /** Clear event/page state and ignore callbacks from walks already in flight. */
+  /** Clear event/page state and cancel walks already in flight. */
   clearCache(): void {
-    this.generation++;
+    this.generation.abort();
+    this.generation = new AbortController();
     this.events = [];
     this.feedState.clear();
     this.walkers.clear();
@@ -208,18 +216,22 @@ export class EventBroker {
 
     this.feedState.set(feed.id, { kind: "fetching" });
     const walker = this.walkerOf(feed);
-    const generation = this.generation;
+    const signal = AbortSignal.any([this.signal, this.generation.signal]);
 
     try {
-      const outcome = await walker.walk(targetMin, pageEvents => {
-        if (generation !== this.generation) return;
-        this.merge(pageEvents);
-        // Update oldestT from the store — the source of truth. We need the
-        // current state's oldestT to compare, so recompute from the merged
-        // store for this feed.
-        this.updateOldestT(feed.id);
-      });
-      if (generation !== this.generation) return;
+      const outcome = await walker.walk(
+        targetMin,
+        pageEvents => {
+          if (signal.aborted) return;
+          this.merge(pageEvents);
+          // Update oldestT from the store — the source of truth. We need the
+          // current state's oldestT to compare, so recompute from the merged
+          // store for this feed.
+          this.updateOldestT(feed.id);
+        },
+        signal,
+      );
+      if (signal.aborted) return;
 
       // Transition based on outcome. Read current oldestT from the store.
       const oldestT = this.oldestTForFeed(feed.id);
@@ -249,7 +261,7 @@ export class EventBroker {
       }
       this.notify();
     } catch (err) {
-      if (generation !== this.generation) return;
+      if (signal.aborted) return;
       // Should not happen — the walker catches and classifies its own errors.
       // If it does, treat as backoff so we retry rather than silently dying.
       this.onError(`[EventBroker] unexpected walk failure for ${feed.source}`, err);

@@ -79,10 +79,24 @@ const brokers = new Set<Broker>();
 
 class Broker extends PriceBroker {
   private compatibilitySubscription: Subscription | null = null;
+  private readonly lifetime: AbortController;
 
-  constructor(source: Fetcher | SignalAdapter, opts: BrokerOptions = {}) {
-    super(isAdapter(source) ? source : adaptFetcher(source, opts.now ?? Date.now), opts);
+  constructor(source: Fetcher | SignalAdapter, opts: Omit<BrokerOptions, "signal"> = {}) {
+    const lifetime = new AbortController();
+    super(isAdapter(source) ? source : adaptFetcher(source, opts.now ?? Date.now), {
+      ...opts,
+      signal: lifetime.signal,
+    });
+    this.lifetime = lifetime;
     brokers.add(this);
+  }
+
+  override subscribe(
+    demand: BrokerDemand,
+    fn: () => void,
+    signal: AbortSignal = this.lifetime.signal,
+  ): Subscription {
+    return super.subscribe(demand, fn, signal);
   }
 
   query(opts: ReadRequest): SignalView {
@@ -100,10 +114,9 @@ class Broker extends PriceBroker {
     return this.read(opts);
   }
 
-  override dispose(): void {
-    this.compatibilitySubscription?.dispose();
+  close(): void {
     this.compatibilitySubscription = null;
-    super.dispose();
+    this.lifetime.abort();
     brokers.delete(this);
   }
 }
@@ -137,17 +150,21 @@ function adaptFetcher(fetcher: Fetcher, now: () => number): SignalAdapter {
 
 function fetchOnce(adapter: SignalAdapter, demand: BrokerDemand): Promise<AdapterBatch> {
   return new Promise((resolve, reject) => {
-    const session = adapter.connect({
-      next: (batch) => {
-        session.dispose();
-        resolve(batch);
+    const lifetime = new AbortController();
+    const session = adapter.connect(
+      {
+        next: (batch) => {
+          lifetime.abort();
+          resolve(batch);
+        },
+        status: () => undefined,
+        error: (error) => {
+          lifetime.abort();
+          reject(error);
+        },
       },
-      status: () => undefined,
-      error: (error) => {
-        session.dispose();
-        reject(error);
-      },
-    });
+      lifetime.signal,
+    );
     session.setDemands([demand]);
   });
 }
@@ -157,14 +174,18 @@ function retryOnce(
   demand: BrokerDemand,
 ): Promise<{ readonly error: unknown; readonly retryAtMs: number }> {
   return new Promise((resolve) => {
-    const session = adapter.connect({
-      next: () => undefined,
-      status: () => undefined,
-      error: (error, activity) => {
-        session.dispose();
-        resolve({ error, retryAtMs: activity.retryAtMs! });
+    const lifetime = new AbortController();
+    const session = adapter.connect(
+      {
+        next: () => undefined,
+        status: () => undefined,
+        error: (error, activity) => {
+          lifetime.abort();
+          resolve({ error, retryAtMs: activity.retryAtMs! });
+        },
       },
-    });
+      lifetime.signal,
+    );
     session.setDemands([demand]);
   });
 }
@@ -456,8 +477,7 @@ test("broker read is side-effect-free and viewport subscriptions drive fetching"
 
   subscription.update({ range: Interval.create(0, 2_000), maxDeltaTMs: 1_000 });
   assert(Number(calls) === 1, "unchanged viewport demand restarted fetching");
-  subscription.dispose();
-  broker.dispose();
+  broker.close();
 });
 
 test("broker trusts the adapter plan, not irregular observation spacing", async () => {
@@ -506,7 +526,6 @@ test("leaving now updates the adapter session instead of creating another subscr
           hadLiveDemand = hasLiveDemand;
         },
         clearCache: () => undefined,
-        dispose: () => undefined,
       };
     },
   };
@@ -520,6 +539,32 @@ test("leaving now updates the adapter session instead of creating another subscr
   assert(liveDisposed === 1, "adapter session did not observe the historical viewport");
 });
 
+test("aborting a broker subscription removes its adapter demand", () => {
+  const brokerLifetime = new AbortController();
+  const subscriptionLifetime = new AbortController();
+  let latestDemands: readonly BrokerDemand[] = [];
+  const adapter: SignalAdapter = {
+    connect() {
+      return {
+        setDemands(demands) {
+          latestDemands = demands;
+        },
+        clearCache: () => undefined,
+      };
+    },
+  };
+  const broker = new PriceBroker(adapter, { signal: brokerLifetime.signal });
+  broker.subscribe(
+    { range: Interval.create(0, 10_000), maxDeltaTMs: 1_000 },
+    () => undefined,
+    subscriptionLifetime.signal,
+  );
+  assert(latestDemands.length === 1, "subscription demand was not registered");
+  subscriptionLifetime.abort();
+  assert(Number(latestDemands.length) === 0, "aborted subscription demand remained registered");
+  brokerLifetime.abort();
+});
+
 test("future coverage is pending or watching without invalidating cached samples", () => {
   let sink: Parameters<SignalAdapter["connect"]>[0] | null = null;
   const adapter: SignalAdapter = {
@@ -528,7 +573,6 @@ test("future coverage is pending or watching without invalidating cached samples
       return {
         setDemands: () => undefined,
         clearCache: () => undefined,
-        dispose: () => undefined,
       };
     },
   };
@@ -566,7 +610,7 @@ test("future coverage is pending or watching without invalidating cached samples
     broker.read(request).sampleRevision === loadedRevision,
     "identical redelivery invalidated cached samples",
   );
-  broker.dispose();
+  broker.close();
 });
 
 test("an empty signal segment store has no invalid cached range", () => {
@@ -793,7 +837,7 @@ test("a lagging live endpoint is polled on its refresh cadence, not every redraw
   now = 10_020;
   broker.query({ evalTime, maxSampleGapMs: 5_000 });
   assert(count(requests) === polled, "UI redraw started a live request");
-  broker.dispose();
+  broker.close();
 });
 
 test("follow-now demand updates keep one live lease and do not feed notifications back", async () => {
@@ -840,8 +884,7 @@ test("follow-now demand updates keep one live lease and do not feed notification
     status.coverage.some((segment) => segment.state === "watching"),
     "live lease was missing from acquisition diagnostics",
   );
-  subscription.dispose();
-  broker.dispose();
+  broker.close();
 });
 
 test("empty coverage is classified by the native resolution actually searched", async () => {
@@ -871,8 +914,7 @@ test("empty coverage is classified by the native resolution actually searched", 
     view.coverage.some((segment) => segment.state === "empty"),
     "settled native-resolution coverage disappeared at a finer requested threshold",
   );
-  subscription.dispose();
-  broker.dispose();
+  broker.close();
 });
 
 test("adapter expands tiny demands and broker caches the complete delivery", async () => {
@@ -911,33 +953,37 @@ test("adapter expands tiny demands and broker caches the complete delivery", asy
     maxDeltaTMs: 1_000,
   });
   assert(calls === 1, "broker discarded useful data outside the original demand");
-  subscription.dispose();
-  broker.dispose();
+  broker.close();
 });
 
 test("a demand ending at wall now remains historical", () => {
   const states: string[] = [];
+  const lifetime = new AbortController();
   const adapter = createPollingSignalSource({
     now: () => 10_000,
     resolve: () => 1_000,
     fetchInterval: () => new Promise<AdapterBatch>(() => undefined),
   });
-  const session = adapter.connect({
-    next: () => undefined,
-    status: (activities) => {
-      states.splice(0, states.length, ...activities.map((activity) => activity.state));
+  const session = adapter.connect(
+    {
+      next: () => undefined,
+      status: (activities) => {
+        states.splice(0, states.length, ...activities.map((activity) => activity.state));
+      },
+      error: () => undefined,
     },
-    error: () => undefined,
-  });
+    lifetime.signal,
+  );
 
   session.setDemands([{ range: Interval.create(0, 10_000), maxDeltaTMs: 1_000 }]);
   assert(!states.includes("watching"), "half-open demand end was treated as live");
-  session.dispose();
+  lifetime.abort();
 });
 
 test("adapter keeps a live lease warm for its configured grace period", async () => {
   let now = 10_000;
   let latestStates: readonly string[] = [];
+  const lifetime = new AbortController();
   const adapter = createPollingSignalSource({
     now: () => now,
     liveRetentionMs: 20,
@@ -948,13 +994,16 @@ test("adapter keeps a live lease warm for its configured grace period", async ()
       return { samples: [], searchedInterval: plan.range };
     },
   });
-  const session = adapter.connect({
-    next: () => undefined,
-    status: (activities) => {
-      latestStates = activities.map((activity) => activity.state);
+  const session = adapter.connect(
+    {
+      next: () => undefined,
+      status: (activities) => {
+        latestStates = activities.map((activity) => activity.state);
+      },
+      error: () => undefined,
     },
-    error: () => undefined,
-  });
+    lifetime.signal,
+  );
   session.setDemands([{ range: Interval.create(0, 20_000), maxDeltaTMs: 1_000 }]);
   await new Promise((resolve) => setTimeout(resolve, 0));
   session.setDemands([]);
@@ -963,7 +1012,7 @@ test("adapter keeps a live lease warm for its configured grace period", async ()
   now += 21;
   session.setDemands([]);
   assert(!latestStates.includes("watching"), "expired live lease stayed open");
-  session.dispose();
+  lifetime.abort();
 });
 
 test("returned future points are discarded while the last valid sample is held", async () => {
@@ -1102,7 +1151,7 @@ test("searched market closures do not create an intermediate-zoom fetch storm", 
   const intermediate = broker.query({ evalTime, maxSampleGapMs: 5_432.1 });
   assert(calls === 1, `market closure triggered ${calls - 1} redundant request(s)`);
   assert(intermediate.coverage.length > 0, "searched closure lost its coverage diagnostics");
-  broker.dispose();
+  broker.close();
 });
 
 test("broker trusts the returned searched range, not the requested range", async () => {
@@ -1216,7 +1265,7 @@ test("moving demand aborts stale serialized work before starting the latest rang
   assert(aborted === 1 && maxActiveCalls === 1, "stale and current requests overlapped");
   finish({ points: [], searchedInterval: Interval.create(2_000, 3_000) });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  broker.dispose();
+  broker.close();
 });
 
 test("source-wide backoff suppresses new moving-tail ranges", async () => {
@@ -1234,7 +1283,7 @@ test("source-wide backoff suppresses new moving-tail ranges", async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
   broker.query({ evalTime: new Float64Array([2_000, 3_000]), maxSampleGapMs: 1_000 });
   assert(calls === 1, "a disjoint moving-tail range bypassed source-wide backoff");
-  broker.dispose();
+  broker.close();
 });
 
 test("subscriber failures are not reclassified as fetch failures", async () => {
@@ -1270,7 +1319,7 @@ test("subscriber failures are not reclassified as fetch failures", async () => {
     cached !== null && cached.start === 500 && cached.end === 1_500,
     "singleton hold range was lost",
   );
-  broker.dispose();
+  broker.close();
 });
 
 test("a late coarse response cannot overwrite an earlier fine response", async () => {
@@ -1351,7 +1400,7 @@ test("clearing the price cache ignores stale in-flight responses", async () => {
   approx(Math.exp(fresh.value[0]!), 100, 1e-10);
 });
 
-test("clearing the event cache ignores stale walker callbacks", async () => {
+test("clearing the event cache cancels stale walks and ignores their callbacks", async () => {
   const feed: RssFeed = {
     id: "test",
     source: "Test feed",
@@ -1362,14 +1411,17 @@ test("clearing the event cache ignores stale walker callbacks", async () => {
   const runs: {
     readonly emit: (events: readonly NewsEvent[]) => void;
     readonly resolve: (outcome: "exhausted") => void;
+    readonly signal: AbortSignal;
   }[] = [];
+  const lifetime = new AbortController();
   const broker = new EventBroker(
     {},
     () => [feed],
+    lifetime.signal,
     () => ({
       failureReason: null,
-      walk(_targetMin, onEvents) {
-        return new Promise((resolve) => runs.push({ emit: onEvents, resolve }));
+      walk(_targetMin, onEvents, signal) {
+        return new Promise((resolve) => runs.push({ emit: onEvents, resolve, signal }));
       },
     }),
     { onDebug: () => undefined },
@@ -1377,6 +1429,7 @@ test("clearing the event cache ignores stale walker callbacks", async () => {
   const range = Interval.create(0, 1_000);
   broker.query(range);
   broker.clearCache();
+  assert(runs[0]!.signal.aborted, "event reload left the stale walk running");
   broker.query(range);
   assert(runs.length === 2, "event reload did not start a fresh walker generation");
 
@@ -1469,13 +1522,17 @@ test("Yahoo adapter supports WTI and Brent futures with range-aware intervals", 
       "cached expanded response did not cover the requested range",
     );
 
-    const cacheSession = adapter.connect({
-      next: () => undefined,
-      status: () => undefined,
-      error: () => undefined,
-    });
+    const cacheLifetime = new AbortController();
+    const cacheSession = adapter.connect(
+      {
+        next: () => undefined,
+        status: () => undefined,
+        error: () => undefined,
+      },
+      cacheLifetime.signal,
+    );
     cacheSession.clearCache();
-    cacheSession.dispose();
+    cacheLifetime.abort();
     await fetchOnce(adapter, {
       range: secondInterval,
       maxDeltaTMs: 3_600_000,
@@ -1547,7 +1604,7 @@ test("broker exposes failures and uses the fetcher's retry policy", async () => 
   await new Promise((resolve) => setTimeout(resolve, 120));
   broker.query({ evalTime, maxSampleGapMs: 1_000 });
   assert(Number(calls) === 2, "request did not retry after adapter backoff elapsed");
-  broker.dispose();
+  broker.close();
 });
 
 let failures = 0;
@@ -1560,7 +1617,7 @@ for (const entry of tests) {
     console.error(`✗ ${entry.name}`);
     console.error(error);
   } finally {
-    for (const broker of [...brokers]) broker.dispose();
+    for (const broker of [...brokers]) broker.close();
   }
 }
 if (failures > 0) throw new Error(`${failures} test(s) failed`);

@@ -59,39 +59,30 @@ export function createBinanceAdapter(opts: BinanceAdapterOptions): SignalAdapter
         endTime: Math.floor(range.end).toString(),
         limit: LIMIT.toString(),
       });
-      const controller = new AbortController();
-      const abort = (): void => controller.abort();
-      signal.addEventListener("abort", abort, { once: true });
-      const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 15_000);
-
-      try {
-        const response = await fetch(`${BINANCE_KLINES}?${params}`, { signal: controller.signal });
-        if (!response.ok) {
-          throw new Error(`Binance klines failed: ${response.status} ${response.statusText}`);
-        }
-        const raw: unknown = await response.json();
-        if (!Array.isArray(raw)) throw new Error("Binance klines returned a non-array payload");
-
-        const points: PricePoint[] = [];
-        for (const row of raw) {
-          if (!Array.isArray(row)) continue;
-          const t = Number(row[0]);
-          const price = Number(row[1]);
-          if (Number.isFinite(t) && Number.isFinite(price) && price > 0) points.push({ t, price });
-        }
-
-        let searchedInterval = range;
-        const last = points[points.length - 1];
-        if (raw.length >= LIMIT && last !== undefined) {
-          const searchedMax = Math.min(range.end, last.t + periodMs);
-          if (range.start < searchedMax)
-            searchedInterval = Interval.create(range.start, searchedMax);
-        }
-        return { samples: logPriceSamples(points), searchedInterval };
-      } finally {
-        clearTimeout(timer);
-        signal.removeEventListener("abort", abort);
+      const response = await fetch(`${BINANCE_KLINES}?${params}`, {
+        signal: AbortSignal.any([signal, AbortSignal.timeout(opts.timeoutMs ?? 15_000)]),
+      });
+      if (!response.ok) {
+        throw new Error(`Binance klines failed: ${response.status} ${response.statusText}`);
       }
+      const raw: unknown = await response.json();
+      if (!Array.isArray(raw)) throw new Error("Binance klines returned a non-array payload");
+
+      const points: PricePoint[] = [];
+      for (const row of raw) {
+        if (!Array.isArray(row)) continue;
+        const t = Number(row[0]);
+        const price = Number(row[1]);
+        if (Number.isFinite(t) && Number.isFinite(price) && price > 0) points.push({ t, price });
+      }
+
+      let searchedInterval = range;
+      const last = points[points.length - 1];
+      if (raw.length >= LIMIT && last !== undefined) {
+        const searchedMax = Math.min(range.end, last.t + periodMs);
+        if (range.start < searchedMax) searchedInterval = Interval.create(range.start, searchedMax);
+      }
+      return { samples: logPriceSamples(points), searchedInterval };
     },
   });
 }

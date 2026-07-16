@@ -75,11 +75,13 @@ export class FeedWalker {
   async walk(
     targetMin: number,
     onEvents: (events: readonly NewsEvent[]) => void,
+    signal: AbortSignal,
   ): Promise<WalkOutcome> {
     while (this.cursor !== null) {
+      signal.throwIfAborted();
       let parsed = this.pages.get(this.cursor);
       if (parsed === undefined) {
-        const result = await this.fetchPage(this.cursor);
+        const result = await this.fetchPage(this.cursor, signal);
         if (result.kind !== "ok") {
           // Classify and return. Cached pages already emitted their events;
           // nothing more to do here.
@@ -114,13 +116,14 @@ export class FeedWalker {
    * CORS proxy. The feed's id/source/color are preserved so events get the
    * correct feedId.
    */
-  private async fetchPage(url: string): Promise<PageFetchResult> {
+  private async fetchPage(url: string, signal: AbortSignal): Promise<PageFetchResult> {
     console.debug(`Fetching url: ${url}`);
     const pageFeed: RssFeed = { ...this.feed, url };
     try {
-      const parsed = await fetchFeed(pageFeed, this.proxy, this.timeoutMs);
+      const parsed = await fetchFeed(pageFeed, this.proxy, this.timeoutMs, signal);
       return { kind: "ok", parsed };
     } catch (err) {
+      if (signal.aborted) throw err;
       return classifyError(err, url, this.feed.source);
     }
   }

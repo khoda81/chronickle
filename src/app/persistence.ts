@@ -30,7 +30,6 @@ export interface PersistedUiStateController {
   readonly state: Accessor<PersistedUiState>;
   readonly replace: Setter<PersistedUiState>;
   flush(): void;
-  dispose(): void;
 }
 
 /**
@@ -47,7 +46,7 @@ export function createPersistedUiState(fallback: PersistedUiState): PersistedUiS
     { name: STORAGE_KEY, storage, deserialize: raw => deserializePersistedUiState(raw, fallback) },
   );
 
-  return { state, replace, flush: storage.flush, dispose: storage.dispose };
+  return { state, replace, flush: storage.flush };
 }
 
 export function deserializePersistedUiState(
@@ -186,7 +185,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 interface BufferedStorage extends SyncStorage {
   flush(): void;
-  dispose(): void;
 }
 
 function createBufferedStorage(storage: Storage, delayMs: number): BufferedStorage {
@@ -223,8 +221,5 @@ function createBufferedStorage(storage: Storage, delayMs: number): BufferedStora
       schedule();
     },
     flush,
-    dispose(): void {
-      flush();
-    },
   };
 }

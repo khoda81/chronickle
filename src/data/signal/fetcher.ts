@@ -30,10 +30,10 @@ interface AcquisitionActivityBase {
 export type AcquisitionActivity =
   | (AcquisitionActivityBase & { readonly state: "fetching" | "watching" })
   | (AcquisitionActivityBase & {
-    readonly state: "failed";
-    readonly message: string;
-    readonly retryAtMs: number;
-  });
+      readonly state: "failed";
+      readonly message: string;
+      readonly retryAtMs: number;
+    });
 
 export interface SignalSink {
   next(batch: AdapterDelivery): void;
@@ -45,7 +45,6 @@ export interface SignalSink {
 export interface AdapterSession {
   setDemands(demands: readonly BrokerDemand[]): void;
   clearCache(): void;
-  dispose(): void;
 }
 
 /**
@@ -53,7 +52,7 @@ export interface AdapterSession {
  * deduplication, cancellation, retries, and the lifetime of live transports.
  */
 export interface SignalAdapter {
-  connect(sink: SignalSink): AdapterSession;
+  connect(sink: SignalSink, signal: AbortSignal): AdapterSession;
 }
 
 /** Low-level HTTP implementation used by the generic polling coordinator. */
@@ -134,11 +133,10 @@ const DEFAULT_LIVE_RETENTION_MS = 15_000;
  */
 export function createPollingSignalSource(loader: IntervalLoader): SignalAdapter {
   const policy = createPolicy(loader);
-  return { connect: sink => new PollingSession(loader, policy, sink) };
+  return { connect: (sink, signal) => new PollingSession(loader, policy, sink, signal) };
 }
 
 class PollingSession implements AdapterSession {
-  private disposed = false;
   /** Resolved once when demand changes; ordered finest-first, then newest-first. */
   private plans: readonly ResolvedDemand[] = [];
   private readonly coverage = new Map<number, IntervalSet>();
@@ -152,7 +150,11 @@ class PollingSession implements AdapterSession {
     private readonly loader: IntervalLoader,
     private readonly policy: PollingPolicy,
     private readonly sink: SignalSink,
-  ) { }
+    private readonly signal: AbortSignal,
+  ) {
+    if (signal.aborted) this.close();
+    else signal.addEventListener("abort", this.close, { once: true });
+  }
 
   setDemands(demands: readonly BrokerDemand[]): void {
     this.assertOpen();
@@ -172,17 +174,15 @@ class PollingSession implements AdapterSession {
     this.reconcile();
   }
 
-  dispose(): void {
-    if (this.disposed) return;
-    this.disposed = true;
+  private close = (): void => {
     this.abortActive();
     this.live = null;
     this.plans = [];
     this.cancelScheduled();
-  }
+  };
 
   private assertOpen(): void {
-    if (this.disposed) throw new Error("Signal adapter session is disposed");
+    if (this.signal.aborted) throw new Error("Signal adapter session is closed");
   }
 
   private now(): number {
@@ -192,7 +192,7 @@ class PollingSession implements AdapterSession {
   }
 
   private reconcile = (): void => {
-    if (this.disposed) return;
+    if (this.signal.aborted) return;
     const wallNow = this.now();
     this.updateLiveLease(wallNow);
 
@@ -239,7 +239,7 @@ class PollingSession implements AdapterSession {
   };
 
   private schedule(atMs: number): void {
-    if (this.disposed) return;
+    if (this.signal.aborted) return;
     if (!Number.isFinite(atMs)) return;
     if (this.scheduled !== null && this.scheduled.atMs <= atMs) return;
     this.cancelScheduled();
@@ -260,7 +260,7 @@ class PollingSession implements AdapterSession {
   }
 
   private emitStatus(): void {
-    if (this.disposed) return;
+    if (this.signal.aborted) return;
     const activities: AcquisitionActivity[] = [];
     if (this.live !== null) {
       activities.push({
@@ -422,10 +422,10 @@ class PollingSession implements AdapterSession {
     let batch: AdapterBatch;
     try {
       batch = await this.loader.fetchInterval(running.work.plan, running.controller.signal);
-      if (this.disposed || this.active !== running) return;
+      if (this.active !== running) return;
       validateBatch(running.work.requiredInterval, batch);
     } catch (error) {
-      if (this.disposed || this.active !== running || isAbort(error)) return;
+      if (this.active !== running) return;
       this.failWork(running.work, error);
       return;
     }
@@ -433,12 +433,11 @@ class PollingSession implements AdapterSession {
     // Sink failures are consumer bugs, not acquisition failures. Keep delivery
     // outside the loader retry boundary so they are never blamed on the source.
     this.finishWork(running.work, batch);
-    if (this.disposed || this.active !== running) return;
+    if (this.active !== running) return;
     this.active = null;
     this.emitStatus();
     this.reconcile();
   }
-
   private finishWork(work: Work, batch: AdapterBatch): void {
     // Commit coordinator state before delivery. Sink callbacks may synchronously
     // clear the cache or replace demands; those operations must win reentrantly.
@@ -487,8 +486,10 @@ class PollingSession implements AdapterSession {
   }
 
   private abortActive(): void {
-    if (this.active?.state === "fetching") this.active.controller.abort();
+    const active = this.active;
     this.active = null;
+
+    if (active?.state === "fetching") active.controller.abort();
   }
 }
 
@@ -612,10 +613,6 @@ function defaultPollDelay(resolutionMs: number): number {
 
 function validDelay(value: number): boolean {
   return value >= 0 && Number.isFinite(value);
-}
-
-function isAbort(error: unknown): boolean {
-  return error instanceof Error && error.name === "AbortError";
 }
 
 function positiveFinite(value: number, name: string): number {

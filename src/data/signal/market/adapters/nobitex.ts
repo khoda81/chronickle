@@ -47,31 +47,25 @@ export async function fetchOhlc(opts: FetchOhlcOptions): Promise<NobitexOhlcResp
   // 3. Attach the neatly formatted params to your base endpoint
   const url = `${NOBITEX_OHLC}?${params.toString()}`;
 
-  const controller = new AbortController();
-  const abort = (): void => controller.abort();
-  opts.signal?.addEventListener("abort", abort, { once: true });
-  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 15_000);
-
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    if (!res.ok) {
-      throw new Error(`Nobitex OHLC request failed: ${res.status} ${res.statusText}`);
-    }
-
-    const json = (await res.json()) as NobitexOhlcResponse;
-    // "no_data" is not an error — it means no candles exist for this range
-    // (e.g. before the symbol listed, or future dates). Return null so the
-    // caller can treat it as an empty result rather than an exceptional case.
-    if (json.s === "no_data") return null;
-    if (json.s !== "ok") {
-      throw new Error(`Nobitex OHLC returned status: ${json.s}`);
-    }
-
-    return json;
-  } finally {
-    clearTimeout(timer);
-    opts.signal?.removeEventListener("abort", abort);
+  const timeoutSignal = AbortSignal.timeout(opts.timeoutMs ?? 15_000);
+  const res = await fetch(url, {
+    signal:
+      opts.signal === undefined ? timeoutSignal : AbortSignal.any([opts.signal, timeoutSignal]),
+  });
+  if (!res.ok) {
+    throw new Error(`Nobitex OHLC request failed: ${res.status} ${res.statusText}`);
   }
+
+  const json = (await res.json()) as NobitexOhlcResponse;
+  // "no_data" is not an error — it means no candles exist for this range
+  // (e.g. before the symbol listed, or future dates). Return null so the
+  // caller can treat it as an empty result rather than an exceptional case.
+  if (json.s === "no_data") return null;
+  if (json.s !== "ok") {
+    throw new Error(`Nobitex OHLC returned status: ${json.s}`);
+  }
+
+  return json;
 }
 
 /**

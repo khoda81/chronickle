@@ -56,27 +56,17 @@ export async function fetchFeed(
   feed: RssFeed,
   proxy: string,
   timeoutMs: number,
+  signal: AbortSignal,
 ): Promise<ParsedFeed> {
-  const controller = new AbortController();
-  const timer = setTimeout(
-    () =>
-      controller.abort(
-        new DOMException(`${feed.source} timed out after ${timeoutMs}ms`, "TimeoutError"),
-      ),
-    timeoutMs,
-  );
-
-  try {
-    const url = `${proxy}${encodeURIComponent(feed.url)}`;
-    const res = await fetch(url, { signal: controller.signal });
-    if (!res.ok) {
-      throw new Error(`Feed ${feed.source} failed: ${res.status}`);
-    }
-    const xml = await res.text();
-    return parseRssXml(xml, feed.id);
-  } finally {
-    clearTimeout(timer);
+  const url = `${proxy}${encodeURIComponent(feed.url)}`;
+  const res = await fetch(url, {
+    signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
+  });
+  if (!res.ok) {
+    throw new Error(`Feed ${feed.source} failed: ${res.status}`);
   }
+  const xml = await res.text();
+  return parseRssXml(xml, feed.id);
 }
 
 /**
