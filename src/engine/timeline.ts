@@ -625,9 +625,7 @@ export class Timeline {
       const heatHeight = rowHeight - COVERAGE_BAR_HEIGHT;
       const sample = runtime.hoverSample;
       const hasSample = row.readSampleAt(hoverTime, sample);
-      const anchorX = !hasSample
-        ? x
-        : Math.max(0, Math.min(frame.width, frame.tx.timeToX(sample.t)));
+      const anchorX = hasSample ? frame.tx.timeToX(sample.t) : x;
       const text = !hasSample ? "loading…" : formatPrice(Math.exp(sample.value));
       positionSignalTooltip(frame, this.overlay, row.id, anchorX, rowY + heatHeight / 2, x, text);
       rowY += rowHeight;
