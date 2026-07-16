@@ -96,12 +96,15 @@ export function App() {
     persistence.schedule();
   };
 
-  const syncTimelineRows = (): TimelineLayout | null => {
-    if (timeline === null) return null;
-    const rows: SignalRow[] = charts().map((chart) => {
+  const buildTimelineRows = (): SignalRow[] =>
+    charts().map((chart) => {
       const key = chartStateKey(chart);
       const broker = brokers.get(key);
-      if (broker === undefined) throw new Error(`Missing broker for chart ${key}`);
+
+      if (broker === undefined) {
+        throw new Error(`Missing broker for chart ${key}`);
+      }
+
       return {
         id: key,
         read: (request) => broker.read(request),
@@ -113,7 +116,11 @@ export function App() {
         height: chart.height,
       };
     });
-    timeline.setSignalRows(rows);
+
+  const syncTimelineRows = (): TimelineLayout | null => {
+    if (timeline === null) return null;
+
+    timeline.setSignalRows(buildTimelineRows());
     return timeline.getLayout();
   };
 
@@ -352,6 +359,7 @@ export function App() {
     const range = Range.create(initialViewport.min, initialViewport.max);
     timeline = new Timeline({
       canvas,
+      signalRows: buildTimelineRows(),
       initialTimeRange: range,
       initialPlayback: playback(),
       initialNewsHeight: newsHeight(),
@@ -364,8 +372,12 @@ export function App() {
             setHover(null);
             return;
           }
+
           const snapshot: HoverInfo = { ...event };
-          setHover({ event: snapshot, feed: registry.get(snapshot.feedId) });
+          setHover({
+            event: snapshot,
+            feed: registry.get(snapshot.feedId),
+          });
         },
         onViewportChange: (nextViewport) => {
           setViewport(nextViewport);
@@ -378,7 +390,7 @@ export function App() {
         onLayoutChange: applyLayout,
       },
     });
-    syncTimelineRows();
+
     unsubscribeEvents = eventBroker.subscribe(() => timeline?.reqDraw());
 
     const onPageHide = (): void => persistence.flush();
