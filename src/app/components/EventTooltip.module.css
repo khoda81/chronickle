@@ -12,7 +12,7 @@
   max-height: calc(100% - 1rem);
   overflow: visible;
   padding: var(--space-2-5) var(--space-3) var(--space-3);
-  border: 1px solid var(--outlet-color);
+  border: 2px solid var(--outlet-color);
   border-radius: var(--radius-lg);
   background:
     linear-gradient(145deg, rgba(255, 255, 255, 0.16), rgba(124, 196, 255, 0.045)),

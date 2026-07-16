@@ -4,7 +4,7 @@
  */
 .menu {
   z-index: var(--layer-menu);
-  border: 1px solid var(--glass-border);
+  border: 2px solid var(--glass-border);
   background:
     linear-gradient(
       145deg,

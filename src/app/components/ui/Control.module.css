@@ -2,7 +2,7 @@
 .iconButton,
 .input {
   min-height: var(--control-height-sm);
-  border: 1px solid var(--color-border-control);
+  border: 2px solid var(--color-border-control);
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--color-fg);
