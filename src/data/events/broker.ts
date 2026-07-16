@@ -30,9 +30,9 @@
  */
 
 import type { NewsEvent, RssFeed } from "../../domain.ts";
-import { Range } from "../../engine/range.ts";
+import { Interval } from "../../core/interval.ts";
 import { FeedWalker, type FeedWalkerOptions, type WalkOutcome } from "./walker.ts";
-import { lowerBoundTime, upperBoundTime } from "../../timeSearch.ts";
+import { lowerBoundTime } from "../../timeSearch.ts";
 
 /** Algebraic query status — mirrors the price broker's contract. */
 export type EventQueryStatus = "complete" | "partial" | "empty";
@@ -111,30 +111,30 @@ export class EventBroker {
   /**
    * Synchronous query. Returns cached events in `range` (filtered to enabled
    * feeds) and kicks off per-feed backfill for any enabled feed whose oldest
-   * cached event is newer than `range.min`. Safe to call every frame — the
+   * cached event is newer than `range.start`. Safe to call every frame — the
    * `fetching` state dedups in-flight walks, and `backoff`/`failed`/`exhausted`
    * prevent redundant requests.
    */
-  query(range: Range): EventQueryResult {
+  query(range: Interval): EventQueryResult {
     const enabledIds = new Set(this.activeFeeds().map((f) => f.id));
-    const inRange = sliceByTime(this.events, range.min, range.max).filter((e) =>
+    const inInterval = sliceByTime(this.events, range.start, range.end).filter((e) =>
       enabledIds.has(e.feedId),
     );
 
-    // Kick backfill for enabled feeds that don't yet cover range.min.
+    // Kick backfill for enabled feeds that don't yet cover range.start.
     let allCovered = true;
     for (const feed of this.activeFeeds()) {
       const st = this.stateOf(feed.id);
-      const covered = this.kickIfNeeded(feed, st, range.min);
+      const covered = this.kickIfNeeded(feed, st, range.start);
       if (!covered) allCovered = false;
     }
 
     let status: EventQueryStatus;
-    if (allCovered && inRange.length > 0) status = "complete";
-    else if (inRange.length > 0) status = "partial";
+    if (allCovered && inInterval.length > 0) status = "complete";
+    else if (inInterval.length > 0) status = "partial";
     else status = "empty";
 
-    return { events: inRange, status };
+    return { events: inInterval, status };
   }
 
   /** Subscribe to cache updates. Returns an unsubscribe function. */
@@ -153,7 +153,7 @@ export class EventBroker {
   }
 
   /**
-   * Decide whether `feed` is covered for `range.min`, and kick a walk if not.
+   * Decide whether `feed` is covered for `range.start`, and kick a walk if not.
    * Returns true if the feed is covered (or terminal — nothing more to fetch).
    */
   private kickIfNeeded(feed: RssFeed, st: FeedState, rangeMin: number): boolean {
@@ -317,12 +317,12 @@ function keyOf(e: NewsEvent): string {
 }
 
 /**
- * Slice a time-sorted event array to [tMin, tMax] inclusive, via two binary
- * searches. Returns a new array (snapshot); callers must not mutate.
+ * Slice a time-sorted event array to the half-open interval [start, end).
+ * Returns a new array (snapshot); callers must not mutate.
  */
-function sliceByTime(events: readonly NewsEvent[], tMin: number, tMax: number): NewsEvent[] {
+function sliceByTime(events: readonly NewsEvent[], start: number, end: number): NewsEvent[] {
   if (events.length === 0) return [];
-  const lo = lowerBoundTime(events, tMin);
-  const hi = upperBoundTime(events, tMax, lo);
+  const lo = lowerBoundTime(events, start);
+  const hi = lowerBoundTime(events, end, lo);
   return events.slice(lo, hi);
 }

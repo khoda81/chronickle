@@ -1,11 +1,11 @@
-import { createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { EventBroker, defaultProxy, fetchFeed } from "../data/index.ts";
 import { FeedRegistry } from "../data/events/feeds.ts";
 import { Broker } from "../data/signal/broker.ts";
 import { priceSignalSource } from "../data/signal/market/market.ts";
 import type { RssFeed } from "../domain.ts";
 import { DEFAULT_PALETTE, PALETTES, type PaletteName } from "../engine/ramp.ts";
-import { Range } from "../engine/range.ts";
+import { Interval } from "../core/interval.ts";
 import {
   Timeline,
   type HoverInfo,
@@ -16,8 +16,7 @@ import {
 import type { WaveletMode } from "../engine/wavelet.ts";
 import { DEFAULT_FEEDS } from "./defaultFeeds.ts";
 import {
-  createUiStatePersistence,
-  loadUiState,
+  createPersistedUiState,
   type PersistedChart,
   type PersistedUiState,
 } from "./persistence.ts";
@@ -34,12 +33,14 @@ import styles from "./App.module.css";
 const DAY_MS = 86_400_000;
 
 export function App() {
-  const saved = loadUiState();
   const now = Date.now();
-  const initialViewport: { readonly min: number; readonly max: number } = saved.viewport ?? {
-    min: now - DAY_MS,
-    max: now,
-  };
+  const persistence = createPersistedUiState({
+    version: 4,
+    viewport: Interval.create(now - DAY_MS, now),
+    playback: { mode: "following", anchor: 0.85 },
+    charts: [],
+  });
+  const saved = persistence.state();
   const registry = FeedRegistry.load(DEFAULT_FEEDS);
   const eventBroker = new EventBroker({}, () => registry.active());
   const brokers = new Map<string, Broker>();
@@ -50,7 +51,7 @@ export function App() {
   });
   const [feeds, setFeeds] = createSignal(registry.all());
   const [charts, setCharts] = createSignal<readonly ChartState[]>([]);
-  const [viewport, setViewport] = createSignal(initialViewport);
+  const [viewport, setViewport] = createSignal(saved.viewport);
   const [playback, setPlayback] = createSignal<TimelinePlayback>(saved.playback);
   const [newsHeight, setNewsHeight] = createSignal(saved.newsHeight);
   const [hover, setHover] = createSignal<EventTooltipModel | null>(null);
@@ -73,27 +74,10 @@ export function App() {
     setStatusState({ message, kind });
   };
 
-  const persistedState = (): PersistedUiState => ({
-    version: 3,
-    viewport: viewport(),
-    playback: playback(),
-    newsHeight: newsHeight(),
-    charts: charts().map(({ sourceId, symbol, palette, waveletMode, verticalOffset, height }) => ({
-      sourceId,
-      symbol,
-      palette,
-      waveletMode,
-      verticalOffset,
-      height,
-    })),
-  });
-  const persistence = createUiStatePersistence(persistedState);
-
   const updateChart = (key: string, update: Partial<ChartState>): void => {
     setCharts((current) =>
       current.map((chart) => (chartStateKey(chart) === key ? { ...chart, ...update } : chart)),
     );
-    persistence.schedule();
   };
 
   const buildTimelineRows = (): SignalRow[] =>
@@ -174,18 +158,12 @@ export function App() {
     const fittedLayout = syncTimelineRows();
     if (fittedLayout !== null) storeTimelineLayout(fittedLayout);
     disposeRemovedCharts(removed);
-    persistence.schedule();
     setStatus(`Removed ${removedChartLabels(removed)}`);
   };
 
   const removeChart = (key: string): void => removeCharts([key]);
 
-  const addChart = (
-    sourceId: string,
-    rawSymbol: string,
-    persist = true,
-    initial?: PersistedChart,
-  ): boolean => {
+  const addChart = (sourceId: string, rawSymbol: string, initial?: PersistedChart): boolean => {
     const source = priceSignalSource(sourceId);
     if (source === null) {
       setStatus(`Unknown market source: ${sourceId}`, "error");
@@ -241,7 +219,6 @@ export function App() {
     setCharts((current) => [...current, chart]);
     const fittedLayout = syncTimelineRows();
     if (fittedLayout !== null) storeTimelineLayout(fittedLayout);
-    if (persist) persistence.schedule();
     setStatus(`Added ${source.label} ${symbol}`);
     return true;
   };
@@ -284,7 +261,6 @@ export function App() {
       disposeRemovedCharts(removed);
       setStatus(`Removed ${removedChartLabels(removed)}`);
     }
-    persistence.schedule();
   };
 
   const refreshFeeds = (): void => {
@@ -333,9 +309,29 @@ export function App() {
   for (const chart of saved.charts.length > 0
     ? saved.charts
     : [{ sourceId: "nobitex", symbol: "USDTIRT" }]) {
-    addChart(chart.sourceId, chart.symbol, false, chart);
+    addChart(chart.sourceId, chart.symbol, chart);
   }
-  if (charts().length === 0) addChart("nobitex", "USDTIRT", false);
+  if (charts().length === 0) addChart("nobitex", "USDTIRT");
+
+  createEffect(() => {
+    const snapshot: PersistedUiState = {
+      version: 4,
+      viewport: viewport(),
+      playback: playback(),
+      newsHeight: newsHeight(),
+      charts: charts().map(
+        ({ sourceId, symbol, palette, waveletMode, verticalOffset, height }) => ({
+          sourceId,
+          symbol,
+          palette,
+          waveletMode,
+          verticalOffset,
+          height,
+        }),
+      ),
+    };
+    persistence.replace(snapshot);
+  });
 
   const changeChartPalette = (key: string, palette: PaletteName): void => {
     timeline?.setSignalRowPalette(key, palette);
@@ -356,14 +352,13 @@ export function App() {
   };
 
   onMount(() => {
-    const range = Range.create(initialViewport.min, initialViewport.max);
     timeline = new Timeline({
       canvas,
       signalRows: buildTimelineRows(),
-      initialTimeRange: range,
+      initialTimeInterval: saved.viewport,
       initialPlayback: playback(),
       initialNewsHeight: newsHeight(),
-      eventSource: (queryRange) => eventBroker.query(queryRange),
+      eventSource: (queryInterval) => eventBroker.query(queryInterval),
       feedColorOf: (feedId) => registry.colorOf(feedId),
       overlay: timelineOverlay,
       callbacks: {
@@ -381,11 +376,9 @@ export function App() {
         },
         onViewportChange: (nextViewport) => {
           setViewport(nextViewport);
-          persistence.schedule();
         },
         onPlaybackChange: (nextPlayback) => {
           setPlayback(nextPlayback);
-          persistence.schedule();
         },
         onLayoutChange: applyLayout,
       },

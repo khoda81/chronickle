@@ -22,8 +22,8 @@ export function eventIndexAtOrBefore(
 ): number | null {
   const xs = events.events;
   if (xs.length === 0) return null;
-  const lo = lowerBoundTime(xs, tx.timeDomain.min);
-  const hi = upperBoundTime(xs, tx.timeDomain.max, lo);
+  const lo = lowerBoundTime(xs, tx.timeDomain.start);
+  const hi = lowerBoundTime(xs, tx.timeDomain.end, lo);
   if (lo === hi) return null;
 
   const target = tx.xToTime(px);
@@ -43,8 +43,8 @@ export function eventIndexNearPoint(
   if (Math.abs(py - eventY) > radiusPx) return null;
   const xs = events.events;
   if (xs.length === 0) return null;
-  const lo = lowerBoundTime(xs, tx.timeDomain.min);
-  const hi = upperBoundTime(xs, tx.timeDomain.max, lo);
+  const lo = lowerBoundTime(xs, tx.timeDomain.start);
+  const hi = lowerBoundTime(xs, tx.timeDomain.end, lo);
   if (lo === hi) return null;
 
   const target = tx.xToTime(px);

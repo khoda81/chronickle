@@ -12,7 +12,7 @@ prices and converts them to log-price samples before crossing this boundary.
 - `SignalAdapter` owns acquisition policy: native sample-period selection,
   request expansion, deduplication, cancellation, retry/backoff, and live
   transport lifetime.
-- `RangeLoader` is the adapter's low-level range fetch operation. It knows the
+- `IntervalLoader` is the adapter's low-level range fetch operation. It knows the
   exchange/API wire format but not the broker or renderer.
 - `SignalSegmentStore` retains the finest reconstruction evidence for each cached
   interval and evaluates the signal on the renderer's time grid.
@@ -28,12 +28,12 @@ prices and converts them to log-price samples before crossing this boundary.
    source cadence, not a claim of continuous observation.
 3. Smaller sample periods are finer. Fine cached or settled evidence satisfies
    a coarser demand; coarse evidence never satisfies a finer demand.
-4. All coverage ranges are half-open `[min, max)`. Touching ranges may merge;
+4. All coverage intervals are half-open `[start, end)`. Touching ranges may merge;
    no millisecond adjacency tolerance is used.
 5. A broker demand means “make at least this range available with sample
    spacing no larger than this.” It is not a literal HTTP request. An adapter
    may fetch and deliver a wider range, and the broker caches all valid samples
-   in the delivered `searchedRange`.
+   in the delivered `searchedInterval`.
 6. `setDemands` replaces the session's complete interest snapshot. The adapter
    may keep a live transport warm after live interest disappears, but must not
    multiply work when the viewport moves.

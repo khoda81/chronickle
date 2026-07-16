@@ -1,7 +1,6 @@
 /** Evidence-backed cache and subscription boundary for a sampled signal. */
 
-import { Range } from "../../engine/range.ts";
-import { RangeSet } from "../../engine/rangeSet.ts";
+import { Interval, IntervalSet } from "../../core/interval.ts";
 import { SettledCoverageIndex, type CoverageSegment } from "./coverage.ts";
 import type {
   AcquisitionActivity,
@@ -26,7 +25,7 @@ export interface ReadRequest {
 
 /** Fetch/cache demand independent of a particular sampling grid. */
 export interface BrokerDemand {
-  readonly range: Range;
+  readonly range: Interval;
   readonly maxDeltaTMs: number;
 }
 
@@ -76,7 +75,7 @@ export class Broker {
       },
       error: (error, activity) => {
         this.onError(
-          `[Broker] adapter failed for ${activity.range.min}..${activity.range.max}; retry scheduled`,
+          `[Broker] adapter failed for ${activity.range.start}..${activity.range.end}; retry scheduled`,
           error,
         );
       },
@@ -106,28 +105,28 @@ export class Broker {
       };
     }
 
-    const queryRange = Range.create(evalTime[0]!, evalTime[evalTime.length - 1]!);
+    const queryInterval = Interval.create(evalTime[0]!, evalTime[evalTime.length - 1]!);
     const wallNow = this.now();
-    const historicalRange = clampToNow(queryRange, wallNow);
+    const historicalInterval = clampToNow(queryInterval, wallNow);
     const value = this.store.sample(evalTime, wallNow, this.valueBuffer);
     this.valueBuffer = value;
 
-    const readyCoverage = new RangeSet();
-    if (historicalRange !== null) {
-      this.store.addReadyBlockers(readyCoverage, maxDeltaTMs, historicalRange);
+    const readyCoverage = new IntervalSet();
+    if (!Interval.isEmpty(historicalInterval)) {
+      this.store.addReadyBlockers(readyCoverage, maxDeltaTMs, historicalInterval);
     }
     const coverage = [
       ...this.readySegments(evalTime, wallNow),
-      ...(historicalRange === null
+      ...(Interval.isEmpty(historicalInterval)
         ? []
-        : this.fetchedCoverage.emptySegments(historicalRange, maxDeltaTMs, readyCoverage)),
-      ...this.transientSegments(queryRange),
-      ...this.futureSegments(queryRange, wallNow, maxDeltaTMs),
+        : this.fetchedCoverage.emptySegments(historicalInterval, maxDeltaTMs, readyCoverage)),
+      ...this.transientSegments(queryInterval),
+      ...this.futureSegments(queryInterval, wallNow, maxDeltaTMs),
     ].sort(
       (a, b) =>
-        a.range.min - b.range.min ||
+        a.range.start - b.range.start ||
         coverageLabelRank(b.state) - coverageLabelRank(a.state) ||
-        a.range.max - b.range.max,
+        a.range.end - b.range.end,
     );
 
     return {
@@ -178,8 +177,8 @@ export class Broker {
     this.notify();
   }
 
-  cachedRange(): Range | null {
-    return this.store.timeRange();
+  cachedInterval(): Interval | null {
+    return this.store.timeInterval();
   }
 
   /** Write the latest selected observation at or before `time`, clamped to now. */
@@ -196,13 +195,13 @@ export class Broker {
   }
 
   private ingest(result: SignalDelivery): boolean {
-    const clipped = clipSamples(normalizeSamples(result.samples), result.searchedRange);
+    const clipped = clipSamples(normalizeSamples(result.samples), result.searchedInterval);
     const samples = clipped.samples;
     if (clipped.discardedFutureCount > 0) {
       this.onWarning(
         `[Broker] discarded ${clipped.discardedFutureCount} future point(s); ` +
-        `searched range ended at ${result.searchedRange.max}, ` +
-        `latest returned timestamp was ${clipped.latestFutureT}`,
+          `searched range ended at ${result.searchedInterval.end}, ` +
+          `latest returned timestamp was ${clipped.latestFutureT}`,
       );
     }
     let changed = false;
@@ -214,7 +213,7 @@ export class Broker {
       // wall clock from manufacturing millisecond-sized "uncovered" tails.
       changed = this.ingestObserved(samples, result.resolutionMs);
     }
-    this.fetchedCoverage.add(result.requestedMaxDeltaTMs, result.searchedRange);
+    this.fetchedCoverage.add(result.requestedMaxDeltaTMs, result.searchedInterval);
     return changed;
   }
 
@@ -244,17 +243,17 @@ export class Broker {
 
   private readySegments(evalTime: Float64Array, wallNow: number): CoverageSegment[] {
     return this.store.segments(evalTime, wallNow).map((span) => ({
-      range: Range.create(span.startTime, span.endTime),
+      range: Interval.create(span.startTime, span.endTime),
       samplePeriodMs: span.resolutionMs,
       state: "ready" as const,
     }));
   }
 
-  private transientSegments(range: Range): CoverageSegment[] {
+  private transientSegments(range: Interval): CoverageSegment[] {
     const out: CoverageSegment[] = [];
     for (const activity of this.adapterActivities) {
-      const overlap = intersect(activity.range, range);
-      if (overlap === null) continue;
+      const overlap = Interval.intersection(activity.range, range);
+      if (Interval.isEmpty(overlap)) continue;
       out.push({
         range: overlap,
         samplePeriodMs: activity.resolutionMs,
@@ -271,12 +270,16 @@ export class Broker {
     return out;
   }
 
-  private futureSegments(range: Range, wallNow: number, maxSampleGapMs: number): CoverageSegment[] {
-    const min = Math.max(range.min, wallNow);
-    if (!(min < range.max)) return [];
+  private futureSegments(
+    range: Interval,
+    wallNow: number,
+    maxSampleGapMs: number,
+  ): CoverageSegment[] {
+    const min = Math.max(range.start, wallNow);
+    if (!(min < range.end)) return [];
     return [
       {
-        range: Range.create(min, range.max),
+        range: Interval.create(min, range.end),
         samplePeriodMs: maxSampleGapMs,
         state: this.adapterActivities.some((activity) => activity.state === "watching")
           ? "watching"
@@ -305,14 +308,15 @@ function validateDemand(demand: BrokerDemand): BrokerDemand {
 
 function sameDemand(a: BrokerDemand, b: BrokerDemand): boolean {
   return (
-    a.range.min === b.range.min && a.range.max === b.range.max && a.maxDeltaTMs === b.maxDeltaTMs
+    a.range.start === b.range.start &&
+    a.range.end === b.range.end &&
+    a.maxDeltaTMs === b.maxDeltaTMs
   );
 }
 
-function clampToNow(range: Range, now: number): Range | null {
+function clampToNow(range: Interval, now: number): Interval {
   if (!Number.isFinite(now)) throw new Error(`Broker: invalid wall clock ${now}`);
-  const max = Math.min(range.max, now);
-  return range.min < max ? Range.create(range.min, max) : null;
+  return Interval.create(range.start, Math.min(range.end, now));
 }
 
 function coverageLabelRank(state: CoverageSegment["state"]): number {
@@ -329,14 +333,17 @@ interface ClippedPoints {
   readonly latestFutureT: number | null;
 }
 
-function clipSamples(samples: readonly Sample[], range: Range): ClippedPoints {
+function clipSamples(samples: readonly Sample[], range: Interval): ClippedPoints {
   let predecessor: Sample | undefined;
   const inside: Sample[] = [];
   let discardedFutureCount = 0;
   let latestFutureT: number | null = null;
   for (const sample of samples) {
-    if (sample.t < range.min) predecessor = sample;
-    else if (sample.t <= range.max) inside.push(sample);
+    if (sample.t < range.start) predecessor = sample;
+    // A sample exactly at `end` is valid boundary evidence: it closes the
+    // preceding hold and begins its own native-resolution hold. Searched
+    // coverage remains half-open independently of observation lifetimes.
+    else if (sample.t <= range.end) inside.push(sample);
     else {
       discardedFutureCount++;
       latestFutureT = sample.t;
@@ -347,10 +354,4 @@ function clipSamples(samples: readonly Sample[], range: Range): ClippedPoints {
     discardedFutureCount,
     latestFutureT,
   };
-}
-
-function intersect(a: Range, b: Range): Range | null {
-  const min = Math.max(a.min, b.min);
-  const max = Math.min(a.max, b.max);
-  return min < max ? Range.create(min, max) : null;
 }

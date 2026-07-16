@@ -1,11 +1,10 @@
 /** Demand-aware adapter scheduling for sampled real-valued time series. */
 
-import { Range } from "../../engine/range.ts";
-import { RangeSet } from "../../engine/rangeSet.ts";
+import { Interval, IntervalSet } from "../../core/interval.ts";
 import type { Sample } from "./sample.ts";
 
 export interface AdapterDemand {
-  readonly range: Range;
+  readonly range: Interval;
   /** Maximum acceptable native sample spacing requested by the consumer. */
   readonly maxDeltaTMs: number;
 }
@@ -19,7 +18,7 @@ export interface AdapterBatch {
   /** Canonical observations in epoch milliseconds. */
   readonly samples: readonly Sample[];
   /** Everything searched by the source, which may be wider than requested. */
-  readonly searchedRange: Range;
+  readonly searchedInterval: Interval;
 }
 
 /** A cache delivery is self-describing; it is not tied to a broker request. */
@@ -32,7 +31,7 @@ export type AdapterActivityState = "fetching" | "watching" | "failed";
 
 export interface AcquisitionActivity {
   readonly state: AdapterActivityState;
-  readonly range: Range;
+  readonly range: Interval;
   readonly resolutionMs: number;
   readonly message?: string;
   readonly retryAtMs?: number;
@@ -60,7 +59,7 @@ export interface SignalAdapter {
 }
 
 /** Low-level HTTP implementation used by the generic polling coordinator. */
-export interface RangeLoader {
+export interface IntervalLoader {
   /** Minimum useful request size. The coordinator may fetch more than demanded. */
   readonly minFetchPoints?: number;
   /** Keep live polling warm for this long after the last live demand disappears. */
@@ -71,14 +70,14 @@ export interface RangeLoader {
   readonly now?: () => number;
 
   resolve(demand: AdapterDemand): number;
-  fetchRange(plan: AdapterPlan, signal: AbortSignal): Promise<AdapterBatch>;
+  fetchInterval(plan: AdapterPlan, signal: AbortSignal): Promise<AdapterBatch>;
   retryDelayMs?(error: unknown, attempt: number): number;
   clearCache?(): void;
 }
 
 interface Work {
   readonly kind: "history" | "live";
-  readonly requiredRange: Range;
+  readonly requiredInterval: Interval;
   readonly plan: AdapterPlan;
   readonly controller: AbortController;
   attempt: number;
@@ -91,7 +90,7 @@ interface LiveLease {
   cursorMs: number;
   nextAtMs: number;
   retainedUntilMs: number;
-  statusRange: Range;
+  statusInterval: Interval;
 }
 
 const DEFAULT_RETRY = (attempt: number): number => Math.min(30_000, 2_000 * 2 ** (attempt - 1));
@@ -103,7 +102,7 @@ const DEFAULT_LIVE_RETENTION_MS = 15_000;
  * Turn a range fetcher into a demand-aware adapter. There is one bounded work
  * lane and at most one live lease, so redraws cannot multiply polling loops.
  */
-export function createPollingSignalSource(fetcher: RangeLoader): SignalAdapter {
+export function createPollingSignalSource(fetcher: IntervalLoader): SignalAdapter {
   const now = fetcher.now ?? Date.now;
   const planDemand = (demand: AdapterDemand): AdapterPlan => {
     validateDemand(demand);
@@ -118,7 +117,7 @@ export function createPollingSignalSource(fetcher: RangeLoader): SignalAdapter {
     connect(sink) {
       let disposed = false;
       let demands: readonly AdapterDemand[] = [];
-      const coverage = new Map<number, RangeSet>();
+      const coverage = new Map<number, IntervalSet>();
       let active: Work | null = null;
       let live: LiveLease | null = null;
       let timer: ReturnType<typeof setTimeout> | null = null;
@@ -147,7 +146,7 @@ export function createPollingSignalSource(fetcher: RangeLoader): SignalAdapter {
         if (live !== null) {
           activities.push({
             state: "watching",
-            range: live.statusRange,
+            range: live.statusInterval,
             resolutionMs: live.plan.resolutionMs,
           });
         }
@@ -163,7 +162,7 @@ export function createPollingSignalSource(fetcher: RangeLoader): SignalAdapter {
         const nextKey = activities
           .map(
             (item) =>
-              `${item.state}:${item.range.min}:${item.range.max}:${item.resolutionMs}:${item.retryAtMs ?? ""}:${item.message ?? ""}`,
+              `${item.state}:${item.range.start}:${item.range.end}:${item.resolutionMs}:${item.retryAtMs ?? ""}:${item.message ?? ""}`,
           )
           .join("|");
         if (nextKey === statusKey) return;
@@ -171,31 +170,31 @@ export function createPollingSignalSource(fetcher: RangeLoader): SignalAdapter {
         sink.status(activities);
       };
 
-      const coverageFor = (resolutionMs: number): RangeSet => {
+      const coverageFor = (resolutionMs: number): IntervalSet => {
         let ranges = coverage.get(resolutionMs);
         if (ranges === undefined) {
-          ranges = new RangeSet();
+          ranges = new IntervalSet();
           coverage.set(resolutionMs, ranges);
         }
         return ranges;
       };
 
-      const addCoverage = (resolutionMs: number, range: Range): void => {
+      const addCoverage = (resolutionMs: number, range: Interval): void => {
         coverageFor(resolutionMs).add(range);
       };
 
-      const blockers = (resolutionMs: number, target: Range): RangeSet => {
-        const out = new RangeSet();
+      const blockers = (resolutionMs: number, target: Interval): IntervalSet => {
+        const out = new IntervalSet();
         for (const [availableResolutionMs, ranges] of coverage) {
           if (availableResolutionMs > resolutionMs) continue;
           for (const overlap of ranges.intersections(target)) out.add(overlap);
         }
         if (live !== null && live.plan.resolutionMs <= resolutionMs) {
           const wallNow = now();
-          const tailMin = Math.max(live.plan.range.min, wallNow - 2 * live.plan.resolutionMs);
+          const tailMin = Math.max(live.plan.range.start, wallNow - 2 * live.plan.resolutionMs);
           if (tailMin < wallNow) {
-            const tail = intersect(Range.create(tailMin, wallNow), target);
-            if (tail !== null) out.add(tail);
+            const tail = Interval.intersection(Interval.create(tailMin, wallNow), target);
+            out.add(tail);
           }
         }
         return out;
@@ -204,21 +203,21 @@ export function createPollingSignalSource(fetcher: RangeLoader): SignalAdapter {
       const currentPlans = (): AdapterPlan[] =>
         demands
           .map((demand) => planDemand({ ...demand }))
-          .sort((a, b) => a.resolutionMs - b.resolutionMs || b.range.max - a.range.max);
+          .sort((a, b) => a.resolutionMs - b.resolutionMs || b.range.end - a.range.end);
 
       const desiredLivePlan = (plans: readonly AdapterPlan[]): AdapterPlan | null => {
         const wallNow = now();
-        return plans.find((plan) => includes(plan.range, wallNow)) ?? null;
+        return plans.find((plan) => reachesBoundary(plan.range, wallNow)) ?? null;
       };
 
       const createLiveLease = (plan: AdapterPlan, wallNow: number): LiveLease => {
-        const cursorMs = Math.max(plan.range.min, wallNow - 2 * plan.resolutionMs);
+        const cursorMs = Math.max(plan.range.start, wallNow - 2 * plan.resolutionMs);
         return {
           plan,
           cursorMs,
           nextAtMs: wallNow,
           retainedUntilMs: Number.POSITIVE_INFINITY,
-          statusRange: Range.create(Math.min(cursorMs, wallNow - plan.resolutionMs), wallNow),
+          statusInterval: Interval.create(Math.min(cursorMs, wallNow - plan.resolutionMs), wallNow),
         };
       };
 
@@ -263,16 +262,16 @@ export function createPollingSignalSource(fetcher: RangeLoader): SignalAdapter {
         return plans.some(
           (plan) =>
             plan.resolutionMs >= work.plan.resolutionMs &&
-            intersect(plan.range, work.requiredRange) !== null,
+            !Interval.isEmpty(Interval.intersection(plan.range, work.requiredInterval)),
         );
       };
 
       const nextHistoricalWork = (plans: readonly AdapterPlan[], wallNow: number): Work | null => {
         for (const plan of plans) {
           const target = clampToNow(plan.range, wallNow);
-          if (target === null) continue;
+          if (Interval.isEmpty(target)) continue;
           const gaps = blockers(plan.resolutionMs, target).gaps(target);
-          const gap = includes(plan.range, wallNow) ? gaps[gaps.length - 1] : gaps[0];
+          const gap = reachesBoundary(plan.range, wallNow) ? gaps[gaps.length - 1] : gaps[0];
           if (gap === undefined) continue;
           return makeWork("history", plan, gap, wallNow);
         }
@@ -283,25 +282,25 @@ export function createPollingSignalSource(fetcher: RangeLoader): SignalAdapter {
         if (live === null || wallNow < live.nextAtMs) return null;
         const min = Math.min(live.cursorMs, wallNow - live.plan.resolutionMs);
         if (!(min < wallNow)) return null;
-        return makeWork("live", live.plan, Range.create(min, wallNow), wallNow);
+        return makeWork("live", live.plan, Interval.create(min, wallNow), wallNow);
       };
 
       const makeWork = (
         kind: Work["kind"],
         plan: AdapterPlan,
-        requiredRange: Range,
+        requiredInterval: Interval,
         wallNow: number,
       ): Work => {
-        const fetchRange = expandRange(
-          requiredRange,
+        const fetchInterval = expandInterval(
+          requiredInterval,
           plan.resolutionMs,
           wallNow,
           fetcher.minFetchPoints,
         );
         return {
           kind,
-          requiredRange,
-          plan: { ...plan, range: fetchRange },
+          requiredInterval,
+          plan: { ...plan, range: fetchInterval },
           controller: new AbortController(),
           attempt: 0,
           retryAtMs: null,
@@ -310,22 +309,22 @@ export function createPollingSignalSource(fetcher: RangeLoader): SignalAdapter {
       };
 
       const finishWork = (work: Work, batch: AdapterBatch): void => {
-        validateBatch(work.requiredRange, batch);
+        validateBatch(work.requiredInterval, batch);
         sink.next({
           ...batch,
           resolutionMs: work.plan.resolutionMs,
           requestedMaxDeltaTMs: work.plan.maxDeltaTMs,
         });
-        addCoverage(work.plan.resolutionMs, batch.searchedRange);
+        addCoverage(work.plan.resolutionMs, batch.searchedInterval);
 
         if (work.kind === "live" && live !== null) {
           const wallNow = now();
           const last = batch.samples[batch.samples.length - 1];
           live.cursorMs = Math.max(
-            batch.searchedRange.max,
+            batch.searchedInterval.end,
             last === undefined ? -Infinity : last.t + work.plan.resolutionMs,
           );
-          live.statusRange = work.requiredRange;
+          live.statusInterval = work.requiredInterval;
           const pollDelay = fetcher.livePollDelayMs ?? defaultPollDelay(work.plan.resolutionMs);
           const expectedNext = last === undefined ? -Infinity : last.t + work.plan.resolutionMs;
           live.nextAtMs =
@@ -341,7 +340,7 @@ export function createPollingSignalSource(fetcher: RangeLoader): SignalAdapter {
         emitStatus();
         void (async () => {
           try {
-            const batch = await fetcher.fetchRange(work.plan, work.controller.signal);
+            const batch = await fetcher.fetchInterval(work.plan, work.controller.signal);
             if (disposed || active !== work) return;
             finishWork(work, batch);
             active = null;
@@ -463,35 +462,35 @@ export function createPollingSignalSource(fetcher: RangeLoader): SignalAdapter {
   return adapter;
 }
 
-function expandRange(
-  required: Range,
+function expandInterval(
+  required: Interval,
   resolutionMs: number,
   wallNow: number,
   configuredMinPoints: number | undefined,
-): Range {
+): Interval {
   const minPoints = configuredMinPoints ?? DEFAULT_MIN_FETCH_POINTS;
   if (!(minPoints >= 1) || !Number.isFinite(minPoints)) {
     throw new Error(`SignalAdapter: invalid minFetchPoints ${minPoints}`);
   }
   const minSpan = Math.ceil(minPoints) * resolutionMs;
-  let min = Math.floor(required.min / resolutionMs) * resolutionMs;
-  let max = Math.min(wallNow, Math.ceil(required.max / resolutionMs) * resolutionMs);
-  if (!(min < max)) max = Math.min(wallNow, Math.max(required.max, min + resolutionMs));
+  let min = Math.floor(required.start / resolutionMs) * resolutionMs;
+  let max = Math.min(wallNow, Math.ceil(required.end / resolutionMs) * resolutionMs);
+  if (!(min < max)) max = Math.min(wallNow, Math.max(required.end, min + resolutionMs));
   if (max - min < minSpan) {
-    if (required.max >= wallNow - 2 * resolutionMs) {
+    if (required.end >= wallNow - 2 * resolutionMs) {
       min = max - minSpan;
     } else {
       const missing = minSpan - (max - min);
       min -= Math.ceil(missing / 2 / resolutionMs) * resolutionMs;
       max = Math.min(wallNow, min + minSpan);
-      if (max < required.max) {
-        max = required.max;
+      if (max < required.end) {
+        max = required.end;
         min = max - minSpan;
       }
     }
   }
   if (!(min < max)) throw new Error("SignalAdapter: could not construct a non-empty fetch range");
-  return Range.create(min, max);
+  return Interval.create(min, max);
 }
 
 function validateDemand(demand: AdapterDemand): void {
@@ -500,8 +499,8 @@ function validateDemand(demand: AdapterDemand): void {
   }
 }
 
-function validateBatch(requiredRange: Range, batch: AdapterBatch): void {
-  if (intersect(requiredRange, batch.searchedRange) === null) {
+function validateBatch(requiredInterval: Interval, batch: AdapterBatch): void {
+  if (Interval.isEmpty(Interval.intersection(requiredInterval, batch.searchedInterval))) {
     throw new Error("SignalAdapter: searched range made no progress on the required range");
   }
 }
@@ -514,19 +513,13 @@ function validDelay(value: number): boolean {
   return value >= 0 && Number.isFinite(value);
 }
 
-function includes(range: Range, time: number): boolean {
-  return range.min <= time && range.max >= time;
+/** True when the interval reaches or crosses a boundary such as wall-clock now. */
+function reachesBoundary(interval: Interval, boundary: number): boolean {
+  return interval.start <= boundary && interval.end >= boundary;
 }
 
-function clampToNow(range: Range, now: number): Range | null {
-  const max = Math.min(range.max, now);
-  return range.min < max ? Range.create(range.min, max) : null;
-}
-
-function intersect(a: Range, b: Range): Range | null {
-  const min = Math.max(a.min, b.min);
-  const max = Math.min(a.max, b.max);
-  return min < max ? Range.create(min, max) : null;
+function clampToNow(range: Interval, now: number): Interval {
+  return Interval.create(range.start, Math.min(range.end, now));
 }
 
 function isAbort(error: unknown): boolean {

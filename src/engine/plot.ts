@@ -16,20 +16,19 @@
  * dispose, so caller-side ctx state is never disturbed.
  */
 
-import type { Range } from "./range.ts";
-import { Range as R } from "./range.ts";
+import { Interval } from "../core/interval.ts";
 import { DataTransform } from "./transform.ts";
 import { Frame } from "./gfx/context.ts";
 
 export interface PlotOptions {
   readonly canvas: HTMLCanvasElement;
-  readonly initialTimeRange: Range;
+  readonly initialTimeInterval: Interval;
 }
 
 export class Plot {
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
-  private timeRange: Range;
+  private timeInterval: Interval;
   private dpr = 1;
   /** Reusable per-pixel price buffer. Grows as needed, never shrinks. */
   private scratch: Float64Array = new Float64Array(0);
@@ -41,17 +40,17 @@ export class Plot {
       throw new Error("Canvas 2D context unavailable");
     }
     this.ctx = ctx;
-    this.timeRange = opts.initialTimeRange;
+    this.timeInterval = opts.initialTimeInterval;
   }
 
   /** Replace the visible time range. */
-  setTimeRange(r: Range): void {
-    this.timeRange = r;
+  setTimeInterval(r: Interval): void {
+    this.timeInterval = r;
   }
 
   /** Current visible time range. */
-  getTimeRange(): Range {
-    return this.timeRange;
+  getTimeInterval(): Interval {
+    return this.timeInterval;
   }
 
   /** Update the device pixel ratio (call on resize). */
@@ -92,7 +91,11 @@ export class Plot {
       this.scratch = new Float64Array(needed);
     }
 
-    const tx = new DataTransform(this.timeRange, R.create(0, cssWidth), R.create(0, cssHeight));
+    const tx = new DataTransform(
+      this.timeInterval,
+      Interval.create(0, cssWidth),
+      Interval.create(0, cssHeight),
+    );
 
     return new Frame(this.ctx, tx, this.scratch, this.dpr);
   }

@@ -5,9 +5,9 @@ import { TIMELINE_OVERLAY_METRICS } from "../ui/timelineOverlayMetrics.ts";
 import type { EventQueryResult } from "../data/events/broker.ts";
 import type { BrokerDemand, Subscription, ReadRequest, SignalView } from "../data/signal/broker.ts";
 import type { MutableSample } from "../data/signal/sample.ts";
-import { Range } from "./range.ts";
+import { Interval } from "../core/interval.ts";
 import { DataTransform } from "./transform.ts";
-import { transformTouchRange } from "./gesture.ts";
+import { transformTouchInterval } from "./gesture.ts";
 import { Plot } from "./plot.ts";
 import { eventIndexAtOrBefore, eventIndexNearPoint } from "./hittest.ts";
 import type { PaletteName } from "./ramp.ts";
@@ -27,7 +27,7 @@ import {
 export type DataReader = (request: ReadRequest) => SignalView;
 export type SampleAtReader = (time: number, out: MutableSample) => boolean;
 export type DataSubscriber = (demand: BrokerDemand, onChange: () => void) => Subscription;
-export type EventSource = (range: Range) => EventQueryResult;
+export type EventSource = (range: Interval) => EventQueryResult;
 
 export interface SignalRow {
   readonly id: string;
@@ -89,14 +89,14 @@ export interface TimelineOverlaySink {
 
 export interface TimelineCallbacks {
   onHover?: (event: HoverInfo | null) => void;
-  onViewportChange?: (viewport: { min: number; max: number }, priceScale: number) => void;
+  onViewportChange?: (viewport: Interval, priceScale: number) => void;
   onPlaybackChange?: (playback: TimelinePlayback) => void;
   onLayoutChange?: (layout: TimelineLayout, collapsedRowIds: readonly string[]) => void;
 }
 
 export interface TimelineOptions {
   readonly canvas: HTMLCanvasElement;
-  readonly initialTimeRange: Range;
+  readonly initialTimeInterval: Interval;
   readonly initialPlayback?: TimelinePlayback;
   readonly initialNewsHeight?: number;
   readonly signalRows: readonly SignalRow[];
@@ -109,7 +109,7 @@ export interface TimelineOptions {
 
 interface TimelineState {
   events: EventSet;
-  timeRange: Range;
+  timeInterval: Interval;
   logGain: number;
   hovered: number | null;
   newsHeight: number;
@@ -219,10 +219,10 @@ export class Timeline {
     this.rowWaveletModes = this.signalRows.map((row) => row.waveletMode);
     this.rowVerticalOffsets = this.signalRows.map((row) => row.verticalOffset);
     this.rowHoverSamples = this.signalRows.map(() => ({ t: Number.NaN, value: Number.NaN }));
-    this.plot = new Plot({ canvas: opts.canvas, initialTimeRange: opts.initialTimeRange });
+    this.plot = new Plot({ canvas: opts.canvas, initialTimeInterval: opts.initialTimeInterval });
     this.state = {
       events: EMPTY_EVENTS,
-      timeRange: opts.initialTimeRange,
+      timeInterval: opts.initialTimeInterval,
       logGain: 22,
       hovered: null,
       newsHeight: restoredRowHeight(opts.initialNewsHeight, DEFAULT_NEWS_HEIGHT),
@@ -312,19 +312,19 @@ export class Timeline {
   }
 
   refreshEvents(): void {
-    const { events } = this.eventSource(this.state.timeRange);
+    const { events } = this.eventSource(this.state.timeInterval);
     this.state.events = { events };
     this.state.hovered = null;
     this.reqDraw();
   }
 
-  setTimeRange(range: Range): void {
-    this.applyTimeRange(range, true);
+  setTimeInterval(range: Interval): void {
+    this.applyTimeInterval(range, true);
   }
 
-  private applyTimeRange(range: Range, notify: boolean): void {
-    this.state.timeRange = range;
-    this.plot.setTimeRange(range);
+  private applyTimeInterval(range: Interval, notify: boolean): void {
+    this.state.timeInterval = range;
+    this.plot.setTimeInterval(range);
     if (notify) this.notifyViewportChange();
     this.reqDraw();
   }
@@ -337,14 +337,14 @@ export class Timeline {
   }
 
   private captureNowAnchor(now: number): number {
-    const span = this.state.timeRange.max - this.state.timeRange.min;
+    const span = this.state.timeInterval.end - this.state.timeInterval.start;
     if (!(span > 0)) return DEFAULT_NOW_ANCHOR;
-    return (now - this.state.timeRange.min) / span;
+    return (now - this.state.timeInterval.start) / span;
   }
 
-  private panTimeRange(range: Range, now = Date.now()): void {
-    this.state.timeRange = range;
-    this.plot.setTimeRange(range);
+  private panTimeInterval(range: Interval, now = Date.now()): void {
+    this.state.timeInterval = range;
+    this.plot.setTimeInterval(range);
     if (this.state.playback.mode === "following") {
       const playback = { mode: "following", anchor: this.captureNowAnchor(now) } as const;
       this.state.playback = playback;
@@ -354,8 +354,8 @@ export class Timeline {
     this.reqDraw();
   }
 
-  getTimeRange(): Range {
-    return this.state.timeRange;
+  getTimeInterval(): Interval {
+    return this.state.timeInterval;
   }
 
   setPriceScale(scale: number): void {
@@ -402,10 +402,7 @@ export class Timeline {
   }
 
   private notifyViewportChange(): void {
-    this.callbacks.onViewportChange?.(
-      { min: this.state.timeRange.min, max: this.state.timeRange.max },
-      this.state.logGain,
-    );
+    this.callbacks.onViewportChange?.(this.state.timeInterval, this.state.logGain);
   }
 
   private flushLayoutChange(removeCollapsedRows = false): void {
@@ -471,8 +468,8 @@ export class Timeline {
     if (
       previous !== null &&
       previous !== undefined &&
-      previous.range.min === demand.range.min &&
-      previous.range.max === demand.range.max &&
+      previous.range.start === demand.range.start &&
+      previous.range.end === demand.range.end &&
       previous.maxDeltaTMs === demand.maxDeltaTMs
     ) {
       return;
@@ -505,14 +502,14 @@ export class Timeline {
 
     using frame = this.plot.beginFrame();
     const { width, height } = frame;
-    const { logGain: priceScale, timeRange } = this.state;
+    const { logGain: priceScale, timeInterval } = this.state;
     frame.fillRectPx(0, 0, width, height, "#05070d");
 
-    const timePerDevicePx = (timeRange.max - timeRange.min) / numDevicePx;
+    const timePerDevicePx = (timeInterval.end - timeInterval.start) / numDevicePx;
     this.latestDpr = frame.dpr;
     this.latestNumPx = numDevicePx;
 
-    const eventResult = this.eventSource(timeRange);
+    const eventResult = this.eventSource(timeInterval);
     this.state.events = { events: eventResult.events };
     const eventY = this.state.newsHeight / 2;
     this.updateHover(frame.tx, eventY, width, height);
@@ -545,10 +542,12 @@ export class Timeline {
         this.rowVerticalOffsets[index]!,
       );
       const visibleCells = scaleWindow.sampleCellCount;
-      const gridStepMs = (timeRange.max - timeRange.min) / visibleCells;
-      const minScaleMs = scaleWindow.minSigmaPx * timePerDevicePx;
-      const maxScaleMs = scaleWindow.maxSigmaPx * timePerDevicePx;
-      const context = kernelContext(waveletMode, maxScaleMs / gridStepMs);
+      const gridStepMs = (timeInterval.end - timeInterval.start) / visibleCells;
+      const scaleInterval = Interval.create(
+        scaleWindow.minSigmaPx * timePerDevicePx,
+        scaleWindow.maxSigmaPx * timePerDevicePx,
+      );
+      const context = kernelContext(waveletMode, scaleInterval.end / gridStepMs);
       const padLeft = context.leftCells;
       const padRight = context.rightCells;
       const edgeCount = padLeft + visibleCells + padRight + 1;
@@ -558,11 +557,11 @@ export class Timeline {
         this.rowEvalTime[index] = evalTime;
       }
       for (let sample = 0; sample < edgeCount; sample++) {
-        evalTime[sample] = timeRange.min + (sample - padLeft) * gridStepMs;
+        evalTime[sample] = timeInterval.start + (sample - padLeft) * gridStepMs;
       }
       const evalView = evalTime.subarray(0, edgeCount) as Float64Array;
       const demand = {
-        range: Range.create(evalView[0]!, evalView[evalView.length - 1]!),
+        range: Interval.create(evalView[0]!, evalView[evalView.length - 1]!),
         maxDeltaTMs: gridStepMs,
       } satisfies BrokerDemand;
       this.syncPriceSubscription(index, demand);
@@ -581,8 +580,7 @@ export class Timeline {
         waveletMode,
         rowY,
         heatHeight,
-        minScaleMs,
-        maxScaleMs,
+        scaleInterval,
         this.rowPalettes[index]!,
       );
       frame.resolution().draw(result.coverage, gridStepMs, rowY + heatHeight);
@@ -601,12 +599,12 @@ export class Timeline {
 
   private advanceFollowNow(now: number): void {
     if (this.state.playback.mode !== "following") return;
-    const span = this.state.timeRange.max - this.state.timeRange.min;
+    const span = this.state.timeInterval.end - this.state.timeInterval.start;
     const anchor = this.state.playback.anchor;
     const min = now - span * anchor;
-    const range = Range.create(min, anchor === RIGHT_EDGE_NOW_ANCHOR ? now : min + span);
-    this.state.timeRange = range;
-    this.plot.setTimeRange(range);
+    const range = Interval.create(min, anchor === RIGHT_EDGE_NOW_ANCHOR ? now : min + span);
+    this.state.timeInterval = range;
+    this.plot.setTimeInterval(range);
   }
 
   private updateCrosshairOverlay(): void {
@@ -618,8 +616,8 @@ export class Timeline {
 
     const x = Math.max(0, Math.min(width, this.pointerPx));
     const time =
-      this.state.timeRange.min +
-      (x / width) * (this.state.timeRange.max - this.state.timeRange.min);
+      this.state.timeInterval.start +
+      (x / width) * (this.state.timeInterval.end - this.state.timeInterval.start);
     this.overlay?.setCrosshair(true, x, time, width);
   }
 
@@ -640,8 +638,8 @@ export class Timeline {
 
     const x = Math.max(0, Math.min(frame.width, this.pointerPx));
     const hoverTime =
-      this.state.timeRange.min +
-      (x / frame.width) * (this.state.timeRange.max - this.state.timeRange.min);
+      this.state.timeInterval.start +
+      (x / frame.width) * (this.state.timeInterval.end - this.state.timeInterval.start);
     let rowY = this.state.newsHeight;
     for (let index = 0; index < this.signalRows.length; index++) {
       const row = this.signalRows[index]!;
@@ -719,13 +717,14 @@ export class Timeline {
   }
 
   private updateNowLine(now: number): void {
-    const { timeRange } = this.state;
-    if (now < timeRange.min || now > timeRange.max) {
+    const { timeInterval } = this.state;
+    if (now < timeInterval.start || now > timeInterval.end) {
       this.overlay?.setNowLine(false, 0, 0, this.config.nowStroke);
       return;
     }
 
-    const x = ((now - timeRange.min) / (timeRange.max - timeRange.min)) * this.plot.cssWidth;
+    const x =
+      ((now - timeInterval.start) / (timeInterval.end - timeInterval.start)) * this.plot.cssWidth;
     const deviceWidth = Math.max(1, Math.round(this.config.nowWidth));
     const deviceCanvasWidth = Math.round(this.plot.cssWidth * this.latestDpr);
     const deviceLeft = Math.max(
@@ -742,10 +741,10 @@ export class Timeline {
 
   private scheduleClock(timePerDevicePx: number, renderedNow: number): void {
     if (this.nowTimer !== null) clearTimeout(this.nowTimer);
-    let delayMs = this.state.timeRange.min - renderedNow;
+    let delayMs = this.state.timeInterval.start - renderedNow;
 
     if (this.state.playback.mode === "following") delayMs = timePerDevicePx;
-    else if (renderedNow > this.state.timeRange.max) return;
+    else if (renderedNow > this.state.timeInterval.end) return;
 
     this.nowTimer = setTimeout(
       () => {
@@ -788,11 +787,11 @@ export class Timeline {
 
   private followNowAtRightEdge(): void {
     const now = Date.now();
-    const span = this.state.timeRange.max - this.state.timeRange.min;
+    const span = this.state.timeInterval.end - this.state.timeInterval.start;
     if (!(span > 0)) return;
 
     this.state.playback = { mode: "following", anchor: RIGHT_EDGE_NOW_ANCHOR };
-    this.applyTimeRange(Range.create(now - span, now), true);
+    this.applyTimeInterval(Interval.create(now - span, now), true);
     this.callbacks.onPlaybackChange?.(this.state.playback);
   }
 
@@ -852,9 +851,9 @@ export class Timeline {
     this.markGestureMoved(event.clientX, event.clientY);
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width <= 0) return;
-    const span = this.state.timeRange.max - this.state.timeRange.min;
+    const span = this.state.timeInterval.end - this.state.timeInterval.start;
     if (dx !== 0) {
-      this.panTimeRange(Range.pan(this.state.timeRange, -(dx / rect.width) * span));
+      this.panTimeInterval(Interval.pan(this.state.timeInterval, -(dx / rect.width) * span));
     }
     this.panRowVertically(this.verticalPanRow, dy);
   };
@@ -902,22 +901,22 @@ export class Timeline {
     let dy = event.deltaY;
     if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) dy *= this.config.wheelLineHeight;
     else if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) dy *= cssHeight;
-    const span = this.state.timeRange.max - this.state.timeRange.min;
+    const span = this.state.timeInterval.end - this.state.timeInterval.start;
     const dt = (this.config.timeScrollSensitivity * span * event.deltaX) / cssWidth;
     if (dt !== 0) {
-      this.panTimeRange(Range.pan(this.state.timeRange, dt));
+      this.panTimeInterval(Interval.pan(this.state.timeInterval, dt));
     }
     if (event.shiftKey) {
       this.setPriceScale(this.state.logGain - dy * this.config.wheelSensitivity);
       return;
     }
     const tx = new DataTransform(
-      this.state.timeRange,
-      Range.create(0, cssWidth),
-      Range.create(0, cssHeight),
+      this.state.timeInterval,
+      Interval.create(0, cssWidth),
+      Interval.create(0, cssHeight),
     );
     const factor = Math.exp(-dy * this.config.wheelSensitivity);
-    this.panTimeRange(Range.zoom(this.state.timeRange, tx.xToTime(px), factor));
+    this.panTimeInterval(Interval.zoom(this.state.timeInterval, tx.xToTime(px), factor));
   };
 
   private onHoverMove = (event: PointerEvent): void => {
@@ -1026,8 +1025,8 @@ export class Timeline {
           this.touchBX - this.touchAX,
           this.touchBY - this.touchAY,
         );
-        const transformedRange = transformTouchRange(
-          this.state.timeRange,
+        const transformedInterval = transformTouchInterval(
+          this.state.timeInterval,
           rect.width,
           previousCenterX,
           currentCenterX,
@@ -1035,9 +1034,9 @@ export class Timeline {
           currentDistance,
         );
         if (Math.abs(currentCenterX - previousCenterX) >= 0.5) {
-          this.panTimeRange(transformedRange);
+          this.panTimeInterval(transformedInterval);
         } else {
-          this.setTimeRange(transformedRange);
+          this.setTimeInterval(transformedInterval);
         }
         if (rect.height > 0) {
           this.panRowVertically(
@@ -1063,9 +1062,9 @@ export class Timeline {
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width > 0) {
       const dx = this.touchAX - previousAX;
-      const span = this.state.timeRange.max - this.state.timeRange.min;
+      const span = this.state.timeInterval.end - this.state.timeInterval.start;
       if (dx !== 0) {
-        this.panTimeRange(Range.pan(this.state.timeRange, -(dx / rect.width) * span));
+        this.panTimeInterval(Interval.pan(this.state.timeInterval, -(dx / rect.width) * span));
       }
       if (rect.height > 0) {
         this.panRowVertically(
@@ -1188,9 +1187,9 @@ export class Timeline {
     const height = this.plot.cssHeight;
     if (!(width > 0) || !(height > 0)) return this.clearHover();
     const tx = new DataTransform(
-      this.state.timeRange,
-      Range.create(0, width),
-      Range.create(0, height),
+      this.state.timeInterval,
+      Interval.create(0, width),
+      Interval.create(0, height),
     );
     return this.updateHover(tx, this.state.newsHeight / 2, width, height);
   }
@@ -1200,9 +1199,9 @@ export class Timeline {
     const height = this.plot.cssHeight;
     if (!(width > 0) || !(height > 0) || !this.pointerInside) return null;
     const tx = new DataTransform(
-      this.state.timeRange,
-      Range.create(0, width),
-      Range.create(0, height),
+      this.state.timeInterval,
+      Interval.create(0, width),
+      Interval.create(0, height),
     );
     return eventIndexNearPoint(
       this.state.events,

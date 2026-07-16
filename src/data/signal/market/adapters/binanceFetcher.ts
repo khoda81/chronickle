@@ -1,6 +1,6 @@
-/** Range-capable Binance kline adapter. */
+/** Interval-capable Binance kline adapter. */
 
-import { Range } from "../../../../engine/range.ts";
+import { Interval } from "../../../../core/interval.ts";
 import { createPollingSignalSource, type SignalAdapter } from "../../fetcher.ts";
 import { pickResolution } from "../../resolution.ts";
 import { logPriceSamples, type PricePoint } from "../price.ts";
@@ -50,13 +50,13 @@ export function createBinanceAdapter(opts: BinanceAdapterOptions): SignalAdapter
       return pickResolution(PERIODS, maxDeltaTMs);
     },
 
-    async fetchRange({ range, resolutionMs: periodMs }, signal) {
+    async fetchInterval({ range, resolutionMs: periodMs }, signal) {
       const entry = BINANCE_LADDER.find((candidate) => candidate.periodMs === periodMs)!;
       const params = new URLSearchParams({
         symbol,
         interval: entry.interval,
-        startTime: Math.floor(range.min - periodMs).toString(),
-        endTime: Math.floor(range.max).toString(),
+        startTime: Math.floor(range.start - periodMs).toString(),
+        endTime: Math.floor(range.end).toString(),
         limit: LIMIT.toString(),
       });
       const controller = new AbortController();
@@ -80,13 +80,14 @@ export function createBinanceAdapter(opts: BinanceAdapterOptions): SignalAdapter
           if (Number.isFinite(t) && Number.isFinite(price) && price > 0) points.push({ t, price });
         }
 
-        let searchedRange = range;
+        let searchedInterval = range;
         const last = points[points.length - 1];
         if (raw.length >= LIMIT && last !== undefined) {
-          const searchedMax = Math.min(range.max, last.t + periodMs);
-          if (range.min < searchedMax) searchedRange = Range.create(range.min, searchedMax);
+          const searchedMax = Math.min(range.end, last.t + periodMs);
+          if (range.start < searchedMax)
+            searchedInterval = Interval.create(range.start, searchedMax);
         }
-        return { samples: logPriceSamples(points), searchedRange };
+        return { samples: logPriceSamples(points), searchedInterval };
       } finally {
         clearTimeout(timer);
         signal.removeEventListener("abort", abort);

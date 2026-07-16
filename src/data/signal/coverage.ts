@@ -1,10 +1,9 @@
-import { Range } from "../../engine/range.ts";
-import { RangeSet } from "../../engine/rangeSet.ts";
+import { Interval, IntervalSet } from "../../core/interval.ts";
 
 export type CoverageState = "ready" | "empty" | "pending" | "watching" | "failed";
 
 export interface CoverageSegment {
-  readonly range: Range;
+  readonly range: Interval;
   readonly samplePeriodMs: number;
   readonly state: CoverageState;
   readonly message?: string;
@@ -13,17 +12,17 @@ export interface CoverageSegment {
 
 /** Request-quality-local evidence that an adapter definitively searched a range. */
 export class SettledCoverageIndex {
-  private readonly fetched = new Map<number, RangeSet>();
+  private readonly fetched = new Map<number, IntervalSet>();
 
   clear(): void {
     this.fetched.clear();
   }
 
-  add(requestResolutionMs: number, range: Range): void {
+  add(requestResolutionMs: number, range: Interval): void {
     this.level(requestResolutionMs).add(range);
   }
 
-  addBlockers(out: RangeSet, requestResolutionMs: number, range: Range): void {
+  addBlockers(out: IntervalSet, requestResolutionMs: number, range: Interval): void {
     // A finer completed search is also valid evidence for a coarser viewport.
     // Exact floating-point zoom resolutions must not create distinct islands.
     for (const [evidenceResolutionMs, ranges] of this.fetched) {
@@ -33,8 +32,12 @@ export class SettledCoverageIndex {
   }
 
   /** Completed search ranges not already supported by ready sample data. */
-  emptySegments(range: Range, requestResolutionMs: number, ready: RangeSet): CoverageSegment[] {
-    const fetched = new RangeSet();
+  emptySegments(
+    range: Interval,
+    requestResolutionMs: number,
+    ready: IntervalSet,
+  ): CoverageSegment[] {
+    const fetched = new IntervalSet();
     this.addBlockers(fetched, requestResolutionMs, range);
     const out: CoverageSegment[] = [];
     for (const searched of fetched.intersections(range)) {
@@ -45,13 +48,13 @@ export class SettledCoverageIndex {
     return out;
   }
 
-  private level(resolutionMs: number): RangeSet {
+  private level(resolutionMs: number): IntervalSet {
     if (!(resolutionMs > 0) || !Number.isFinite(resolutionMs)) {
       throw new Error(`FetchedCoverageIndex: invalid resolution ${resolutionMs}`);
     }
     let ranges = this.fetched.get(resolutionMs);
     if (ranges === undefined) {
-      ranges = new RangeSet();
+      ranges = new IntervalSet();
       this.fetched.set(resolutionMs, ranges);
     }
     return ranges;

@@ -1,9 +1,12 @@
+import { makePersisted, type SyncStorage } from "@solid-primitives/storage";
+import { createSignal, type Accessor, type Setter, type Signal } from "solid-js";
+import { Interval, type Interval as IntervalValue } from "../core/interval.ts";
 import type { PaletteName } from "../engine/ramp.ts";
 import type { TimelinePlayback } from "../engine/timeline.ts";
 import type { WaveletMode } from "../engine/wavelet.ts";
 
 const STORAGE_KEY = "chronickle.ui";
-const STORAGE_VERSION = 3;
+const STORAGE_VERSION = 4;
 const DEBOUNCE_MS = 300;
 
 export interface PersistedChart {
@@ -16,108 +19,128 @@ export interface PersistedChart {
 }
 
 export interface PersistedUiState {
-  readonly version: 3;
-  readonly viewport?: { readonly min: number; readonly max: number };
+  readonly version: 4;
+  readonly viewport: IntervalValue;
   readonly playback: TimelinePlayback;
   readonly newsHeight?: number;
   readonly charts: readonly PersistedChart[];
 }
 
-interface LegacyUiState {
-  readonly viewport?: { readonly min?: unknown; readonly max?: unknown };
-  readonly waveletMode?: unknown;
-  readonly playback?: unknown;
-  readonly newsHeight?: unknown;
-  readonly charts?: readonly unknown[];
-}
-
-export interface UiStatePersistence {
-  schedule(): void;
+export interface PersistedUiStateController {
+  readonly state: Accessor<PersistedUiState>;
+  readonly replace: Setter<PersistedUiState>;
   flush(): void;
   dispose(): void;
 }
 
-export function loadUiState(): PersistedUiState {
-  const fallback: PersistedUiState = {
-    version: STORAGE_VERSION,
-    playback: { mode: "following", anchor: 0.85 },
-    charts: [],
-  };
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if (raw === null) return fallback;
+/**
+ * Create the persisted workspace snapshot.
+ *
+ * `makePersisted` owns reading, serialization, and write-through updates.
+ * Version migration and validation remain explicit because they encode product
+ * semantics rather than generic storage behavior.
+ */
+export function createPersistedUiState(fallback: PersistedUiState): PersistedUiStateController {
+  const storage = createBufferedStorage(localStorage, DEBOUNCE_MS);
+  const [state, replace] = makePersisted<PersistedUiState, Signal<PersistedUiState>>(
+    createSignal(fallback),
+    {
+      name: STORAGE_KEY,
+      storage,
+      deserialize: (raw) => deserializePersistedUiState(raw, fallback),
+    },
+  );
 
+  return {
+    state,
+    replace,
+    flush: storage.flush,
+    dispose: storage.dispose,
+  };
+}
+
+export function deserializePersistedUiState(
+  raw: string,
+  fallback: PersistedUiState,
+): PersistedUiState {
   try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!isRecord(parsed)) return fallback;
-    if (parsed.version === STORAGE_VERSION) return parseV3(parsed);
-    return migrateLegacy(parsed as LegacyUiState, fallback);
+    return parsePersistedUiState(JSON.parse(raw) as unknown, fallback);
   } catch {
     return fallback;
   }
 }
 
-export function createUiStatePersistence(readState: () => PersistedUiState): UiStatePersistence {
-  let timer: number | null = null;
-  let lastRequestAt = 0;
+function parsePersistedUiState(value: unknown, fallback: PersistedUiState): PersistedUiState {
+  if (!isRecord(value)) return fallback;
 
-  const write = (): void => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(readState()));
-  };
+  if (value.version === STORAGE_VERSION) {
+    return parseVersion4(value, fallback);
+  }
 
-  const scheduleTimer = (delayMs: number): void => {
-    timer = window.setTimeout(() => {
-      const remaining = DEBOUNCE_MS - (performance.now() - lastRequestAt);
-      if (remaining > 0) {
-        scheduleTimer(remaining);
-        return;
-      }
-      timer = null;
-      write();
-    }, delayMs);
-  };
+  // Versions 1–3 stored viewport bounds as `{ min, max }`. Earlier versions
+  // also stored one global wavelet mode; per-chart values, when present, win.
+  if (value.version === 1 || value.version === 2 || value.version === 3) {
+    return migrateLegacyState(value, fallback);
+  }
 
-  return {
-    schedule(): void {
-      lastRequestAt = performance.now();
-      if (timer === null) scheduleTimer(DEBOUNCE_MS);
-    },
-    flush(): void {
-      if (timer !== null) {
-        clearTimeout(timer);
-        timer = null;
-      }
-      write();
-    },
-    dispose(): void {
-      if (timer !== null) clearTimeout(timer);
-      timer = null;
-    },
-  };
+  // Do not guess at future schemas. An unsupported version falls back rather
+  // than being misinterpreted as a legacy payload.
+  return fallback;
 }
 
-function parseV3(value: Record<string, unknown>): PersistedUiState {
+function parseVersion4(
+  value: Record<string, unknown>,
+  fallback: PersistedUiState,
+): PersistedUiState {
   return {
     version: STORAGE_VERSION,
-    viewport: parseViewport(value.viewport),
+    viewport: parseCurrentViewport(value.viewport, fallback.viewport),
     playback: parsePlayback(value.playback),
     newsHeight: finitePositive(value.newsHeight),
     charts: parseCharts(value.charts, "centered"),
   };
 }
 
-function migrateLegacy(value: LegacyUiState, fallback: PersistedUiState): PersistedUiState {
-  const previousGlobalMode = parseWaveletMode(value.waveletMode, "centered");
+function migrateLegacyState(
+  value: Record<string, unknown>,
+  fallback: PersistedUiState,
+): PersistedUiState {
+  const globalWaveletMode = parseWaveletMode(value.waveletMode, "centered");
   return {
-    ...fallback,
-    viewport: parseViewport(value.viewport),
+    version: STORAGE_VERSION,
+    viewport: parseLegacyViewport(value.viewport, fallback.viewport),
     playback: parsePlayback(value.playback),
     newsHeight: finitePositive(value.newsHeight),
-    charts: parseCharts(value.charts, previousGlobalMode),
+    charts: parseCharts(value.charts, globalWaveletMode),
   };
+}
+
+function parseCurrentViewport(value: unknown, fallback: IntervalValue): IntervalValue {
+  if (!isRecord(value)) return fallback;
+  return nonEmptyInterval(value.start, value.end, fallback);
+}
+
+function parseLegacyViewport(value: unknown, fallback: IntervalValue): IntervalValue {
+  if (!isRecord(value)) return fallback;
+  return nonEmptyInterval(value.min, value.max, fallback);
+}
+
+function nonEmptyInterval(
+  rawStart: unknown,
+  rawEnd: unknown,
+  fallback: IntervalValue,
+): IntervalValue {
+  const start = finiteNumber(rawStart);
+  const end = finiteNumber(rawEnd);
+  if (start === undefined || end === undefined) return fallback;
+
+  const interval = Interval.create(start, end);
+  return Interval.isEmpty(interval) ? fallback : interval;
 }
 
 function parseCharts(value: unknown, defaultWaveletMode: WaveletMode): readonly PersistedChart[] {
   if (!Array.isArray(value)) return [];
+
   const charts: PersistedChart[] = [];
   for (const entry of value) {
     if (
@@ -145,17 +168,11 @@ function parseWaveletMode(value: unknown, fallback: WaveletMode): WaveletMode {
   return fallback;
 }
 
-function parseViewport(value: unknown): { readonly min: number; readonly max: number } | undefined {
-  if (!isRecord(value)) return undefined;
-  const min = finiteNumber(value.min);
-  const max = finiteNumber(value.max);
-  return min !== undefined && max !== undefined && min < max ? { min, max } : undefined;
-}
-
 function parsePlayback(value: unknown): TimelinePlayback {
   if (!isRecord(value)) return { mode: "following", anchor: 0.85 };
   if (value.mode === "paused") return { mode: "paused" };
   if (value.mode !== "following") return { mode: "following", anchor: 0.85 };
+
   const anchor = finiteNumber(value.anchor);
   return {
     mode: "following",
@@ -174,4 +191,49 @@ function finitePositive(value: unknown): number | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+interface BufferedStorage extends SyncStorage {
+  flush(): void;
+  dispose(): void;
+}
+
+function createBufferedStorage(storage: Storage, delayMs: number): BufferedStorage {
+  const pending = new Map<string, string | null>();
+  let timer: number | null = null;
+
+  const flush = (): void => {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    for (const [key, value] of pending) {
+      if (value === null) storage.removeItem(key);
+      else storage.setItem(key, value);
+    }
+    pending.clear();
+  };
+
+  const schedule = (): void => {
+    if (timer !== null) clearTimeout(timer);
+    timer = window.setTimeout(flush, delayMs);
+  };
+
+  return {
+    getItem(key): string | null {
+      return pending.has(key) ? (pending.get(key) ?? null) : storage.getItem(key);
+    },
+    setItem(key, value): void {
+      pending.set(key, value);
+      schedule();
+    },
+    removeItem(key): void {
+      pending.set(key, null);
+      schedule();
+    },
+    flush,
+    dispose(): void {
+      flush();
+    },
+  };
 }

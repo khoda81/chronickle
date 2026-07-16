@@ -47,12 +47,12 @@ export class Frame implements Disposable {
 
   /** CSS pixel width of the drawing surface (derived from the transform). */
   get width(): number {
-    return this.tx.screenDomain.max - this.tx.screenDomain.min;
+    return this.tx.screenDomain.end - this.tx.screenDomain.start;
   }
 
   /** CSS pixel height of the drawing surface (derived from the transform). */
   get height(): number {
-    return this.tx.yDomain.max - this.tx.yDomain.min;
+    return this.tx.yDomain.end - this.tx.yDomain.start;
   }
 
   // --- L1: pixel primitives ----------------------------------------------

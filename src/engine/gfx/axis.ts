@@ -95,8 +95,8 @@ class AxisImpl implements AxisLayer {
     }
     const { frame } = this;
     const { tx } = frame;
-    const { min: tLo, max: tHi } = tx.timeDomain;
-    const screenSpan = tx.screenDomain.max - tx.screenDomain.min;
+    const { start: tLo, end: tHi } = tx.timeDomain;
+    const screenSpan = tx.screenDomain.end - tx.screenDomain.start;
     if (!(screenSpan > 0)) return;
 
     // Ask d3 for the most ticks that still respect the min spacing budget.

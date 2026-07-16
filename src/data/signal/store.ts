@@ -1,4 +1,4 @@
-import { Range } from "../../engine/range.ts";
+import { Interval } from "../../core/interval.ts";
 import type { MutableSample } from "./sample.ts";
 
 const BLOCK_CAPACITY = 512;
@@ -62,11 +62,11 @@ export class SignalSegmentStore {
     this.blocks.length = 0;
   }
 
-  timeRange(): Range | null {
+  timeInterval(): Interval | null {
     const first = this.blocks[0];
     const last = this.blocks[this.blocks.length - 1];
     return first !== undefined && last !== undefined
-      ? Range.create(first.minTime, last.maxTime)
+      ? Interval.create(first.minTime, last.maxTime)
       : null;
   }
 
@@ -131,11 +131,15 @@ export class SignalSegmentStore {
   }
 
   /** Add acceptable selected coverage, clipped to `range`, to `out`. */
-  addReadyBlockers(out: { add(range: Range): void }, maxResolutionMs: number, range: Range): void {
+  addReadyBlockers(
+    out: { add(range: Interval): void },
+    maxResolutionMs: number,
+    range: Interval,
+  ): void {
     validateResolution(maxResolutionMs);
     if (this.blocks.length === 0) return;
-    const firstBlock = this.firstBlockEndingAtOrAfter(range.min);
-    const lastBlock = this.lastBlockStartingAtOrBefore(range.max);
+    const firstBlock = this.firstBlockEndingAtOrAfter(range.start);
+    const lastBlock = this.lastBlockStartingAtOrBefore(range.end);
     if (firstBlock > lastBlock) return;
 
     let runMin = NaN;
@@ -146,27 +150,27 @@ export class SignalSegmentStore {
         runMax = Math.max(runMax, max);
         return;
       }
-      if (Number.isFinite(runMin)) out.add(Range.create(runMin, runMax));
+      if (Number.isFinite(runMin)) out.add(Interval.create(runMin, runMax));
       runMin = min;
       runMax = max;
     };
 
     for (let blockIndex = firstBlock; blockIndex <= lastBlock; blockIndex++) {
       const block = this.blocks[blockIndex]!;
-      if (block.maxTime < range.min || block.minTime > range.max) continue;
+      if (block.maxTime < range.start || block.minTime > range.end) continue;
       if (block.maxResolutionMs <= maxResolutionMs && block.internalGapCount === 0) {
-        append(Math.max(range.min, block.minTime), Math.min(range.max, block.maxTime));
+        append(Math.max(range.start, block.minTime), Math.min(range.end, block.maxTime));
         continue;
       }
       for (let segmentIndex = 0; segmentIndex < block.length; segmentIndex++) {
         if (block.resolutionMs[segmentIndex]! > maxResolutionMs) continue;
         append(
-          Math.max(range.min, block.rangeStart[segmentIndex]!),
-          Math.min(range.max, block.rangeEnd[segmentIndex]!),
+          Math.max(range.start, block.rangeStart[segmentIndex]!),
+          Math.min(range.end, block.rangeEnd[segmentIndex]!),
         );
       }
     }
-    if (Number.isFinite(runMin)) out.add(Range.create(runMin, runMax));
+    if (Number.isFinite(runMin)) out.add(Interval.create(runMin, runMax));
   }
 
   /** Resolution at cell midpoints, coalesced to at most one span per cell. */

@@ -1,3 +1,4 @@
+import type { Interval } from "../../core/interval.ts";
 import type { Frame } from "./context.ts";
 import { RAMP_RESOLUTION, rampLut, rampIndex, type PaletteName } from "../ramp.ts";
 import {
@@ -32,8 +33,7 @@ export interface HeatmapLayer {
     mode: WaveletMode,
     y: number,
     viewportHeight: number,
-    minScaleMs: number,
-    maxScaleMs: number,
+    scaleInterval: Interval,
     palette: PaletteName,
   ): void;
   drawFadeOverlay(y: number, heatHeight: number): void;
@@ -87,12 +87,11 @@ class HeatmapImpl implements HeatmapLayer {
     mode: WaveletMode,
     y: number,
     viewportHeight: number,
-    minScaleMs: number,
-    maxScaleMs: number,
+    scaleInterval: Interval,
     palette: PaletteName,
   ): void {
     const { tx, ctx } = this.frame;
-    const width = tx.screenDomain.max - tx.screenDomain.min;
+    const width = tx.screenDomain.end - tx.screenDomain.start;
     const bandCount = Math.max(2, Math.ceil(viewportHeight));
     const transformBandCount = Math.min(bandCount, MAX_TRANSFORM_BANDS);
     if (!(width > 0) || !(viewportHeight > 0)) return;
@@ -116,8 +115,10 @@ class HeatmapImpl implements HeatmapLayer {
         `drawWaveletField: cells=${cellCount}, visible=${visibleCells}, padding=${padLeft}+${padRight}`,
       );
     }
-    if (!(minScaleMs > 0) || !(maxScaleMs >= minScaleMs)) {
-      throw new Error(`drawWaveletField: invalid scale range ${minScaleMs}..${maxScaleMs}`);
+    if (!(scaleInterval.start > 0)) {
+      throw new Error(
+        `drawWaveletField: scale interval must start above zero, got ${scaleInterval.start}`,
+      );
     }
 
     const stepMs = evalTime[1]! - evalTime[0]!;
@@ -135,11 +136,11 @@ class HeatmapImpl implements HeatmapLayer {
       mode,
       palette,
       bandCount,
-      minScaleMs,
-      maxScaleMs,
+      scaleInterval.start,
+      scaleInterval.end,
     ].join("|");
     if (resources.lastRenderKey === renderKey) {
-      drawField(ctx, resources.offscreen, tx.screenDomain.min, y, width, viewportHeight);
+      drawField(ctx, resources.offscreen, tx.screenDomain.start, y, width, viewportHeight);
       return;
     }
     resources.returns = signalEdgesToDeltas(value, resources.returns);
@@ -147,10 +148,10 @@ class HeatmapImpl implements HeatmapLayer {
     if (resources.scalesMs.length !== transformBandCount) {
       resources.scalesMs = new Float64Array(transformBandCount);
     }
-    const scaleRatio = maxScaleMs / minScaleMs;
+    const scaleRatio = scaleInterval.end / scaleInterval.start;
     for (let band = 0; band < transformBandCount; band++) {
       const position = transformBandCount === 1 ? 0 : band / (transformBandCount - 1);
-      resources.scalesMs[band] = minScaleMs * Math.pow(scaleRatio, position);
+      resources.scalesMs[band] = scaleInterval.start * Math.pow(scaleRatio, position);
     }
 
     resources.validWindow.start = padLeft;
@@ -205,17 +206,17 @@ class HeatmapImpl implements HeatmapLayer {
 
     resources.offCtx.putImageData(resources.imageData!, 0, 0);
     resources.lastRenderKey = renderKey;
-    drawField(ctx, resources.offscreen, tx.screenDomain.min, y, width, viewportHeight);
+    drawField(ctx, resources.offscreen, tx.screenDomain.start, y, width, viewportHeight);
   }
 
   drawFadeOverlay(y: number, heatHeight: number): void {
     const { tx, ctx } = this.frame;
-    const width = tx.screenDomain.max - tx.screenDomain.min;
+    const width = tx.screenDomain.end - tx.screenDomain.start;
     const grad = ctx.createLinearGradient(0, y, 0, y + heatHeight);
     grad.addColorStop(0, "rgba(0, 0, 0, 0)");
     grad.addColorStop(1, "rgba(0, 0, 0, 0.55)");
     ctx.fillStyle = grad;
-    ctx.fillRect(tx.screenDomain.min, y, width, heatHeight);
+    ctx.fillRect(tx.screenDomain.start, y, width, heatHeight);
   }
 }
 

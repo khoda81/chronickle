@@ -39,8 +39,8 @@ class ResolutionImpl implements ResolutionLayer {
     // zero, so an empty search can never obscure overlapping usable data.
     for (const segment of segments) {
       if (segment.state !== "ready") continue;
-      const x0 = Math.max(0, Math.floor(frame.tx.timeToX(segment.range.min)));
-      const x1 = Math.min(width, Math.ceil(frame.tx.timeToX(segment.range.max)));
+      const x0 = Math.max(0, Math.floor(frame.tx.timeToX(segment.range.start)));
+      const x1 = Math.min(width, Math.ceil(frame.tx.timeToX(segment.range.end)));
       if (!(x1 > x0)) continue;
       const value = Math.min(1, targetResolutionMs / segment.samplePeriodMs);
       for (let x = x0; x < x1; x++) quality[x] = Math.max(quality[x]!, value);
@@ -67,8 +67,8 @@ class ResolutionImpl implements ResolutionLayer {
     for (const segment of segments) {
       if (segment.state !== "pending" && segment.state !== "watching" && segment.state !== "failed")
         continue;
-      const x0 = Math.max(0, frame.tx.timeToX(segment.range.min));
-      const x1 = Math.min(frame.width, frame.tx.timeToX(segment.range.max));
+      const x0 = Math.max(0, frame.tx.timeToX(segment.range.start));
+      const x1 = Math.min(frame.width, frame.tx.timeToX(segment.range.end));
       if (!(x1 > x0)) continue;
       const failed = segment.state === "failed";
       frame.fillRectPx(
@@ -103,8 +103,8 @@ class ResolutionImpl implements ResolutionLayer {
     let nextLabelX = 5;
     const labelLimit = targetLeft - 7;
     for (const segment of segments) {
-      const x0 = Math.max(0, frame.tx.timeToX(segment.range.min));
-      const x1 = Math.min(labelLimit, frame.tx.timeToX(segment.range.max));
+      const x0 = Math.max(0, frame.tx.timeToX(segment.range.start));
+      const x1 = Math.min(labelLimit, frame.tx.timeToX(segment.range.end));
       if (!(x1 > x0)) continue;
       const text = segmentLabel(segment);
       const textWidth = Math.ceil(ctx.measureText(text).width);

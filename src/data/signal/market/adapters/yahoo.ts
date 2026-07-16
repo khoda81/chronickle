@@ -1,4 +1,4 @@
-/** Range-aware Yahoo Finance chart adapter for futures, equities, and indices. */
+/** Interval-aware Yahoo Finance chart adapter for futures, equities, and indices. */
 
 import type { Sample } from "../../sample.ts";
 import { createPollingSignalSource, type AdapterBatch, type SignalAdapter } from "../../fetcher.ts";
@@ -63,20 +63,20 @@ export function createYahooAdapter(opts: YahooAdapterOptions): SignalAdapter {
     },
 
     resolve({ range, maxDeltaTMs }) {
-      return chooseInterval(maxDeltaTMs, range.min, now()).periodMs;
+      return chooseInterval(maxDeltaTMs, range.start, now()).periodMs;
     },
 
-    async fetchRange({ range, resolutionMs }, signal) {
+    async fetchInterval({ range, resolutionMs }, signal) {
       const entry = YAHOO_LADDER.find((candidate) => candidate.periodMs === resolutionMs);
       if (entry === undefined) throw new Error(`Yahoo: unsupported resolution ${resolutionMs}`);
-      const startMs = Math.floor((range.min - entry.periodMs) / entry.periodMs) * entry.periodMs;
-      const roundedEndMs = Math.ceil(range.max / entry.periodMs) * entry.periodMs;
+      const startMs = Math.floor((range.start - entry.periodMs) / entry.periodMs) * entry.periodMs;
+      const roundedEndMs = Math.ceil(range.end / entry.periodMs) * entry.periodMs;
       const endMs = Math.max(startMs + entry.periodMs, roundedEndMs);
       const key = `${entry.interval}:${startMs}:${endMs}`;
       const requestGeneration = generation;
 
       const cached = cache.get(key);
-      if (cached !== undefined) return withSearchedRange(cached, range);
+      if (cached !== undefined) return withSearchedInterval(cached, range);
 
       let work = pending.get(key);
       if (work === undefined) {
@@ -90,7 +90,7 @@ export function createYahooAdapter(opts: YahooAdapterOptions): SignalAdapter {
           cache.set(key, result);
           trimOldest(cache, MAX_CACHE_ENTRIES);
         }
-        return withSearchedRange(result, range);
+        return withSearchedInterval(result, range);
       } finally {
         if (pending.get(key) === work) pending.delete(key);
       }
@@ -183,11 +183,11 @@ class YahooHttpError extends Error {
   }
 }
 
-function withSearchedRange(
+function withSearchedInterval(
   result: CachedYahooResult,
-  searchedRange: AdapterBatch["searchedRange"],
+  searchedInterval: AdapterBatch["searchedInterval"],
 ): AdapterBatch {
-  return { ...result, searchedRange };
+  return { ...result, searchedInterval };
 }
 
 function retryAfterMs(value: string | null): number | null {

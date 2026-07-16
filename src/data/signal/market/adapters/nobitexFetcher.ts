@@ -13,6 +13,7 @@
  *   43200 ("720"), 86400 ("D"), 172800 ("2D"), 259200 ("3D")
  */
 
+import { Interval } from "../../../../core/interval.ts";
 import { createPollingSignalSource, type SignalAdapter } from "../../fetcher.ts";
 import { pickResolution } from "../../resolution.ts";
 import { fetchOhlc, ohlcToLogPriceSamples } from "./nobitex.ts";
@@ -61,7 +62,7 @@ export function createNobitexAdapter(opts: NobitexAdapterOptions = {}): SignalAd
       return pickResolution(NOBITEX_PERIODS_MS, req.maxDeltaTMs);
     },
 
-    async fetchRange(req, signal) {
+    async fetchInterval(req, signal) {
       const periodMs = req.resolutionMs;
       const entry = NOBITEX_LADDER.find((e) => e.periodMs === periodMs)!;
       if (!entry) {
@@ -74,8 +75,8 @@ export function createNobitexAdapter(opts: NobitexAdapterOptions = {}): SignalAd
       const res = await fetchOhlc({
         symbol,
         resolution: entry.resolution,
-        fromMs: req.range.min - periodMs,
-        toMs: req.range.max,
+        fromMs: req.range.start - periodMs,
+        toMs: req.range.end,
         timeoutMs,
         signal,
       });
@@ -85,7 +86,7 @@ export function createNobitexAdapter(opts: NobitexAdapterOptions = {}): SignalAd
       if (res === null) {
         return {
           samples: [],
-          searchedRange: req.range,
+          searchedInterval: req.range,
         };
       }
 
@@ -93,7 +94,7 @@ export function createNobitexAdapter(opts: NobitexAdapterOptions = {}): SignalAd
       if (samples.length === 0) {
         return {
           samples: [],
-          searchedRange: req.range,
+          searchedInterval: req.range,
         };
       }
 
@@ -106,21 +107,21 @@ export function createNobitexAdapter(opts: NobitexAdapterOptions = {}): SignalAd
       //
       // If the first candle is at or before `from`, the response was not
       // truncated on the left, so the whole request is exhausted.
-      if (firstT <= req.range.min) {
+      if (firstT <= req.range.start) {
         return {
           samples,
-          searchedRange: req.range,
+          searchedInterval: req.range,
         };
       }
-      if (firstT < req.range.max) {
+      if (firstT < req.range.end) {
         return {
           samples,
-          searchedRange: { min: firstT, max: req.range.max },
+          searchedInterval: Interval.create(firstT, req.range.end),
         };
       }
       return {
         samples,
-        searchedRange: req.range,
+        searchedInterval: req.range,
       };
     },
   });
