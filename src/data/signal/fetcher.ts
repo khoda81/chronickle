@@ -1,7 +1,7 @@
 /** Demand-aware adapter scheduling for sampled real-valued time series. */
 
 import { Range } from "../../engine/range.ts";
-import { RangeSet } from "../rangeSet.ts";
+import { RangeSet } from "../../engine/rangeSet.ts";
 import type { Sample } from "./sample.ts";
 
 export interface AdapterDemand {

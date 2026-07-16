@@ -1,5 +1,5 @@
 import { Range } from "../../engine/range.ts";
-import { RangeSet } from "../rangeSet.ts";
+import { RangeSet } from "../../engine/rangeSet.ts";
 
 export type CoverageState = "ready" | "empty" | "pending" | "watching" | "failed";
 

@@ -1,6 +1,6 @@
 import type { NewsEvent, RssFeed } from "../src/domain.ts";
 import { EventBroker } from "../src/data/events/broker.ts";
-import { RangeSet } from "../src/data/rangeSet.ts";
+import { RangeSet } from "../src/engine/rangeSet.ts";
 import {
   Broker as PriceBroker,
   type BrokerOptions,
@@ -29,7 +29,7 @@ import { fitStackLayout, heatmapScaleWindow } from "../src/engine/gfx/layout.ts"
 import { formatResolution } from "../src/engine/gfx/resolution.ts";
 import { eventIndexAtOrBefore, eventIndexNearPoint } from "../src/engine/hittest.ts";
 import { DataTransform } from "../src/engine/transform.ts";
-import { placeTooltip } from "../src/ui/tooltip.ts";
+import { placeTooltip } from "../src/app/timeline/TimelineOverlayController.ts";
 import {
   computeCenteredGaussianReference,
   computeWaveletField,

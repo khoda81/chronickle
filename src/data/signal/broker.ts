@@ -1,7 +1,7 @@
 /** Evidence-backed cache and subscription boundary for a sampled signal. */
 
 import { Range } from "../../engine/range.ts";
-import { RangeSet } from "../rangeSet.ts";
+import { RangeSet } from "../../engine/rangeSet.ts";
 import { SettledCoverageIndex, type CoverageSegment } from "./coverage.ts";
 import type {
   AcquisitionActivity,
@@ -201,8 +201,8 @@ export class Broker {
     if (clipped.discardedFutureCount > 0) {
       this.onWarning(
         `[Broker] discarded ${clipped.discardedFutureCount} future point(s); ` +
-          `searched range ended at ${result.searchedRange.max}, ` +
-          `latest returned timestamp was ${clipped.latestFutureT}`,
+        `searched range ended at ${result.searchedRange.max}, ` +
+        `latest returned timestamp was ${clipped.latestFutureT}`,
       );
     }
     let changed = false;

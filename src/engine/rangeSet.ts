@@ -9,7 +9,7 @@
  * insert). `min < max` for every interval, enforced by `Range.create`.
  */
 
-import { Range } from "../engine/range.ts";
+import { Range } from "./range.ts";
 
 export class RangeSet {
   private readonly intervals: Range[] = [];

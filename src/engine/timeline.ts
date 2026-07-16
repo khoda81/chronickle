@@ -99,7 +99,7 @@ export interface TimelineOptions {
   readonly initialTimeRange: Range;
   readonly initialPlayback?: TimelinePlayback;
   readonly initialNewsHeight?: number;
-  readonly signalRows?: readonly SignalRow[];
+  readonly signalRows: readonly SignalRow[];
   readonly eventSource: EventSource;
   readonly feedColorOf: (feedId: string) => string;
   readonly overlay?: TimelineOverlaySink;
