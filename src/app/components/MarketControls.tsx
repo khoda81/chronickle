@@ -159,7 +159,12 @@ function SymbolCombobox(props: SymbolComboboxProps) {
           </Combobox.Trigger>
         </Combobox.Control>
         <Combobox.Portal>
-          <Combobox.Content class={`${surfaceStyles.menu} ${surfaceStyles.listboxPanel} ${styles.symbolContent}`}>
+          <Combobox.Content
+            classList={{
+              [surfaceStyles.menu!]: true,
+              [surfaceStyles.listboxPanel!]: true,
+              [styles.symbolContent!]: true,
+            }}>
             <Combobox.Listbox class={styles.symbolListbox} />
             <Show when={matches().length === 0}>
               <div class={styles.symbolEmpty}>

@@ -142,7 +142,7 @@ export function PalettePicker(props: PalettePickerProps) {
       </button>
 
       <Show when={open()}>
-        <div ref={deck} class={`${surfaceStyles.menu} ${styles.deck}`}>
+        <div ref={deck} classList={{ [surfaceStyles.menu!]: true, [styles.deck!]: true }}>
           <div class={styles.listbox} role="listbox" aria-label={`${props.label} color maps`}>
             <For each={PALETTE_NAMES}>
               {palette => (
