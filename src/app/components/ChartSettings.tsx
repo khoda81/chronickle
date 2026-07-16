@@ -32,14 +32,13 @@ export function ChartSettings(props: ChartSettingsProps) {
     <Popover placement="bottom-end" gutter={6} flip fitViewport>
       <Popover.Trigger
         class={styles.trigger}
-        title={`Open ${props.label} settings`}
+        title={`Settings`}
         aria-label={`Open ${props.label} settings`}
       >
         <Settings2 aria-hidden="true" />
       </Popover.Trigger>
       <Popover.Portal>
         <Popover.Content class={styles.content}>
-          <Popover.Title class={styles.title}>{props.label}</Popover.Title>
           <fieldset class={styles.fieldset}>
             <legend class={styles.legend}>Kernel</legend>
             <div class={styles.kernelGrid}>

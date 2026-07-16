@@ -227,7 +227,7 @@ export class TimelineOverlayController implements TimelineOverlaySink {
   ): void {
     const tooltip = this.rows.get(id)?.tooltip;
     if (tooltip === undefined) return;
-    if (tooltip.textContent !== text) tooltip.textContent = text;
+    tooltip.textContent = text;
     tooltip.style.width = `${width}px`;
     tooltip.style.height = `${height}px`;
     tooltip.style.transform = `translate3d(${x}px, ${y}px, 0)`;

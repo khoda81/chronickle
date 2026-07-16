@@ -1,4 +1,3 @@
-import { ChevronDown } from "lucide-solid";
 import { For, Show, createEffect, createSignal, onCleanup } from "solid-js";
 import { PALETTES, paletteCssGradient, type PaletteName } from "../../engine/ramp.ts";
 import styles from "./PalettePicker.module.css";
@@ -141,7 +140,6 @@ export function PalettePicker(props: PalettePickerProps) {
           style={{ "background-image": paletteCssGradient(props.value) }}
           aria-hidden="true"
         />
-        <ChevronDown class={styles.icon} aria-hidden="true" />
       </button>
 
       <Show when={open()}>

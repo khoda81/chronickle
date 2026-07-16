@@ -57,7 +57,7 @@
   --glass-border: rgba(226, 232, 240, 0.24);
   --glass-highlight: rgba(255, 255, 255, 0.14);
   --glass-shadow: 0 0.875rem 2.25rem rgba(0, 0, 0, 0.28);
-  --glass-blur: blur(1rem) saturate(145%);
+  --glass-blur: blur(1rem);
 
   /* Motion and layers */
   --duration-fast: 100ms;

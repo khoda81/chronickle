@@ -137,8 +137,8 @@ const DEFAULT_TIMELINE_CONFIG: TimelineConfig = {
 const EMPTY_EVENTS: EventSet = { events: [] };
 const DEFAULT_NOW_ANCHOR = 0.85;
 const RIGHT_EDGE_NOW_ANCHOR = 1;
-const ROW_COLLAPSE_HINT_HEIGHT = 72;
-const ROW_REMOVE_THRESHOLD = 12;
+const ROW_COLLAPSE_HINT_HEIGHT = 128;
+const ROW_REMOVE_THRESHOLD = 64;
 
 export class Timeline {
   private readonly canvas: HTMLCanvasElement;
@@ -345,11 +345,8 @@ export class Timeline {
   private panTimeInterval(range: Interval, now = Date.now()): void {
     this.state.timeInterval = range;
     this.plot.setTimeInterval(range);
-    if (this.state.playback.mode === "following") {
-      const playback = { mode: "following", anchor: this.captureNowAnchor(now) } as const;
-      this.state.playback = playback;
-      this.callbacks.onPlaybackChange?.(playback);
-    }
+    const playback = { mode: "paused", anchor: this.captureNowAnchor(now) } as const;
+    this.setPlayback(playback)
     this.notifyViewportChange();
     this.reqDraw();
   }
@@ -410,8 +407,8 @@ export class Timeline {
     this.layoutDirty = false;
     const collapsedRowIds = removeCollapsedRows
       ? this.signalRows
-          .filter((_, index) => this.rowHeights[index]! <= ROW_REMOVE_THRESHOLD)
-          .map((row) => row.id)
+        .filter((_, index) => this.rowHeights[index]! <= ROW_REMOVE_THRESHOLD)
+        .map((row) => row.id)
       : [];
     this.callbacks.onLayoutChange?.(this.getLayout(), collapsedRowIds);
   }
@@ -526,9 +523,9 @@ export class Timeline {
         this.resizingBoundary === 0
           ? index === 0
           : this.resizingBoundary !== null &&
-            (index === this.resizingBoundary - 1 || index === this.resizingBoundary);
+          (index === this.resizingBoundary - 1 || index === this.resizingBoundary);
       const collapseProgress = rowTouchesActiveBoundary
-        ? Math.max(0, Math.min(1, 1 - rowHeight / ROW_COLLAPSE_HINT_HEIGHT))
+        ? Math.max(0, Math.min(1, 1 - (rowHeight - ROW_REMOVE_THRESHOLD) / ROW_COLLAPSE_HINT_HEIGHT))
         : 0;
       this.overlay?.setRowCollapseProgress(row.id, collapseProgress);
       if (rowHeight <= COVERAGE_BAR_HEIGHT + 2) {
@@ -655,7 +652,7 @@ export class Timeline {
         ? x
         : Math.max(0, Math.min(frame.width, frame.tx.timeToX(sample.t)));
       const text = !hasSample ? "loading…" : formatPrice(Math.exp(sample.value));
-      positionSignalTooltip(frame, this.overlay, row.id, anchorX, rowY + heatHeight / 2, text);
+      positionSignalTooltip(frame, this.overlay, row.id, anchorX, rowY + heatHeight / 2, x, text);
       rowY += rowHeight;
     }
   }
@@ -1216,9 +1213,9 @@ export class Timeline {
     const previous = this.state.hovered;
     const index =
       (this.pointerInside || this.eventTooltipHovered || this.crosshairPinned) &&
-      !this.dragging &&
-      this.resizingBoundary === null &&
-      this.boundaryAt(this.pointerPy) === null
+        !this.dragging &&
+        this.resizingBoundary === null &&
+        this.boundaryAt(this.pointerPy) === null
         ? eventIndexAtOrBefore(this.state.events, tx, this.pointerPx)
         : null;
     this.state.hovered = index;
@@ -1307,6 +1304,7 @@ function positionSignalTooltip(
   id: string,
   anchorX: number,
   anchorY: number,
+  vlineX: number,
   text: string,
 ): void {
   const ctx = frame.ctx;
@@ -1322,13 +1320,14 @@ function positionSignalTooltip(
   const x = fitsLeft
     ? anchorX - gap - width
     : Math.max(margin, Math.min(frame.width - width - margin, anchorX + gap));
+
   const connectorX = fitsLeft ? x + width : x;
   const y = Math.max(margin, Math.min(frame.height - height - margin, anchorY - height / 2));
 
   ctx.strokeStyle = "rgba(226, 232, 240, 0.58)";
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(anchorX, anchorY);
+  ctx.moveTo(vlineX, anchorY);
   ctx.lineTo(connectorX, anchorY);
   ctx.stroke();
   ctx.beginPath();

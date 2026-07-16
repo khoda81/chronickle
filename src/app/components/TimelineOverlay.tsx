@@ -1,4 +1,4 @@
-import { Pause, Play, RefreshCw, Trash2, X } from "lucide-solid";
+import { Pause, Play, RefreshCw, Trash2 } from "lucide-solid";
 import { For, onCleanup, onMount, type Accessor, type JSX } from "solid-js";
 import type { PaletteName } from "../../engine/ramp.ts";
 import type { TimelinePlayback } from "../../engine/timeline.ts";
@@ -147,17 +147,14 @@ function TimelineRowChrome(props: TimelineRowChromeProps) {
           waveletMode={props.row().waveletMode}
           onWaveletModeChange={props.onChooseWaveletMode}
         />
-        <span class={styles.collapseHint} aria-hidden="true">
-          <Trash2 />
-        </span>
         <button
           type="button"
           class={styles.removeRow}
-          title={`Remove ${label()}`}
+          title={`Remove`}
           aria-label={`Remove ${label()}`}
           onClick={props.onRemove}
         >
-          <X aria-hidden="true" />
+          <Trash2 aria-hidden="true" />
         </button>
       </div>
       <div ref={tooltip} class={styles.signalTooltip} hidden />
