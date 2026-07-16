@@ -363,10 +363,8 @@ export function App() {
           const snapshot: HoverInfo = { ...event };
           setHover({ event: snapshot, feed: registry.get(snapshot.feedId) });
         },
-        onViewportChange: nextViewport => setViewport(nextViewport),
-        onPlaybackChange: nextPlayback => {
-          setPlayback(nextPlayback);
-        },
+        onViewportChange: setViewport,
+        onPlaybackChange: setPlayback,
         onLayoutChange: applyLayout,
       },
     });

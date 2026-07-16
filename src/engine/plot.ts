@@ -79,22 +79,16 @@ export class Plot {
    * Throws if the canvas has a non-positive CSS size.
    */
   beginFrame(): Frame {
-    const cssWidth = this.cssWidth;
-    const cssHeight = this.cssHeight;
-    if (!(cssWidth > 0) || !(cssHeight > 0)) {
-      throw new Error(`Invalid canvas size: ${cssWidth}x${cssHeight} (dpr=${this.dpr})`);
-    }
-
     // Ensure scratch can hold width+1 samples (heatmap per-pixel buffer).
-    const needed = Math.ceil(cssWidth) + 1;
+    const needed = Math.ceil(this.cssWidth) + 1;
     if (this.scratch.length < needed) {
       this.scratch = new Float64Array(needed);
     }
 
     const tx = new DataTransform(
       this.timeInterval,
-      Interval.create(0, cssWidth),
-      Interval.create(0, cssHeight),
+      Interval.create(0, this.cssWidth),
+      Interval.create(0, this.cssHeight),
     );
 
     return new Frame(this.ctx, tx, this.scratch, this.dpr);

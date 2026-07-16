@@ -89,8 +89,11 @@
 
 .symbolContent {
   z-index: var(--layer-menu);
-  width: min(22.5rem, calc(100vw - 2rem));
-  max-height: min(18.75rem, var(--kb-popper-available-height));
+  display: flex;
+  box-sizing: border-box;
+  width: min(22.5rem, var(--kb-popper-content-available-width));
+  max-height: min(18.75rem, var(--kb-popper-content-available-height));
+  flex-direction: column;
   overflow: hidden;
   padding: var(--space-1);
   border: 1px solid var(--glass-border);
@@ -105,8 +108,9 @@
 }
 
 .symbolListbox {
-  max-height: inherit;
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   outline: none;
 }
 

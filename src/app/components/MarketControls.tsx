@@ -44,7 +44,7 @@ export function MarketControls(props: MarketControlsProps) {
           if (generation !== loadGeneration) return;
           console.warn(`${source.label} ticker discovery failed`, error);
           props.onLoadError(
-            `${source.label} ticker list unavailable; examples and free-form entry still work`,
+            `${source.label} symbol discovery unavailable; bundled examples and free-form entry still work`,
           );
         });
     }),
@@ -121,6 +121,9 @@ function SymbolCombobox(props: SymbolComboboxProps) {
         allowsEmptyCollection
         noResetInputOnBlur
         gutter={6}
+        flip
+        slide
+        overflowPadding={8}
         sameWidth={false}
         fitViewport
         itemComponent={itemProps => (

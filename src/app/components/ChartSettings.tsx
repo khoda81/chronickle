@@ -17,7 +17,7 @@ const KERNELS = [
 
 export function ChartSettings(props: ChartSettingsProps) {
   return (
-    <Popover placement="bottom-end" gutter={6} flip fitViewport>
+    <Popover placement="bottom-end" gutter={6} flip slide overflowPadding={8} fitViewport>
       <Popover.Trigger
         class={styles.trigger}
         title={`Settings`}

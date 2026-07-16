@@ -18,7 +18,7 @@ export function transformTouchInterval(
   previousDistance: number,
   currentDistance: number,
 ): Interval {
-  if (!(viewportWidth > 0) || !Number.isFinite(viewportWidth)) {
+  if (viewportWidth <= 0) {
     throw new Error(`transformTouchInterval: invalid viewport width ${viewportWidth}`);
   }
 

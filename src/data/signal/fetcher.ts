@@ -30,10 +30,10 @@ interface AcquisitionActivityBase {
 export type AcquisitionActivity =
   | (AcquisitionActivityBase & { readonly state: "fetching" | "watching" })
   | (AcquisitionActivityBase & {
-      readonly state: "failed";
-      readonly message: string;
-      readonly retryAtMs: number;
-    });
+    readonly state: "failed";
+    readonly message: string;
+    readonly retryAtMs: number;
+  });
 
 export interface SignalSink {
   next(batch: AdapterDelivery): void;
@@ -152,7 +152,7 @@ class PollingSession implements AdapterSession {
     private readonly loader: IntervalLoader,
     private readonly policy: PollingPolicy,
     private readonly sink: SignalSink,
-  ) {}
+  ) { }
 
   setDemands(demands: readonly BrokerDemand[]): void {
     this.assertOpen();

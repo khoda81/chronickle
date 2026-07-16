@@ -60,8 +60,11 @@
 
 .content {
   z-index: var(--layer-menu);
-  width: var(--kb-popper-anchor-width);
-  max-height: min(18rem, var(--kb-popper-available-height));
+  display: flex;
+  box-sizing: border-box;
+  width: min(var(--kb-popper-anchor-width), var(--kb-popper-content-available-width));
+  max-height: min(18rem, var(--kb-popper-content-available-height));
+  flex-direction: column;
   overflow: hidden;
   padding: var(--space-1);
   border: 1px solid var(--glass-border);
@@ -77,8 +80,9 @@
 }
 
 .listbox {
-  max-height: inherit;
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   outline: none;
 }
 

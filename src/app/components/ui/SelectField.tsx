@@ -44,6 +44,9 @@ export function SelectField<Value extends string>(props: SelectFieldProps<Value>
         </Select.Item>
       )}
       gutter={6}
+      flip
+      slide
+      overflowPadding={8}
       sameWidth
       fitViewport>
       <Select.Trigger

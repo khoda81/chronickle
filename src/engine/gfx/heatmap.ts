@@ -60,26 +60,30 @@ const MAX_TRANSFORM_BANDS = 32;
 const SIGMOID_MIN = -18;
 const SIGMOID_MAX = 18;
 const SIGMOID_LUT_SIZE = 1 << 17;
-let sigmoidLut: Uint16Array | null = null;
+const SIGMOID_LUT: Uint16Array = new Uint16Array(SIGMOID_LUT_SIZE);
 const packedRamps = new Map<PaletteName, Uint32Array>();
 const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([0x01020304]).buffer)[0] === 0x04;
 const INVALID_PIXEL = packRgba(5, 7, 13, 255);
+
+const span = SIGMOID_MAX - SIGMOID_MIN;
+for (let i = 0; i < SIGMOID_LUT.length; i++) {
+  const x = SIGMOID_MIN + i * span / (SIGMOID_LUT.length - 1);
+  SIGMOID_LUT[i] = rampIndex(1 / (1 + Math.exp(x)));
+}
 
 // Frame/L2 wrappers are short-lived, but the expensive canvas and typed-array
 // resources are persistent per rendering context.
 const RESOURCE_BY_CONTEXT = new WeakMap<CanvasRenderingContext2D, Map<string, HeatmapResources>>();
 
 export const Heatmap = {
-  create(frame: Frame, rowId: string): HeatmapLayer {
-    return new HeatmapImpl(frame, resourcesFor(frame.ctx, rowId));
-  },
+  create: (frame: Frame, rowId: string) => new HeatmapImpl(frame, resourcesFor(frame.ctx, rowId)),
 };
 
 class HeatmapImpl implements HeatmapLayer {
   constructor(
     private readonly frame: Frame,
     private readonly resources: HeatmapResources,
-  ) {}
+  ) { }
 
   drawWaveletField(
     padded: PaddedEval,
@@ -168,7 +172,7 @@ class HeatmapImpl implements HeatmapLayer {
     ensureImage(resources, visibleCells, bandCount);
     const imagePixels = resources.imagePixels!;
     const ramp = packedRampLut(palette);
-    const sigmoid = sigmoidIndexLut();
+    const sigmoid = SIGMOID_LUT;
     const sigmoidScale = (SIGMOID_LUT_SIZE - 1) / (SIGMOID_MAX - SIGMOID_MIN);
     const sigmoidMidpoint = Math.floor((RAMP_RESOLUTION - 1) / 2);
     const gain = Math.exp(priceScale);
@@ -259,19 +263,6 @@ function ensureImage(resources: HeatmapResources, width: number, bandCount: numb
     const data = resources.imageData.data;
     resources.imagePixels = new Uint32Array(data.buffer, data.byteOffset, data.byteLength / 4);
   }
-}
-
-function sigmoidIndexLut(): Uint16Array {
-  let lut = sigmoidLut;
-  if (lut !== null) return lut;
-  lut = new Uint16Array(SIGMOID_LUT_SIZE);
-  const span = SIGMOID_MAX - SIGMOID_MIN;
-  for (let i = 0; i < lut.length; i++) {
-    const x = SIGMOID_MIN + (i / (lut.length - 1)) * span;
-    lut[i] = rampIndex(1 / (1 + Math.exp(x)));
-  }
-  sigmoidLut = lut;
-  return lut;
 }
 
 function packedRampLut(name: PaletteName): Uint32Array {

@@ -7,7 +7,7 @@ export interface MarketSymbol {
 
 const BINANCE_EXCHANGE_INFO =
   "https://data-api.binance.vision/api/v3/exchangeInfo?symbolStatus=TRADING&showPermissionSets=false";
-const NOBITEX_MARKET_STATS = "https://api.nobitex.ir/market/stats";
+const NOBITEX_MARKET_STATS = "https://apiv2.nobitex.ir/market/stats";
 const CORS_PROXY = "https://corsproxy.io/?url=";
 
 export async function fetchBinanceSymbols(): Promise<readonly MarketSymbol[]> {

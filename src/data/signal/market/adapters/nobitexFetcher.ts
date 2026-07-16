@@ -81,6 +81,7 @@ export function createNobitexAdapter(opts: NobitexAdapterOptions = {}): SignalAd
         signal,
       });
 
+      // FIX: This is not correct, nobitex simply doesn't return anything if you request a resolution that doesn't exist in history anymore instead of automatically going to a higher resolution. We should handle that instead of returning.
       // "no_data" means no candles exist for this range at all — the request
       // is exhausted and the broker should not retry it.
       if (res === null) {
@@ -93,7 +94,7 @@ export function createNobitexAdapter(opts: NobitexAdapterOptions = {}): SignalAd
       }
 
       const firstT = samples[0]!.t;
-      // Nobitex caps OHLC responses at 1000 candles anchored at `to`. If the
+      // Nobitex caps OHLC responses at 500 candles anchored at `to`. If the
       // first returned candle is strictly after `from`, the prefix
       // [from, firstT) was truncated and still needs to be fetched. We report
       // only the actually-covered sub-range so the broker keeps that prefix as
