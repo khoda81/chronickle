@@ -1,6 +1,7 @@
 import { Popover } from "@kobalte/core/popover";
 import { Settings2 } from "lucide-solid";
 import type { WaveletMode } from "../../engine/wavelet.ts";
+import surfaceStyles from "../../styles/floatingSurface.module.css";
 import styles from "./ChartSettings.module.css";
 
 interface ChartSettingsProps {
@@ -25,7 +26,7 @@ export function ChartSettings(props: ChartSettingsProps) {
         <Settings2 aria-hidden="true" />
       </Popover.Trigger>
       <Popover.Portal>
-        <Popover.Content class={styles.content}>
+        <Popover.Content class={`${surfaceStyles.menu} ${styles.content}`}>
           <fieldset class={styles.fieldset}>
             <legend class={styles.legend}>Kernel</legend>
             <div class={styles.kernelGrid}>

@@ -1,0 +1,29 @@
+/*
+ * Shared chrome for floating menus. Geometry, scrolling limits, and motion
+ * remain component-owned because they depend on each anchor primitive.
+ */
+.menu {
+  z-index: var(--layer-menu);
+  border: 1px solid var(--glass-border);
+  background:
+    linear-gradient(
+      145deg,
+      var(--floating-surface-highlight, var(--glass-highlight)),
+      rgba(124, 196, 255, 0.03)
+    ),
+    var(--glass-fill-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow);
+}
+
+/* Select and combobox panels share the same clipped, scroll-hosting shell. */
+.listboxPanel {
+  composes: menu;
+  display: flex;
+  box-sizing: border-box;
+  flex-direction: column;
+  overflow: hidden;
+  padding: var(--space-1);
+  border-radius: var(--radius-md);
+}

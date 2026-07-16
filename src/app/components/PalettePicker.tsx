@@ -1,5 +1,6 @@
 import { For, Show, createEffect, createSignal, onCleanup } from "solid-js";
 import { PALETTES, paletteCssGradient, type PaletteName } from "../../engine/ramp.ts";
+import surfaceStyles from "../../styles/floatingSurface.module.css";
 import styles from "./PalettePicker.module.css";
 
 const PALETTE_NAMES = Object.keys(PALETTES) as PaletteName[];
@@ -141,7 +142,7 @@ export function PalettePicker(props: PalettePickerProps) {
       </button>
 
       <Show when={open()}>
-        <div ref={deck} class={styles.deck}>
+        <div ref={deck} class={`${surfaceStyles.menu} ${styles.deck}`}>
           <div class={styles.listbox} role="listbox" aria-label={`${props.label} color maps`}>
             <For each={PALETTE_NAMES}>
               {palette => (

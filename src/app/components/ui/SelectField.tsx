@@ -1,6 +1,7 @@
 import { Select } from "@kobalte/core/select";
 import { Check, ChevronDown } from "lucide-solid";
 import type { JSX } from "solid-js";
+import surfaceStyles from "../../../styles/floatingSurface.module.css";
 import styles from "./SelectField.module.css";
 
 export interface SelectOption<Value extends string> {
@@ -65,7 +66,7 @@ export function SelectField<Value extends string>(props: SelectFieldProps<Value>
         </Select.Icon>
       </Select.Trigger>
       <Select.Portal>
-        <Select.Content class={styles.content}>
+        <Select.Content class={`${surfaceStyles.menu} ${surfaceStyles.listboxPanel} ${styles.content}`}>
           <Select.Listbox class={styles.listbox} />
         </Select.Content>
       </Select.Portal>

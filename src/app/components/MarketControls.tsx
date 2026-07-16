@@ -7,6 +7,7 @@ import {
   type PriceSignalSourceId,
 } from "../../data/signal/market/market.ts";
 import { filterMarketSymbols, type MarketSymbol } from "../../data/signal/market/symbols.ts";
+import surfaceStyles from "../../styles/floatingSurface.module.css";
 import controlStyles from "./ui/Control.module.css";
 import { SelectField, type SelectOption } from "./ui/SelectField.tsx";
 import styles from "./MarketControls.module.css";
@@ -158,7 +159,7 @@ function SymbolCombobox(props: SymbolComboboxProps) {
           </Combobox.Trigger>
         </Combobox.Control>
         <Combobox.Portal>
-          <Combobox.Content class={styles.symbolContent}>
+          <Combobox.Content class={`${surfaceStyles.menu} ${surfaceStyles.listboxPanel} ${styles.symbolContent}`}>
             <Combobox.Listbox class={styles.symbolListbox} />
             <Show when={matches().length === 0}>
               <div class={styles.symbolEmpty}>
