@@ -61,7 +61,7 @@ let nobitexSymbols: Promise<readonly MarketSymbol[]> | null = null;
 let binanceSymbols: Promise<readonly MarketSymbol[]> | null = null;
 
 function loadNobitexSymbols(): Promise<readonly MarketSymbol[]> {
-  nobitexSymbols ??= fetchNobitexSymbols().catch((error) => {
+  nobitexSymbols ??= fetchNobitexSymbols().catch(error => {
     nobitexSymbols = null;
     throw error;
   });
@@ -69,7 +69,7 @@ function loadNobitexSymbols(): Promise<readonly MarketSymbol[]> {
 }
 
 function loadBinanceSymbols(): Promise<readonly MarketSymbol[]> {
-  binanceSymbols ??= fetchBinanceSymbols().catch((error) => {
+  binanceSymbols ??= fetchBinanceSymbols().catch(error => {
     binanceSymbols = null;
     throw error;
   });
@@ -82,7 +82,7 @@ export const PRICE_SIGNAL_SOURCES: readonly PriceSignalSource[] = [
     label: "Nobitex",
     examples: NOBITEX_EXAMPLES,
     normalizeSymbol,
-    createAdapter: (symbol) => createNobitexAdapter({ symbol }),
+    createAdapter: symbol => createNobitexAdapter({ symbol }),
     loadSymbols: loadNobitexSymbols,
   },
   {
@@ -90,7 +90,7 @@ export const PRICE_SIGNAL_SOURCES: readonly PriceSignalSource[] = [
     label: "Binance",
     examples: BINANCE_EXAMPLES,
     normalizeSymbol,
-    createAdapter: (symbol) => createBinanceAdapter({ symbol }),
+    createAdapter: symbol => createBinanceAdapter({ symbol }),
     loadSymbols: loadBinanceSymbols,
   },
   {
@@ -98,11 +98,11 @@ export const PRICE_SIGNAL_SOURCES: readonly PriceSignalSource[] = [
     label: "Yahoo Finance",
     examples: YAHOO_EXAMPLES,
     normalizeSymbol: normalizeYahooSymbol,
-    createAdapter: (symbol) => createYahooAdapter({ symbol }),
+    createAdapter: symbol => createYahooAdapter({ symbol }),
     loadSymbols: async () => YAHOO_EXAMPLES,
   },
 ];
 
 export function priceSignalSource(id: string): PriceSignalSource | null {
-  return PRICE_SIGNAL_SOURCES.find((source) => source.id === id) ?? null;
+  return PRICE_SIGNAL_SOURCES.find(source => source.id === id) ?? null;
 }

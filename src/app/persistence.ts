@@ -44,19 +44,10 @@ export function createPersistedUiState(fallback: PersistedUiState): PersistedUiS
   const storage = createBufferedStorage(localStorage, DEBOUNCE_MS);
   const [state, replace] = makePersisted<PersistedUiState, Signal<PersistedUiState>>(
     createSignal(fallback),
-    {
-      name: STORAGE_KEY,
-      storage,
-      deserialize: (raw) => deserializePersistedUiState(raw, fallback),
-    },
+    { name: STORAGE_KEY, storage, deserialize: raw => deserializePersistedUiState(raw, fallback) },
   );
 
-  return {
-    state,
-    replace,
-    flush: storage.flush,
-    dispose: storage.dispose,
-  };
+  return { state, replace, flush: storage.flush, dispose: storage.dispose };
 }
 
 export function deserializePersistedUiState(

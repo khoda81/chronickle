@@ -36,7 +36,7 @@ const NOBITEX_LADDER: readonly { periodMs: number; resolution: string }[] = [
   { periodMs: 3 * 24 * 60 * 60 * MS, resolution: "3D" },
 ];
 
-const NOBITEX_PERIODS_MS: readonly number[] = NOBITEX_LADDER.map((e) => e.periodMs);
+const NOBITEX_PERIODS_MS: readonly number[] = NOBITEX_LADDER.map(e => e.periodMs);
 
 export interface NobitexAdapterOptions {
   /** Symbol, defaults to "USDTIRT". */
@@ -64,7 +64,7 @@ export function createNobitexAdapter(opts: NobitexAdapterOptions = {}): SignalAd
 
     async fetchInterval(req, signal) {
       const periodMs = req.resolutionMs;
-      const entry = NOBITEX_LADDER.find((e) => e.periodMs === periodMs)!;
+      const entry = NOBITEX_LADDER.find(e => e.periodMs === periodMs)!;
       if (!entry) {
         // Unreachable: pickResolution always returns a member of NOBITEX_PERIODS_MS.
         throw new Error(`nobitex fetcher: no resolution for period ${periodMs}ms`);
@@ -84,18 +84,12 @@ export function createNobitexAdapter(opts: NobitexAdapterOptions = {}): SignalAd
       // "no_data" means no candles exist for this range at all — the request
       // is exhausted and the broker should not retry it.
       if (res === null) {
-        return {
-          samples: [],
-          searchedInterval: req.range,
-        };
+        return { samples: [], searchedInterval: req.range };
       }
 
       const samples = ohlcToLogPriceSamples(res);
       if (samples.length === 0) {
-        return {
-          samples: [],
-          searchedInterval: req.range,
-        };
+        return { samples: [], searchedInterval: req.range };
       }
 
       const firstT = samples[0]!.t;
@@ -108,21 +102,12 @@ export function createNobitexAdapter(opts: NobitexAdapterOptions = {}): SignalAd
       // If the first candle is at or before `from`, the response was not
       // truncated on the left, so the whole request is exhausted.
       if (firstT <= req.range.start) {
-        return {
-          samples,
-          searchedInterval: req.range,
-        };
+        return { samples, searchedInterval: req.range };
       }
       if (firstT < req.range.end) {
-        return {
-          samples,
-          searchedInterval: Interval.create(firstT, req.range.end),
-        };
+        return { samples, searchedInterval: Interval.create(firstT, req.range.end) };
       }
-      return {
-        samples,
-        searchedInterval: req.range,
-      };
+      return { samples, searchedInterval: req.range };
     },
   });
 }

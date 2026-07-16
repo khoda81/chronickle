@@ -108,10 +108,7 @@ export function kernelContext(
     return { leftCells: cells, rightCells: cells };
   }
   const meanDelayCells = Math.sqrt(opts.causalStages) * maxSigmaCells;
-  return {
-    leftCells: Math.ceil(opts.causalWarmup * meanDelayCells),
-    rightCells: 0,
-  };
+  return { leftCells: Math.ceil(opts.causalWarmup * meanDelayCells), rightCells: 0 };
 }
 
 /**

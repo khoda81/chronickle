@@ -74,7 +74,7 @@ export function filterMarketSymbols(
 ): readonly MarketSymbol[] {
   const needle = query.trim().toUpperCase();
   const matches = symbols.filter(
-    (entry) =>
+    entry =>
       needle.length === 0 ||
       entry.symbol.toUpperCase().includes(needle) ||
       entry.label.toUpperCase().includes(needle),

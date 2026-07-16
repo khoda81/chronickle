@@ -150,9 +150,9 @@ function textOf(el: Element | null): string | null {
 function atomEntryLink(entry: Element): string | null {
   const links = Array.from(entry.querySelectorAll("link"));
   if (links.length === 0) return null;
-  const alternate = links.find((l) => (l.getAttribute("rel") ?? "alternate") === "alternate");
+  const alternate = links.find(l => (l.getAttribute("rel") ?? "alternate") === "alternate");
   if (alternate) return alternate.getAttribute("href")?.trim() ?? null;
-  const nonSelf = links.find((l) => l.getAttribute("rel") !== "self");
+  const nonSelf = links.find(l => l.getAttribute("rel") !== "self");
   if (nonSelf) return nonSelf.getAttribute("href")?.trim() ?? null;
   return links[0]!.getAttribute("href")?.trim() ?? null;
 }

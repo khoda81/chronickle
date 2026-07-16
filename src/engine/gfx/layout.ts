@@ -88,11 +88,11 @@ export function fitStackLayout(
   const minNews = Math.min(MIN_NEWS_HEIGHT, total);
   const fittedNews = clamp(newsHeight, minNews, total);
   const signalSpace = Math.max(0, total - fittedNews);
-  const weights = rowHeights.map((height) => Math.max(0, height));
+  const weights = rowHeights.map(height => Math.max(0, height));
   const weightSum = weights.reduce((sum, weight) => sum + weight, 0);
   const fittedRows =
     weightSum > 0
-      ? weights.map((weight) => (signalSpace * weight) / weightSum)
+      ? weights.map(weight => (signalSpace * weight) / weightSum)
       : rowHeights.map(() => signalSpace / count);
 
   return { newsHeight: fittedNews, rowHeights: fittedRows };

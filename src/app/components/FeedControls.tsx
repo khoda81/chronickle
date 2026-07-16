@@ -29,8 +29,8 @@ export function FeedInput(props: FeedInputProps) {
         placeholder="Paste RSS feed URL…"
         spellcheck={false}
         value={url()}
-        onInput={(event) => setUrl(event.currentTarget.value)}
-        onKeyDown={(event) => {
+        onInput={event => setUrl(event.currentTarget.value)}
+        onKeyDown={event => {
           if (event.key !== "Enter") return;
           event.preventDefault();
           void add();
@@ -54,11 +54,11 @@ export function FeedList(props: FeedListProps) {
   return (
     <div class={styles.list} aria-label="News feeds">
       <For each={props.feeds}>
-        {(feed) => (
+        {feed => (
           <FeedChip
             feed={feed}
             onToggle={() => props.onToggle(feed)}
-            onRename={(source) => props.onRename(feed, source)}
+            onRename={source => props.onRename(feed, source)}
             onRemove={() => props.onRemove(feed)}
           />
         )}
@@ -108,8 +108,7 @@ function FeedChip(props: FeedChipProps) {
         aria-pressed={props.feed.enabled}
         title={props.feed.enabled ? `Hide ${props.feed.source}` : `Show ${props.feed.source}`}
         aria-label={props.feed.enabled ? `Hide ${props.feed.source}` : `Show ${props.feed.source}`}
-        onClick={props.onToggle}
-      >
+        onClick={props.onToggle}>
         <span class={styles.swatch} style={{ background: props.feed.color }} aria-hidden="true" />
       </button>
       {editing() ? (
@@ -118,9 +117,9 @@ function FeedChip(props: FeedChipProps) {
           class={styles.nameInput}
           aria-label={`Rename ${props.feed.source}`}
           value={draft()}
-          onInput={(event) => setDraft(event.currentTarget.value)}
+          onInput={event => setDraft(event.currentTarget.value)}
           onBlur={finishEditing}
-          onKeyDown={(event) => {
+          onKeyDown={event => {
             if (event.key === "Enter") {
               event.preventDefault();
               finishEditing();
@@ -135,8 +134,7 @@ function FeedChip(props: FeedChipProps) {
           type="button"
           class={styles.nameButton}
           title={`Rename ${props.feed.source}`}
-          onClick={beginEditing}
-        >
+          onClick={beginEditing}>
           <span class={styles.name}>{props.feed.source}</span>
         </button>
       )}
@@ -145,8 +143,7 @@ function FeedChip(props: FeedChipProps) {
         class={styles.remove}
         title={`Remove ${props.feed.source}`}
         aria-label={`Remove ${props.feed.source}`}
-        onClick={props.onRemove}
-      >
+        onClick={props.onRemove}>
         <X aria-hidden="true" />
       </button>
     </div>

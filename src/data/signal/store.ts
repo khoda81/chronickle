@@ -191,10 +191,7 @@ export class SignalSegmentStore {
         Interval.touches(previous.range, range) &&
         previous.resolutionMs === resolutionMs
       ) {
-        out[out.length - 1] = {
-          range: Interval.hull(previous.range, range),
-          resolutionMs,
-        };
+        out[out.length - 1] = { range: Interval.hull(previous.range, range), resolutionMs };
       } else {
         out.push({ range, resolutionMs });
       }
@@ -363,10 +360,7 @@ function appendSlice(out: HeldSignalSegment[], segment: HeldSignalSegment): void
     previous.value === segment.value &&
     previous.resolutionMs === segment.resolutionMs
   ) {
-    out[out.length - 1] = {
-      ...previous,
-      range: Interval.hull(previous.range, segment.range),
-    };
+    out[out.length - 1] = { ...previous, range: Interval.hull(previous.range, segment.range) };
   } else {
     out.push(segment);
   }

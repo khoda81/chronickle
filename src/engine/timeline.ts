@@ -213,12 +213,12 @@ export class Timeline {
     this.config = { ...DEFAULT_TIMELINE_CONFIG, ...opts.config };
     this.restoreNewsHeightOnFirstRows = opts.initialNewsHeight !== undefined;
     this.signalRows = opts.signalRows ?? [];
-    this.rowHeights = this.signalRows.map((row) =>
+    this.rowHeights = this.signalRows.map(row =>
       restoredRowHeight(row.height, DEFAULT_SIGNAL_ROW_HEIGHT),
     );
-    this.rowPalettes = this.signalRows.map((row) => row.palette);
-    this.rowWaveletModes = this.signalRows.map((row) => row.waveletMode);
-    this.rowVerticalOffsets = this.signalRows.map((row) => row.verticalOffset);
+    this.rowPalettes = this.signalRows.map(row => row.palette);
+    this.rowWaveletModes = this.signalRows.map(row => row.waveletMode);
+    this.rowVerticalOffsets = this.signalRows.map(row => row.verticalOffset);
     this.rowHoverSamples = this.signalRows.map(() => ({ t: Number.NaN, value: Number.NaN }));
     this.plot = new Plot({ canvas: opts.canvas, initialTimeInterval: opts.initialTimeInterval });
     this.state = {
@@ -249,7 +249,7 @@ export class Timeline {
   setSignalRows(rows: readonly SignalRow[]): void {
     const previousRows = this.signalRows;
     const previousIndexById = new Map(previousRows.map((row, index) => [row.id, index]));
-    const nextIds = new Set(rows.map((row) => row.id));
+    const nextIds = new Set(rows.map(row => row.id));
     const hadSignalRows = previousRows.length > 0;
 
     // A row identity owns its broker subscription and render scratch state.
@@ -258,7 +258,7 @@ export class Timeline {
       if (!nextIds.has(previousRows[index]!.id)) this.signalSubscriptions[index]?.dispose();
     }
 
-    const positiveHeights = this.rowHeights.filter((height) => height > 0);
+    const positiveHeights = this.rowHeights.filter(height => height > 0);
     const fallback =
       positiveHeights.length > 0
         ? positiveHeights.reduce((sum, height) => sum + height, 0) / positiveHeights.length
@@ -271,7 +271,7 @@ export class Timeline {
     const previousDemands = this.subscribedDemands;
 
     this.signalRows = [...rows];
-    this.rowHeights = rows.map((row) => {
+    this.rowHeights = rows.map(row => {
       const previousIndex = previousIndexById.get(row.id);
       const previousHeight =
         previousIndex === undefined ? undefined : previousHeights[previousIndex];
@@ -279,26 +279,26 @@ export class Timeline {
       // reconciled, every active row must have a positive recoverable height.
       return restoredRowHeight(previousHeight, restoredRowHeight(row.height, fallback));
     });
-    this.rowPalettes = rows.map((row) => row.palette);
-    this.rowWaveletModes = rows.map((row) => row.waveletMode);
-    this.rowVerticalOffsets = rows.map((row) => row.verticalOffset);
-    this.rowEvalTime = rows.map((row) => {
+    this.rowPalettes = rows.map(row => row.palette);
+    this.rowWaveletModes = rows.map(row => row.waveletMode);
+    this.rowVerticalOffsets = rows.map(row => row.verticalOffset);
+    this.rowEvalTime = rows.map(row => {
       const previousIndex = previousIndexById.get(row.id);
       return previousIndex === undefined
         ? new Float64Array(0)
         : (previousEvalTime[previousIndex] ?? new Float64Array(0));
     });
-    this.rowHoverSamples = rows.map((row) => {
+    this.rowHoverSamples = rows.map(row => {
       const previousIndex = previousIndexById.get(row.id);
       return previousIndex === undefined
         ? { t: Number.NaN, value: Number.NaN }
         : (previousHoverSamples[previousIndex] ?? { t: Number.NaN, value: Number.NaN });
     });
-    this.signalSubscriptions = rows.map((row) => {
+    this.signalSubscriptions = rows.map(row => {
       const previousIndex = previousIndexById.get(row.id);
       return previousIndex === undefined ? undefined : previousSubscriptions[previousIndex];
     });
-    this.subscribedDemands = rows.map((row) => {
+    this.subscribedDemands = rows.map(row => {
       const previousIndex = previousIndexById.get(row.id);
       return previousIndex === undefined ? null : (previousDemands[previousIndex] ?? null);
     });
@@ -367,7 +367,7 @@ export class Timeline {
   }
 
   setSignalRowWaveletMode(id: string, mode: WaveletMode): void {
-    const index = this.signalRows.findIndex((row) => row.id === id);
+    const index = this.signalRows.findIndex(row => row.id === id);
     if (index < 0 || this.rowWaveletModes[index] === mode) return;
     this.rowWaveletModes[index] = mode;
     this.subscribedDemands[index] = null;
@@ -409,7 +409,7 @@ export class Timeline {
     const collapsedRowIds = removeCollapsedRows
       ? this.signalRows
           .filter((_, index) => this.rowHeights[index]! <= ROW_REMOVE_THRESHOLD)
-          .map((row) => row.id)
+          .map(row => row.id)
       : [];
     this.callbacks.onLayoutChange?.(this.getLayout(), collapsedRowIds);
   }
@@ -429,10 +429,7 @@ export class Timeline {
     window.addEventListener("pointerup", this.onPointerUp, { signal });
     window.addEventListener("pointercancel", this.onPointerCancel, { signal });
 
-    this.canvas.addEventListener("wheel", this.onWheel, {
-      passive: false,
-      signal,
-    });
+    this.canvas.addEventListener("wheel", this.onWheel, { passive: false, signal });
 
     this.canvas.addEventListener("pointermove", this.onHoverMove, { signal });
     this.canvas.addEventListener("pointerleave", this.onHoverLeave, { signal });
@@ -568,22 +565,24 @@ export class Timeline {
       this.syncPriceSubscription(index, demand);
 
       const result = row.read({ evalTime: evalView, maxSampleGapMs: gridStepMs });
-      frame.heatmap(row.id).drawWaveletField(
-        {
-          evalTime: evalView,
-          value: result.value,
-          padLeft,
-          padRight,
-          visibleCells,
-          revision: result.sampleRevision,
-        },
-        priceScale,
-        waveletMode,
-        rowY,
-        heatHeight,
-        scaleInterval,
-        this.rowPalettes[index]!,
-      );
+      frame
+        .heatmap(row.id)
+        .drawWaveletField(
+          {
+            evalTime: evalView,
+            value: result.value,
+            padLeft,
+            padRight,
+            visibleCells,
+            revision: result.sampleRevision,
+          },
+          priceScale,
+          waveletMode,
+          rowY,
+          heatHeight,
+          scaleInterval,
+          this.rowPalettes[index]!,
+        );
       frame.resolution().draw(result.coverage, gridStepMs, rowY + heatHeight);
       rowY += rowHeight;
       frame.fillRectPx(0, rowY - 1, width, 1, "rgba(255,255,255,0.18)");
@@ -662,7 +661,7 @@ export class Timeline {
   }
 
   public setSignalRowPalette(id: string, palette: PaletteName): void {
-    const index = this.signalRows.findIndex((row) => row.id === id);
+    const index = this.signalRows.findIndex(row => row.id === id);
     if (index < 0 || this.rowPalettes[index] === palette) return;
     this.rowPalettes[index] = palette;
     this.reqDraw();

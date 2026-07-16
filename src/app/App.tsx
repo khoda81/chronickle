@@ -56,7 +56,7 @@ export function App() {
   const [newsHeight, setNewsHeight] = createSignal(saved.newsHeight);
   const [hover, setHover] = createSignal<EventTooltipModel | null>(null);
   const overlayRows = createMemo<readonly TimelineOverlayRowView[]>(() =>
-    charts().map((chart) => ({
+    charts().map(chart => ({
       key: chartStateKey(chart),
       sourceLabel: priceSignalSource(chart.sourceId)?.label ?? chart.sourceId,
       symbol: chart.symbol,
@@ -75,13 +75,13 @@ export function App() {
   };
 
   const updateChart = (key: string, update: Partial<ChartState>): void => {
-    setCharts((current) =>
-      current.map((chart) => (chartStateKey(chart) === key ? { ...chart, ...update } : chart)),
+    setCharts(current =>
+      current.map(chart => (chartStateKey(chart) === key ? { ...chart, ...update } : chart)),
     );
   };
 
   const buildTimelineRows = (): SignalRow[] =>
-    charts().map((chart) => {
+    charts().map(chart => {
       const key = chartStateKey(chart);
       const broker = brokers.get(key);
 
@@ -91,7 +91,7 @@ export function App() {
 
       return {
         id: key,
-        read: (request) => broker.read(request),
+        read: request => broker.read(request),
         readSampleAt: (time, out) => broker.readPointAtOrBefore(time, out),
         subscribe: (demand, onChange) => broker.subscribe(demand, onChange),
         palette: chart.palette,
@@ -109,18 +109,14 @@ export function App() {
   };
 
   const storeTimelineLayout = (layout: TimelineLayout): void => {
-    const rows = new Map(layout.rows.map((row) => [row.id, row]));
+    const rows = new Map(layout.rows.map(row => [row.id, row]));
     setNewsHeight(layout.newsHeight);
-    setCharts((current) =>
-      current.map((chart) => {
+    setCharts(current =>
+      current.map(chart => {
         const layoutRow = rows.get(chartStateKey(chart));
         return layoutRow === undefined
           ? chart
-          : {
-              ...chart,
-              height: layoutRow.height,
-              verticalOffset: layoutRow.verticalOffset,
-            };
+          : { ...chart, height: layoutRow.height, verticalOffset: layoutRow.verticalOffset };
       }),
     );
   };
@@ -135,7 +131,7 @@ export function App() {
 
   const removedChartLabels = (removed: readonly ChartState[]): string =>
     removed
-      .map((chart) => {
+      .map(chart => {
         const sourceLabel = priceSignalSource(chart.sourceId)?.label ?? chart.sourceId;
         return `${chart.symbol} · ${sourceLabel}`;
       })
@@ -145,11 +141,11 @@ export function App() {
     if (keys.length === 0) return;
     const removedKeys = new Set(keys);
     let removed: ChartState[] = [];
-    setCharts((current) => {
-      removed = current.filter((chart) => removedKeys.has(chartStateKey(chart)));
+    setCharts(current => {
+      removed = current.filter(chart => removedKeys.has(chartStateKey(chart)));
       return removed.length === 0
         ? current
-        : current.filter((chart) => !removedKeys.has(chartStateKey(chart)));
+        : current.filter(chart => !removedKeys.has(chartStateKey(chart)));
     });
     if (removed.length === 0) return;
 
@@ -179,7 +175,7 @@ export function App() {
     }
 
     const key = chartKey(source.id, symbol);
-    if (charts().some((chart) => chartStateKey(chart) === key)) {
+    if (charts().some(chart => chartStateKey(chart) === key)) {
       setStatus(`${source.label} ${symbol} is already visible`, "error");
       return false;
     }
@@ -216,7 +212,7 @@ export function App() {
           : undefined,
     };
     brokers.set(key, broker);
-    setCharts((current) => [...current, chart]);
+    setCharts(current => [...current, chart]);
     const fittedLayout = syncTimelineRows();
     if (fittedLayout !== null) storeTimelineLayout(fittedLayout);
     setStatus(`Added ${source.label} ${symbol}`);
@@ -224,12 +220,12 @@ export function App() {
   };
 
   const applyLayout = (layout: TimelineLayout, collapsedRowIds: readonly string[]): void => {
-    const rows = new Map(layout.rows.map((row) => [row.id, row]));
+    const rows = new Map(layout.rows.map(row => [row.id, row]));
     const collapsed = new Set(collapsedRowIds);
     let removed: ChartState[] = [];
 
     setNewsHeight(layout.newsHeight);
-    setCharts((current) => {
+    setCharts(current => {
       const next: ChartState[] = [];
       for (const chart of current) {
         const key = chartStateKey(chart);
@@ -243,11 +239,7 @@ export function App() {
         next.push(
           layoutRow === undefined
             ? chart
-            : {
-                ...chart,
-                height: layoutRow.height,
-                verticalOffset: layoutRow.verticalOffset,
-              },
+            : { ...chart, height: layoutRow.height, verticalOffset: layoutRow.verticalOffset },
         );
       }
       return next;
@@ -358,26 +350,21 @@ export function App() {
       initialTimeInterval: saved.viewport,
       initialPlayback: playback(),
       initialNewsHeight: newsHeight(),
-      eventSource: (queryInterval) => eventBroker.query(queryInterval),
-      feedColorOf: (feedId) => registry.colorOf(feedId),
+      eventSource: queryInterval => eventBroker.query(queryInterval),
+      feedColorOf: feedId => registry.colorOf(feedId),
       overlay: timelineOverlay,
       callbacks: {
-        onHover: (event) => {
+        onHover: event => {
           if (event === null) {
             setHover(null);
             return;
           }
 
           const snapshot: HoverInfo = { ...event };
-          setHover({
-            event: snapshot,
-            feed: registry.get(snapshot.feedId),
-          });
+          setHover({ event: snapshot, feed: registry.get(snapshot.feedId) });
         },
-        onViewportChange: (nextViewport) => {
-          setViewport(nextViewport);
-        },
-        onPlaybackChange: (nextPlayback) => {
+        onViewportChange: nextViewport => setViewport(nextViewport),
+        onPlaybackChange: nextPlayback => {
           setPlayback(nextPlayback);
         },
         onLayoutChange: applyLayout,
@@ -407,7 +394,7 @@ export function App() {
       <div class={styles.dataControls}>
         <MarketControls
           onAdd={(sourceId, symbol) => addChart(sourceId, symbol)}
-          onLoadError={(message) => setStatus(message)}
+          onLoadError={message => setStatus(message)}
         />
         <FeedInput onAdd={addFeed} />
       </div>
@@ -445,7 +432,7 @@ export function App() {
         <EventTooltip
           controller={timelineOverlay}
           value={hover()}
-          onPointerPresenceChange={(inside) => timeline?.setEventTooltipHovered(inside)}
+          onPointerPresenceChange={inside => timeline?.setEventTooltipHovered(inside)}
         />
       </div>
       <Status message={status().message} kind={status().kind} />

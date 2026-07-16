@@ -134,9 +134,7 @@ const DEFAULT_LIVE_RETENTION_MS = 15_000;
  */
 export function createPollingSignalSource(loader: IntervalLoader): SignalAdapter {
   const policy = createPolicy(loader);
-  return {
-    connect: (sink) => new PollingSession(loader, policy, sink),
-  };
+  return { connect: sink => new PollingSession(loader, policy, sink) };
 }
 
 class PollingSession implements AdapterSession {
@@ -316,7 +314,7 @@ class PollingSession implements AdapterSession {
   }
 
   private desiredLivePlan(wallNow: number): ResolvedDemand | null {
-    return this.plans.find((plan) => Interval.contains(plan.range, wallNow)) ?? null;
+    return this.plans.find(plan => Interval.contains(plan.range, wallNow)) ?? null;
   }
 
   private createLiveLease(plan: ResolvedDemand, wallNow: number): LiveLease {
@@ -364,7 +362,7 @@ class PollingSession implements AdapterSession {
       return this.live !== null && this.live.plan.resolutionMs === work.plan.resolutionMs;
     }
     return this.plans.some(
-      (plan) =>
+      plan =>
         plan.resolutionMs >= work.plan.resolutionMs &&
         Interval.overlaps(plan.range, work.requiredInterval),
     );
@@ -414,11 +412,7 @@ class PollingSession implements AdapterSession {
   }
 
   private start(work: Work): void {
-    const running: RunningWork = {
-      state: "fetching",
-      work,
-      controller: new AbortController(),
-    };
+    const running: RunningWork = { state: "fetching", work, controller: new AbortController() };
     this.active = running;
     this.emitStatus();
     if (this.active === running) void this.run(running);
@@ -475,12 +469,7 @@ class PollingSession implements AdapterSession {
     const delayMs = validDelay(proposed) ? Math.max(100, proposed) : DEFAULT_RETRY(attempt);
     const retryAtMs = this.now() + delayMs;
     const message = error instanceof Error ? error.message : String(error);
-    const failed: FailedWork = {
-      state: "failed",
-      work: { ...work, attempt },
-      retryAtMs,
-      message,
-    };
+    const failed: FailedWork = { state: "failed", work: { ...work, attempt }, retryAtMs, message };
     this.active = failed;
     if (this.loader.sourceWideBackoff === true) {
       this.sourceBackoffUntilMs = Math.max(this.sourceBackoffUntilMs ?? -Infinity, retryAtMs);
@@ -527,7 +516,7 @@ function resolveDemands(
   loader: IntervalLoader,
   demands: readonly BrokerDemand[],
 ): ResolvedDemand[] {
-  const plans = demands.map((demand) => {
+  const plans = demands.map(demand => {
     validateDemand(demand);
     const resolutionMs = loader.resolve(demand);
     if (!(resolutionMs > 0) || !Number.isFinite(resolutionMs)) {

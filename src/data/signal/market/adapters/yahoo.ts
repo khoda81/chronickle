@@ -67,7 +67,7 @@ export function createYahooAdapter(opts: YahooAdapterOptions): SignalAdapter {
     },
 
     async fetchInterval({ range, resolutionMs }, signal) {
-      const entry = YAHOO_LADDER.find((candidate) => candidate.periodMs === resolutionMs);
+      const entry = YAHOO_LADDER.find(candidate => candidate.periodMs === resolutionMs);
       if (entry === undefined) throw new Error(`Yahoo: unsupported resolution ${resolutionMs}`);
       const startMs = Math.floor((range.start - entry.periodMs) / entry.periodMs) * entry.periodMs;
       const roundedEndMs = Math.ceil(range.end / entry.periodMs) * entry.periodMs;
@@ -216,7 +216,7 @@ export function chooseYahooInterval(
 }
 
 function chooseInterval(maxDeltaTMs: number, rangeMin: number, now: number): YahooInterval {
-  const eligible = YAHOO_LADDER.filter((candidate) => now - rangeMin <= candidate.lookbackMs);
+  const eligible = YAHOO_LADDER.filter(candidate => now - rangeMin <= candidate.lookbackMs);
   // Daily and weekly history have no lookback limit, so this is structurally
   // non-empty. Start with the finest available interval as the best effort
   // when even it is coarser than the viewport asks for.

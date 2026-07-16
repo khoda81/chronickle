@@ -11,21 +11,9 @@ interface ChartSettingsProps {
 }
 
 const KERNELS = [
-  {
-    value: "centered",
-    name: "Gaussian",
-    detail: "Centered · symmetric context",
-  },
-  {
-    value: "causal",
-    name: "Erlang",
-    detail: "Causal · past-only context",
-  },
-] as const satisfies readonly {
-  value: WaveletMode;
-  name: string;
-  detail: string;
-}[];
+  { value: "centered", name: "Gaussian", detail: "Centered · symmetric context" },
+  { value: "causal", name: "Erlang", detail: "Causal · past-only context" },
+] as const satisfies readonly { value: WaveletMode; name: string; detail: string }[];
 
 export function ChartSettings(props: ChartSettingsProps) {
   return (
@@ -33,8 +21,7 @@ export function ChartSettings(props: ChartSettingsProps) {
       <Popover.Trigger
         class={styles.trigger}
         title={`Settings`}
-        aria-label={`Open ${props.label} settings`}
-      >
+        aria-label={`Open ${props.label} settings`}>
         <Settings2 aria-hidden="true" />
       </Popover.Trigger>
       <Popover.Portal>
@@ -42,11 +29,10 @@ export function ChartSettings(props: ChartSettingsProps) {
           <fieldset class={styles.fieldset}>
             <legend class={styles.legend}>Kernel</legend>
             <div class={styles.kernelGrid}>
-              {KERNELS.map((kernel) => (
+              {KERNELS.map(kernel => (
                 <label
                   class={styles.kernelOption}
-                  classList={{ [styles.kernelSelected!]: props.waveletMode === kernel.value }}
-                >
+                  classList={{ [styles.kernelSelected!]: props.waveletMode === kernel.value }}>
                   <input
                     class={styles.radio}
                     type="radio"

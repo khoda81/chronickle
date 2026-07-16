@@ -120,8 +120,7 @@ export function PalettePicker(props: PalettePickerProps) {
         wheelDelta = 0;
         setOpen(false);
       }}
-      onWheel={onWheel}
-    >
+      onWheel={onWheel}>
       <button
         type="button"
         class={styles.trigger}
@@ -133,8 +132,7 @@ export function PalettePicker(props: PalettePickerProps) {
           setOpen(true);
           alignSelected();
         }}
-        onKeyDown={onKeyDown}
-      >
+        onKeyDown={onKeyDown}>
         <span
           class={styles.bar}
           style={{ "background-image": paletteCssGradient(props.value) }}
@@ -146,7 +144,7 @@ export function PalettePicker(props: PalettePickerProps) {
         <div ref={deck} class={styles.deck}>
           <div class={styles.listbox} role="listbox" aria-label={`${props.label} color maps`}>
             <For each={PALETTE_NAMES}>
-              {(palette) => (
+              {palette => (
                 <button
                   type="button"
                   class={styles.item}
@@ -154,8 +152,7 @@ export function PalettePicker(props: PalettePickerProps) {
                   role="option"
                   aria-selected={palette === props.value}
                   aria-label={palette}
-                  onClick={() => choose(palette)}
-                >
+                  onClick={() => choose(palette)}>
                   <span
                     class={styles.optionBar}
                     style={{ "background-image": paletteCssGradient(palette) }}

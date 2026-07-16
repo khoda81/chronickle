@@ -36,11 +36,7 @@ export async function fetchOhlc(opts: FetchOhlcOptions): Promise<NobitexOhlcResp
   const to = Math.floor(opts.toMs / 1000);
 
   // 1. Build query parameters using URLSearchParams
-  const params = new URLSearchParams({
-    symbol,
-    resolution,
-    to: to.toString(),
-  });
+  const params = new URLSearchParams({ symbol, resolution, to: to.toString() });
 
   // 2. Safely handle the optional fromMs
   if (opts.fromMs !== undefined) {
@@ -85,9 +81,6 @@ export async function fetchOhlc(opts: FetchOhlcOptions): Promise<NobitexOhlcResp
  */
 export function ohlcToLogPriceSamples(res: NobitexOhlcResponse | null): readonly Sample[] {
   if (res === null) return [];
-  const points: PricePoint[] = res.t.map((sec, i) => ({
-    t: sec * 1000,
-    price: res.o[i]!,
-  }));
+  const points: PricePoint[] = res.t.map((sec, i) => ({ t: sec * 1000, price: res.o[i]! }));
   return logPriceSamples(points);
 }

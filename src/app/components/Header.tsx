@@ -9,8 +9,7 @@ export function Header() {
         href="https://github.com/khoda81/chronickle"
         target="_blank"
         rel="noopener noreferrer"
-        aria-label="Open the Chronickle repository on GitHub"
-      >
+        aria-label="Open the Chronickle repository on GitHub">
         <svg viewBox="0 0 16 16" aria-hidden="true">
           <path
             fill="currentColor"

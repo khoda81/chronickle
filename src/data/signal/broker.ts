@@ -2,7 +2,12 @@
 
 import { Interval, IntervalSet } from "../../core/interval.ts";
 import { SettledCoverageIndex, type CoverageSegment } from "./coverage.ts";
-import type { AcquisitionActivity, AdapterDelivery, AdapterSession, SignalAdapter } from "./fetcher.ts";
+import type {
+  AcquisitionActivity,
+  AdapterDelivery,
+  AdapterSession,
+  SignalAdapter,
+} from "./fetcher.ts";
 import { normalizeSamples, type MutableSample, type Sample } from "./sample.ts";
 import { SignalSegmentStore, type HeldSignalSegment } from "./store.ts";
 
@@ -57,13 +62,13 @@ export class Broker {
   constructor(adapter: SignalAdapter, opts: BrokerOptions = {}) {
     this.now = opts.now ?? Date.now;
     this.onError = opts.onError ?? ((message, error) => console.error(message, error));
-    this.onWarning = opts.onWarning ?? ((message) => console.warn(message));
+    this.onWarning = opts.onWarning ?? (message => console.warn(message));
     this.adapterSession = adapter.connect({
-      next: (batch) => {
+      next: batch => {
         if (this.ingest(batch)) this.sampleRevision++;
         this.notify();
       },
-      status: (activities) => {
+      status: activities => {
         this.adapterActivities = activities;
         this.notify();
       },
@@ -92,11 +97,7 @@ export class Broker {
           ? this.valueBuffer
           : (this.valueBuffer = new Float64Array(evalTime.length));
       value.fill(NaN);
-      return {
-        value,
-        coverage: [],
-        sampleRevision: this.sampleRevision,
-      };
+      return { value, coverage: [], sampleRevision: this.sampleRevision };
     }
 
     const queryInterval = Interval.create(evalTime[0]!, evalTime[evalTime.length - 1]!);
@@ -123,11 +124,7 @@ export class Broker {
         a.range.end - b.range.end,
     );
 
-    return {
-      value,
-      coverage,
-      sampleRevision: this.sampleRevision,
-    };
+    return { value, coverage, sampleRevision: this.sampleRevision };
   }
 
   subscribe(demand: BrokerDemand, fn: () => void): Subscription {
@@ -136,7 +133,7 @@ export class Broker {
     this.demandSubscriptions.add(entry);
     this.syncAdapterDemands();
     return {
-      update: (demand) => {
+      update: demand => {
         if (disposed) throw new Error("Broker subscription is disposed");
         const next = validateDemand(demand);
         if (sameDemand(entry.demand, next)) return;
@@ -179,7 +176,7 @@ export class Broker {
 
   private syncAdapterDemands(): void {
     this.adapterSession.setDemands(
-      [...this.demandSubscriptions].map((subscription) => subscription.demand),
+      [...this.demandSubscriptions].map(subscription => subscription.demand),
     );
   }
 
@@ -189,8 +186,8 @@ export class Broker {
     if (clipped.discardedFutureCount > 0) {
       this.onWarning(
         `[Broker] discarded ${clipped.discardedFutureCount} future point(s); ` +
-        `searched range ended at ${result.searchedInterval.end}, ` +
-        `latest returned timestamp was ${clipped.latestFutureT}`,
+          `searched range ended at ${result.searchedInterval.end}, ` +
+          `latest returned timestamp was ${clipped.latestFutureT}`,
       );
     }
     let changed = false;
@@ -230,11 +227,13 @@ export class Broker {
   }
 
   private readySegments(evalTime: Float64Array, wallNow: number): CoverageSegment[] {
-    return this.store.segments(evalTime, wallNow).map((span) => ({
-      range: span.range,
-      samplePeriodMs: span.resolutionMs,
-      state: "ready" as const,
-    }));
+    return this.store
+      .segments(evalTime, wallNow)
+      .map(span => ({
+        range: span.range,
+        samplePeriodMs: span.resolutionMs,
+        state: "ready" as const,
+      }));
   }
 
   private transientSegments(range: Interval): CoverageSegment[] {
@@ -270,7 +269,7 @@ export class Broker {
       {
         range: Interval.create(min, range.end),
         samplePeriodMs: maxSampleGapMs,
-        state: this.adapterActivities.some((activity) => activity.state === "watching")
+        state: this.adapterActivities.some(activity => activity.state === "watching")
           ? "watching"
           : "pending",
       },

@@ -39,14 +39,11 @@ export function EventTooltip(props: EventTooltipProps) {
       ref={element}
       class={styles.tooltip}
       classList={{ [styles.hidden!]: props.value === null }}
-      style={{
-        "--outlet-color": props.value?.feed.color ?? "rgba(148, 163, 184, 0.9)",
-      }}
+      style={{ "--outlet-color": props.value?.feed.color ?? "rgba(148, 163, 184, 0.9)" }}
       onPointerEnter={() => props.onPointerPresenceChange(true)}
-      onPointerLeave={() => props.onPointerPresenceChange(false)}
-    >
+      onPointerLeave={() => props.onPointerPresenceChange(false)}>
       <Show when={props.value}>
-        {(value) => (
+        {value => (
           <>
             <span class={styles.source}>
               {value().feed.source} · {new Date(value().event.t).toLocaleString()}
@@ -55,8 +52,7 @@ export function EventTooltip(props: EventTooltipProps) {
               class={styles.link}
               href={value().event.link}
               target="_blank"
-              rel="noopener noreferrer"
-            >
+              rel="noopener noreferrer">
               {value().event.title}
             </a>
             <Show when={value().event.summary.length > 0}>

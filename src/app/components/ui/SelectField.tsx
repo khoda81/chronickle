@@ -21,7 +21,7 @@ interface SelectFieldProps<Value extends string> {
 
 export function SelectField<Value extends string>(props: SelectFieldProps<Value>) {
   const selectedOption = () =>
-    props.options.find((option) => option.value === props.value) ?? props.options[0] ?? null;
+    props.options.find(option => option.value === props.value) ?? props.options[0] ?? null;
 
   return (
     <Select<SelectOption<Value>>
@@ -30,10 +30,10 @@ export function SelectField<Value extends string>(props: SelectFieldProps<Value>
       value={selectedOption()}
       optionValue="value"
       optionTextValue="label"
-      onChange={(option) => {
+      onChange={option => {
         if (option !== null) props.onChange(option.value);
       }}
-      itemComponent={(itemProps) => (
+      itemComponent={itemProps => (
         <Select.Item item={itemProps.item} class={styles.item}>
           <Select.ItemLabel class={styles.itemLabel}>
             {props.itemContent?.(itemProps.item.rawValue) ?? itemProps.item.rawValue.label}
@@ -45,14 +45,12 @@ export function SelectField<Value extends string>(props: SelectFieldProps<Value>
       )}
       gutter={6}
       sameWidth
-      fitViewport
-    >
+      fitViewport>
       <Select.Trigger
         class={`${styles.trigger} ${props.triggerClass ?? ""}`}
-        aria-label={props.ariaLabel}
-      >
+        aria-label={props.ariaLabel}>
         <Select.Value<SelectOption<Value>> class={styles.value}>
-          {(state) => {
+          {state => {
             const selected = state.selectedOption();
             return selected === undefined
               ? null

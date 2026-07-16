@@ -17,7 +17,7 @@ interface MarketControlsProps {
 }
 
 const SOURCE_OPTIONS: readonly SelectOption<PriceSignalSourceId>[] = PRICE_SIGNAL_SOURCES.map(
-  (source) => ({ value: source.id, label: source.label }),
+  source => ({ value: source.id, label: source.label }),
 );
 
 export function MarketControls(props: MarketControlsProps) {
@@ -27,14 +27,14 @@ export function MarketControls(props: MarketControlsProps) {
   let loadGeneration = 0;
 
   createEffect(
-    on(sourceId, (nextSourceId) => {
+    on(sourceId, nextSourceId => {
       const source = priceSignalSource(nextSourceId);
       if (source === null) return;
       const generation = ++loadGeneration;
       setOptions(source.examples);
       void source
         .loadSymbols()
-        .then((loaded) => {
+        .then(loaded => {
           if (generation !== loadGeneration) return;
           const bySymbol = new Map<string, MarketSymbol>();
           for (const option of [...source.examples, ...loaded]) bySymbol.set(option.symbol, option);
@@ -63,12 +63,12 @@ export function MarketControls(props: MarketControlsProps) {
         onChange={setSourceId}
       />
       <Show when={priceSignalSource(sourceId())} keyed>
-        {(source) => (
+        {source => (
           <SymbolCombobox
             sourceLabel={source.label}
             initialSymbol={source.examples[0]?.symbol ?? ""}
             options={options()}
-            onAdd={(symbol) => props.onAdd(source.id, symbol)}
+            onAdd={symbol => props.onAdd(source.id, symbol)}
           />
         )}
       </Show>
@@ -85,7 +85,7 @@ interface SymbolComboboxProps {
 
 function SymbolCombobox(props: SymbolComboboxProps) {
   const initialOption = () =>
-    props.options.find((option) => option.symbol === props.initialSymbol) ??
+    props.options.find(option => option.symbol === props.initialSymbol) ??
     ({ symbol: props.initialSymbol, label: props.initialSymbol } satisfies MarketSymbol);
   const [symbol, setSymbol] = createSignal(props.initialSymbol);
   const [open, setOpen] = createSignal(false);
@@ -99,11 +99,10 @@ function SymbolCombobox(props: SymbolComboboxProps) {
   return (
     <form
       class={styles.symbolForm}
-      onSubmit={(event) => {
+      onSubmit={event => {
         event.preventDefault();
         add();
-      }}
-    >
+      }}>
       <Combobox<MarketSymbol>
         class={styles.symbolRoot}
         open={open()}
@@ -112,10 +111,10 @@ function SymbolCombobox(props: SymbolComboboxProps) {
         defaultValue={initialOption()}
         optionValue="symbol"
         optionLabel="symbol"
-        optionTextValue={(option) => `${option.symbol} ${option.label}`}
+        optionTextValue={option => `${option.symbol} ${option.label}`}
         defaultFilter={(option, inputValue) => filterMarketSymbols([option], inputValue).length > 0}
         onInputChange={setSymbol}
-        onChange={(option) => {
+        onChange={option => {
           if (option !== null) setSymbol(option.symbol);
         }}
         triggerMode="focus"
@@ -124,7 +123,7 @@ function SymbolCombobox(props: SymbolComboboxProps) {
         gutter={6}
         sameWidth={false}
         fitViewport
-        itemComponent={(itemProps) => (
+        itemComponent={itemProps => (
           <Combobox.Item item={itemProps.item} class={styles.symbolItem}>
             <Combobox.ItemLabel class={styles.symbolTicker}>
               {itemProps.item.rawValue.symbol}
@@ -133,14 +132,13 @@ function SymbolCombobox(props: SymbolComboboxProps) {
               {itemProps.item.rawValue.label}
             </Combobox.ItemDescription>
           </Combobox.Item>
-        )}
-      >
+        )}>
         <Combobox.Control class={styles.symbolControl} aria-label={`${props.sourceLabel} ticker`}>
           <Combobox.Input
             ref={input}
             class={styles.symbolInput}
             placeholder="Ticker, e.g. BTCUSDT"
-            onKeyDown={(event) => {
+            onKeyDown={event => {
               // Kobalte suppresses form submission while the popup is open.
               // With no selectable match, close it so Enter submits the
               // user's free-form ticker instead.
@@ -150,8 +148,7 @@ function SymbolCombobox(props: SymbolComboboxProps) {
           <Combobox.Trigger
             class={styles.symbolTrigger}
             title="Show available tickers"
-            aria-label="Show available tickers"
-          >
+            aria-label="Show available tickers">
             <Combobox.Icon class={styles.symbolIcon}>
               <ChevronDown aria-hidden="true" />
             </Combobox.Icon>

@@ -25,7 +25,7 @@ const BINANCE_LADDER: readonly { readonly periodMs: number; readonly interval: s
   { periodMs: 7 * 24 * 60 * 60_000, interval: "1w" },
 ];
 
-const PERIODS = BINANCE_LADDER.map((entry) => entry.periodMs);
+const PERIODS = BINANCE_LADDER.map(entry => entry.periodMs);
 
 export interface BinanceAdapterOptions {
   readonly symbol: string;
@@ -51,7 +51,7 @@ export function createBinanceAdapter(opts: BinanceAdapterOptions): SignalAdapter
     },
 
     async fetchInterval({ range, resolutionMs: periodMs }, signal) {
-      const entry = BINANCE_LADDER.find((candidate) => candidate.periodMs === periodMs)!;
+      const entry = BINANCE_LADDER.find(candidate => candidate.periodMs === periodMs)!;
       const params = new URLSearchParams({
         symbol,
         interval: entry.interval,

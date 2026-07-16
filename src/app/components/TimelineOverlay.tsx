@@ -56,8 +56,7 @@ export function TimelineOverlay(props: TimelineOverlayProps) {
           class={styles.timelineButton}
           title="Reload data"
           aria-label="Reload data"
-          onClick={props.onReload}
-        >
+          onClick={props.onReload}>
           <RefreshCw aria-hidden="true" strokeWidth={1.75} />
         </button>
         <button
@@ -70,8 +69,7 @@ export function TimelineOverlay(props: TimelineOverlayProps) {
           aria-label={
             props.playback.mode === "following" ? "Pause current-time playback" : "Play from here"
           }
-          onClick={props.onTogglePlayback}
-        >
+          onClick={props.onTogglePlayback}>
           {props.playback.mode === "following" ? (
             <Pause aria-hidden="true" strokeWidth={1.75} />
           ) : (
@@ -83,17 +81,17 @@ export function TimelineOverlay(props: TimelineOverlayProps) {
       <div ref={hoverLine} class={styles.hoverLine} hidden />
       <div ref={timeHover} class={styles.timeHover} hidden />
 
-      <For each={props.rows.map((row) => row.key)}>
-        {(key) => (
+      <For each={props.rows.map(row => row.key)}>
+        {key => (
           <TimelineRowChrome
             controller={props.controller}
             row={() => {
-              const row = props.rows.find((candidate) => candidate.key === key);
+              const row = props.rows.find(candidate => candidate.key === key);
               if (row === undefined) throw new Error(`Missing timeline overlay row ${key}`);
               return row;
             }}
-            onChoosePalette={(palette) => props.onPaletteChange(key, palette)}
-            onChooseWaveletMode={(mode) => props.onWaveletModeChange(key, mode)}
+            onChoosePalette={palette => props.onPaletteChange(key, palette)}
+            onChooseWaveletMode={mode => props.onWaveletModeChange(key, mode)}
             onRemove={() => props.onRemoveRow(key)}
           />
         )}
@@ -127,8 +125,7 @@ function TimelineRowChrome(props: TimelineRowChromeProps) {
         ref={header}
         class={styles.rowHeader}
         hidden
-        title="Drag this heatmap vertically to move through its fixed scale field"
-      >
+        title="Drag this heatmap vertically to move through its fixed scale field">
         <span class={styles.rowLabel} title={label()}>
           <span class={styles.rowSymbol}>{props.row().symbol}</span>
           <span class={styles.rowSeparator} aria-hidden="true">
@@ -152,8 +149,7 @@ function TimelineRowChrome(props: TimelineRowChromeProps) {
           class={styles.removeRow}
           title={`Remove`}
           aria-label={`Remove ${label()}`}
-          onClick={props.onRemove}
-        >
+          onClick={props.onRemove}>
           <Trash2 aria-hidden="true" />
         </button>
       </div>

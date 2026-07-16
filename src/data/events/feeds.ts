@@ -194,7 +194,7 @@ export class FeedRegistry {
 
   /** Only enabled feeds, in insertion order. Used by the EventBroker. */
   active(): readonly RssFeed[] {
-    return [...this.feeds.values()].filter((f) => f.enabled);
+    return [...this.feeds.values()].filter(f => f.enabled);
   }
 
   /** Look up a feed by id, or throw if unknown. */

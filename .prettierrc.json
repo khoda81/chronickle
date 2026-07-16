@@ -5,6 +5,9 @@
   "semi": true,
   "singleQuote": false,
   "trailingComma": "all",
-  "arrowParens": "always",
+  "arrowParens": "avoid",
+  "objectWrap": "collapse",
+  "bracketSameLine": true,
+  "singleAttributePerLine": false,
   "endOfLine": "lf"
 }

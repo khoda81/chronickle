@@ -104,7 +104,7 @@ export class EventBroker {
     this.walkerOpts = walkerOpts;
     this.activeFeeds = activeFeeds;
     this.walkerFactory = walkerFactory;
-    this.onDebug = diagnostics.onDebug ?? ((message) => console.debug(message));
+    this.onDebug = diagnostics.onDebug ?? (message => console.debug(message));
     this.onError = diagnostics.onError ?? ((message, error) => console.error(message, error));
   }
 
@@ -116,8 +116,8 @@ export class EventBroker {
    * prevent redundant requests.
    */
   query(range: Interval): EventQueryResult {
-    const enabledIds = new Set(this.activeFeeds().map((f) => f.id));
-    const inInterval = sliceByTime(this.events, range.start, range.end).filter((e) =>
+    const enabledIds = new Set(this.activeFeeds().map(f => f.id));
+    const inInterval = sliceByTime(this.events, range.start, range.end).filter(e =>
       enabledIds.has(e.feedId),
     );
 
@@ -211,7 +211,7 @@ export class EventBroker {
     const generation = this.generation;
 
     try {
-      const outcome = await walker.walk(targetMin, (pageEvents) => {
+      const outcome = await walker.walk(targetMin, pageEvents => {
         if (generation !== this.generation) return;
         this.merge(pageEvents);
         // Update oldestT from the store — the source of truth. We need the

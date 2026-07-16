@@ -7,11 +7,7 @@
  */
 export const TIMELINE_OVERLAY_METRICS = {
   rowInsetPx: 5,
-  timeLabel: {
-    marginPx: 5,
-    gapPx: 9,
-    topPx: 10,
-  },
+  timeLabel: { marginPx: 5, gapPx: 9, topPx: 10 },
   signalTooltip: {
     font: "600 11px ui-monospace, monospace",
     paddingXPx: 7,

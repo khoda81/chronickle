@@ -44,17 +44,9 @@ const DATETIME_FMT = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
   hour12: false,
 });
-const DATE_FMT = new Intl.DateTimeFormat("en-US", {
-  month: "2-digit",
-  day: "2-digit",
-});
-const MONTH_FMT = new Intl.DateTimeFormat("en-US", {
-  month: "short",
-  year: "numeric",
-});
-const YEAR_FMT = new Intl.DateTimeFormat("en-US", {
-  year: "numeric",
-});
+const DATE_FMT = new Intl.DateTimeFormat("en-US", { month: "2-digit", day: "2-digit" });
+const MONTH_FMT = new Intl.DateTimeFormat("en-US", { month: "short", year: "numeric" });
+const YEAR_FMT = new Intl.DateTimeFormat("en-US", { year: "numeric" });
 
 /**
  * Format a tick timestamp for the chosen interval.

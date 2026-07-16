@@ -15,8 +15,7 @@ export function Status(props: StatusProps) {
       class={styles.status}
       classList={{ [styles.error!]: error() }}
       role={error() ? "alert" : "status"}
-      aria-live={error() ? "assertive" : "polite"}
-    >
+      aria-live={error() ? "assertive" : "polite"}>
       {props.message}
     </div>
   );
