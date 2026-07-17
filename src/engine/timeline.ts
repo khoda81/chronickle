@@ -13,15 +13,16 @@ import type { CanvasPoint, MutableCanvasSize } from "./coordinates.ts";
 import { Plot } from "./plot.ts";
 import { eventIndexAtOrBefore, eventIndexNearPoint } from "./hittest.ts";
 import type { PaletteName } from "./ramp.ts";
-import { kernelContext, type WaveletMode } from "./wavelet.ts";
+import type { WaveletMode } from "./wavelet.ts";
 import { DEFAULT_MIN_TICK_PX } from "./gfx/axis.ts";
 import type { Frame } from "./gfx/context.ts";
 import {
   fitStackLayout,
   MIN_NEWS_HEIGHT,
   RESIZE_HANDLE_RADIUS,
-  COVERAGE_BAR_HEIGHT,
-  heatmapScaleWindow,
+  ROW_REMOVE_THRESHOLD,
+  signalRowCollapseProgress,
+  signalRowContainsHeatmap,
 } from "./gfx/layout.ts";
 import { BrokerDemand } from "../data/index.ts";
 
@@ -57,7 +58,6 @@ interface SignalRowRuntime {
   palette: PaletteName;
   waveletMode: WaveletMode;
   verticalOffset: number;
-  evalTime: Float64Array;
   readonly hoverSample: MutableSample;
   subscription: ActiveSignalSubscription | null;
 }
@@ -159,9 +159,6 @@ const DEFAULT_TIMELINE_CONFIG: TimelineConfig = {
 const EMPTY_EVENTS: EventSet = { events: [] };
 const DEFAULT_NOW_ANCHOR = 0.85;
 const RIGHT_EDGE_NOW_ANCHOR = 1;
-const ROW_COLLAPSE_HINT_HEIGHT = 128;
-const ROW_REMOVE_THRESHOLD = 64;
-
 export class Timeline {
   private readonly canvas: HTMLCanvasElement;
   private readonly plot: Plot;
@@ -470,14 +467,13 @@ export class Timeline {
   private draw = (): void => {
     if (!(this.plot.cssWidth > 0) || !(this.plot.cssHeight > 0)) return;
 
-    const dpr = window.devicePixelRatio;
-    const numDevicePx = Math.ceil(this.plot.cssWidth * dpr);
-    if (numDevicePx <= 0) return;
     const wallNow = Date.now();
     this.advanceFollowNow(wallNow);
 
     using frame = this.plot.beginFrame();
     const { width, height } = frame;
+    const numDevicePx = frame.deviceWidth;
+    if (numDevicePx <= 0) return;
     const { logGain: priceScale, timeInterval } = this.state;
     frame.fillRectPx(0, 0, width, height, "#05070d");
 
@@ -497,66 +493,28 @@ export class Timeline {
     for (let index = 0; index < this.rows.length; index++) {
       const runtime = this.rows[index]!;
       const { row, height: rowHeight, waveletMode } = runtime;
-      this.overlay?.setRowTop(row.id, rowY + COVERAGE_BAR_HEIGHT);
-      const activeBoundary = this.gestures.activeBoundary;
-      const rowTouchesActiveBoundary =
-        activeBoundary === 0
-          ? index === 0
-          : activeBoundary !== null && (index === activeBoundary - 1 || index === activeBoundary);
-      const collapseProgressRaw = 1 - (rowHeight - ROW_REMOVE_THRESHOLD) / ROW_COLLAPSE_HINT_HEIGHT;
-      const collapseProgress = rowTouchesActiveBoundary
-        ? Math.max(0, Math.min(1, collapseProgressRaw))
-        : 0;
-      this.overlay?.setRowCollapseProgress(row.id, collapseProgress);
-      if (rowHeight <= COVERAGE_BAR_HEIGHT + 2) {
-        rowY += rowHeight;
-        continue;
-      }
-      const heatHeight = rowHeight - COVERAGE_BAR_HEIGHT;
-      const scaleWindow = heatmapScaleWindow(numDevicePx, heatHeight, runtime.verticalOffset);
-      const visibleCells = scaleWindow.sampleCellCount;
-      const gridStepMs = (timeInterval.end - timeInterval.start) / visibleCells;
-      const scaleInterval = Interval.create(
-        scaleWindow.minSigmaPx * timePerDevicePx,
-        scaleWindow.maxSigmaPx * timePerDevicePx,
+      const signalRow = frame.signalRow(row.id, rowY, rowHeight);
+      this.overlay?.setRowTop(row.id, signalRow.heatmapTop);
+      const collapseProgress = signalRowCollapseProgress(
+        index,
+        rowHeight,
+        this.gestures.activeBoundary,
       );
-      const context = kernelContext(waveletMode, scaleInterval.end / gridStepMs);
-      const padLeft = context.leftCells;
-      const padRight = context.rightCells;
-      const edgeCount = padLeft + visibleCells + padRight + 1;
-      let evalTime = runtime.evalTime;
-      if (evalTime.length < edgeCount) {
-        evalTime = new Float64Array(edgeCount);
-        runtime.evalTime = evalTime;
-      }
-      for (let sample = 0; sample < edgeCount; sample++) {
-        evalTime[sample] = timeInterval.start + (sample - padLeft) * gridStepMs;
-      }
-
-      evalTime = evalTime.subarray(0, edgeCount) as Float64Array;
-      const readTimeRange = Interval.create(evalTime[0]!, evalTime[evalTime.length - 1]!);
-      const demand = { range: readTimeRange, maxDeltaTMs: gridStepMs } satisfies BrokerDemand;
-      this.syncPriceSubscription(index, demand);
-
-      const view = row.read({ evalTime });
-
-      const sampleDensity = frame
-        .heatmap(row.id)
-        .drawWaveletField(
-          { evalTime, view, padLeft, padRight, visibleCells },
-          priceScale,
-          waveletMode,
-          rowY + COVERAGE_BAR_HEIGHT,
-          heatHeight,
-          scaleInterval,
-          runtime.palette,
-        );
-
+      this.overlay?.setRowCollapseProgress(row.id, collapseProgress);
       hasVisibleRetry =
-        frame.statusBar().draw(sampleDensity, view.requests, rowY, wallNow) || hasVisibleRetry;
+        signalRow.draw({
+          verticalOffset: runtime.verticalOffset,
+          logGain: priceScale,
+          waveletMode,
+          palette: runtime.palette,
+          wallNow,
+          read: (demand, request) => {
+            this.syncPriceSubscription(index, demand);
+            return row.read(request);
+          },
+        }) || hasVisibleRetry;
 
       rowY += rowHeight;
-      frame.fillRectPx(0, rowY - 1, width, 1, "rgba(255,255,255,0.18)");
     }
     this.updateCrosshairOverlay();
     this.drawSignalHoverTooltips(frame);
@@ -613,24 +571,16 @@ export class Timeline {
     let rowY = this.state.newsHeight;
     for (const runtime of this.rows) {
       const { row, height: rowHeight } = runtime;
-      if (rowHeight <= COVERAGE_BAR_HEIGHT + 2) {
+      const signalRow = frame.signalRow(row.id, rowY, rowHeight);
+      if (!signalRow.drawable) {
         rowY += rowHeight;
         continue;
       }
-      const heatHeight = rowHeight - COVERAGE_BAR_HEIGHT;
       const sample = runtime.hoverSample;
       const hasSample = row.readSampleAt(hoverTime, sample);
       const anchorX = hasSample ? frame.tx.timeToX(sample.t) : x;
       const text = !hasSample ? "loading…" : formatPrice(Math.exp(sample.value));
-      positionSignalTooltip(
-        frame,
-        this.overlay,
-        row.id,
-        anchorX,
-        rowY + COVERAGE_BAR_HEIGHT + heatHeight / 2,
-        x,
-        text,
-      );
+      positionSignalTooltip(frame, this.overlay, row.id, anchorX, signalRow.heatmapCenter, x, text);
       rowY += rowHeight;
     }
   }
@@ -676,7 +626,7 @@ export class Timeline {
     let rowY = this.state.newsHeight;
     for (let index = 0; index < this.rows.length; index++) {
       const nextY = rowY + this.rows[index]!.height;
-      if (y >= rowY + COVERAGE_BAR_HEIGHT && y < nextY) return index;
+      if (signalRowContainsHeatmap(rowY, this.rows[index]!.height, y)) return index;
       rowY = nextY;
     }
     return null;
@@ -1040,7 +990,6 @@ function createSignalRowRuntime(
     palette: row.palette,
     waveletMode: row.waveletMode,
     verticalOffset: row.verticalOffset,
-    evalTime: previous?.evalTime ?? new Float64Array(0),
     hoverSample: previous?.hoverSample ?? { t: Number.NaN, value: Number.NaN },
     subscription: previous?.subscription ?? null,
   };

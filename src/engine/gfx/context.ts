@@ -7,8 +7,9 @@
  *   - the `DataTransform` mapping time/screen/y domains for this frame,
  *   - a managed `save/restore` stack (depth-tracked for fail-fast balance
  *     checks on dispose),
- *   - access to L2 domain layers via `frame.heatmap()`, `frame.events()`,
- *     `frame.axis()` (constructed per call, stateless, bound to this frame).
+ *   - access to L2 domain layers via `frame.signalRow()`, `frame.heatmap()`,
+ *     `frame.events()`, and `frame.axis()` (constructed per call and bound to
+ *     this frame).
  *
  * DPR handling: the constructor saves the current ctx transform, then applies
  * `setTransform(dpr, 0, 0, dpr, 0, 0)` so the entire frame draws in CSS pixels
@@ -26,10 +27,12 @@ import type { HeatmapLayer } from "./heatmap.ts";
 import type { EventLayer } from "./events.ts";
 import type { AxisLayer } from "./axis.ts";
 import type { StatusBarLayer } from "./resolution.ts";
+import type { SignalRowLayer } from "./signalRow.ts";
 import { Heatmap } from "./heatmap.ts";
 import { Events } from "./events.ts";
 import { Axis } from "./axis.ts";
 import { StatusBar } from "./resolution.ts";
+import { SignalRows } from "./signalRow.ts";
 
 export class Frame implements Disposable {
   constructor(
@@ -51,6 +54,11 @@ export class Frame implements Disposable {
   /** CSS pixel height of the drawing surface (derived from the transform). */
   get height(): number {
     return this.tx.yDomain.end - this.tx.yDomain.start;
+  }
+
+  /** Physical horizontal pixels available to time-domain rendering. */
+  get deviceWidth(): number {
+    return Math.max(0, Math.round(this.width * this.dpr));
   }
 
   // --- L1: pixel primitives ----------------------------------------------
@@ -158,6 +166,11 @@ export class Frame implements Disposable {
 
   statusBar(): StatusBarLayer {
     return StatusBar.create(this);
+  }
+
+  /** High-level geometry and renderer for one stacked signal row. */
+  signalRow(rowId: string, top: number, height: number): SignalRowLayer {
+    return SignalRows.create(this, rowId, top, height);
   }
 
   /** Draw the time axis with an explicit minimum tick spacing (CSS px). */

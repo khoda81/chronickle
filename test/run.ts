@@ -27,7 +27,14 @@ import { filterMarketSymbols, parseNobitexMarketKey } from "../src/data/signal/m
 import { SignalSegmentStore } from "../src/data/signal/store.ts";
 import { Interval, IntervalSet } from "../src/core/interval.ts";
 import { deserializePersistedUiState } from "../src/app/persistence.ts";
-import { fitStackLayout, heatmapScaleWindow } from "../src/engine/gfx/layout.ts";
+import {
+  fitStackLayout,
+  heatmapScaleWindow,
+  ROW_REMOVE_THRESHOLD,
+  signalRowCollapseProgress,
+  signalRowContainsHeatmap,
+  signalRowLayout,
+} from "../src/engine/gfx/layout.ts";
 import { formatResolution } from "../src/engine/gfx/resolution.ts";
 import { eventIndexAtOrBefore, eventIndexNearPoint } from "../src/engine/hittest.ts";
 import { DataTransform } from "../src/engine/transform.ts";
@@ -699,6 +706,24 @@ test("stack layout fills the canvas and preserves every resizable row", () => {
   assert(
     compact.rowHeights.every(height => height > 0),
     "compact row collapsed",
+  );
+});
+
+test("signal row layout owns status, heatmap, hit-test, and collapse geometry", () => {
+  const row = signalRowLayout(100, 130);
+  assert(row.heatmapTop === 116, "status-strip height leaked into the caller");
+  assert(row.heatmapHeight === 114 && row.heatmapCenter === 173, "bad heatmap geometry");
+  assert(row.drawable, "normal row was not drawable");
+  assert(!signalRowContainsHeatmap(100, 130, 115), "status strip entered heatmap hit testing");
+  assert(signalRowContainsHeatmap(100, 130, 116), "heatmap top was excluded from hit testing");
+  assert(!signalRowLayout(100, 18).drawable, "collapsed row retained drawable heatmap space");
+  assert(
+    signalRowCollapseProgress(1, ROW_REMOVE_THRESHOLD, 1) === 1,
+    "active boundary did not fully expose the remove affordance",
+  );
+  assert(
+    signalRowCollapseProgress(2, ROW_REMOVE_THRESHOLD, 1) === 0,
+    "unrelated row received collapse progress",
   );
 });
 

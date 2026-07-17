@@ -6,10 +6,62 @@ export const DEFAULT_SIGNAL_ROW_HEIGHT = 130;
 
 /** Sample density and request diagnostics above every signal heatmap. */
 export const COVERAGE_BAR_HEIGHT = 16;
+/** A heatmap needs at least two CSS pixels below its status strip. */
+const MIN_HEATMAP_HEIGHT = 2;
+/** Height over which a boundary drag transitions into the remove affordance. */
+export const ROW_COLLAPSE_HINT_HEIGHT = 128;
+/** A row at or below this height is removed when a resize gesture commits. */
+export const ROW_REMOVE_THRESHOLD = 64;
 /** Reference height that defines the logarithmic vertical scale spacing. */
 const HEATMAP_FIELD_HEIGHT = 640;
 /** Pointer hit target around each draggable horizontal boundary. */
 export const RESIZE_HANDLE_RADIUS = 6;
+
+export interface SignalRowLayout {
+  readonly top: number;
+  readonly height: number;
+  readonly heatmapTop: number;
+  readonly heatmapHeight: number;
+  readonly heatmapCenter: number;
+  readonly drawable: boolean;
+}
+
+/** Resolve all vertical signal-row geometry in one place. */
+export function signalRowLayout(top: number, height: number): SignalRowLayout {
+  const heatmapTop = top + COVERAGE_BAR_HEIGHT;
+  const heatmapHeight = Math.max(0, height - COVERAGE_BAR_HEIGHT);
+  return {
+    top,
+    height,
+    heatmapTop,
+    heatmapHeight,
+    heatmapCenter: heatmapTop + heatmapHeight / 2,
+    drawable: heatmapHeight > MIN_HEATMAP_HEIGHT,
+  };
+}
+
+/** True when a canvas y-coordinate belongs to the row's heatmap, not its status strip. */
+export function signalRowContainsHeatmap(top: number, height: number, y: number): boolean {
+  const layout = signalRowLayout(top, height);
+  return layout.drawable && y >= layout.heatmapTop && y < top + height;
+}
+
+/** Remove-affordance progress for the row touched by the active boundary. */
+export function signalRowCollapseProgress(
+  rowIndex: number,
+  rowHeight: number,
+  activeBoundary: number | null,
+): number {
+  const touches =
+    activeBoundary === 0
+      ? rowIndex === 0
+      : activeBoundary !== null && (rowIndex === activeBoundary - 1 || rowIndex === activeBoundary);
+  if (!touches) return 0;
+  return Math.max(
+    0,
+    Math.min(1, 1 - (rowHeight - ROW_REMOVE_THRESHOLD) / ROW_COLLAPSE_HINT_HEIGHT),
+  );
+}
 
 const MIN_SIGMA = 14;
 const MAX_SIGMA_CAP = 128;
