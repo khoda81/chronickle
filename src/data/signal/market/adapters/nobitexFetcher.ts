@@ -63,52 +63,40 @@ export function createNobitexAdapter(opts: NobitexAdapterOptions = {}): SignalAd
     },
 
     async fetchInterval(req, signal) {
-      const periodMs = req.resolutionMs;
-      const entry = NOBITEX_LADDER.find(e => e.periodMs === periodMs)!;
-      if (!entry) {
+      const requestedIndex = NOBITEX_LADDER.findIndex(e => e.periodMs === req.resolutionMs);
+      if (requestedIndex < 0) {
         // Unreachable: pickResolution always returns a member of NOBITEX_PERIODS_MS.
-        throw new Error(`nobitex fetcher: no resolution for period ${periodMs}ms`);
+        throw new Error(`nobitex fetcher: no resolution for period ${req.resolutionMs}ms`);
       }
 
-      // Include one predecessor candle so zero-order hold is defined at the
-      // requested left boundary even when it falls between candle opens.
-      const res = await fetchOhlc({
-        symbol,
-        resolution: entry.resolution,
-        fromMs: req.range.start - periodMs,
-        toMs: req.range.end,
-        timeoutMs,
-        signal,
-      });
+      // Nobitex returns the same `no_data` response for a genuinely empty range
+      // and for fine history it no longer retains. Probe progressively coarser
+      // native levels so an empty fine response does not become false no-data
+      // evidence. The coordinator still settles the attempted fine search,
+      // while `sampleResolutionMs` preserves the fallback's actual quality.
+      for (let index = requestedIndex; index < NOBITEX_LADDER.length; index++) {
+        const entry = NOBITEX_LADDER[index]!;
+        const res = await fetchOhlc({
+          symbol,
+          resolution: entry.resolution,
+          // Include one predecessor candle so zero-order hold is defined at
+          // the left boundary when it falls between candle opens.
+          fromMs: req.range.start - entry.periodMs,
+          toMs: req.range.end,
+          timeoutMs,
+          signal,
+        });
+        const samples = ohlcToLogPriceSamples(res);
+        if (samples.length === 0) continue;
 
-      // FIX: This is not correct, nobitex simply doesn't return anything if you request a resolution that doesn't exist in history anymore instead of automatically going to a higher resolution. We should handle that instead of returning.
-      // "no_data" means no candles exist for this range at all — the request
-      // is exhausted and the broker should not retry it.
-      if (res === null) {
-        return { samples: [], searchedInterval: req.range };
+        // Nobitex caps responses at 500 candles anchored at `to`. A later first
+        // candle means the prefix was truncated and remains schedulable.
+        const searchedInterval = Interval.clampStart(req.range, samples[0]!.t);
+        return { samples, searchedInterval, sampleResolutionMs: entry.periodMs };
       }
 
-      const samples = ohlcToLogPriceSamples(res);
-      if (samples.length === 0) {
-        return { samples: [], searchedInterval: req.range };
-      }
-
-      const firstT = samples[0]!.t;
-      // Nobitex caps OHLC responses at 500 candles anchored at `to`. If the
-      // first returned candle is strictly after `from`, the prefix
-      // [from, firstT) was truncated and still needs to be fetched. We report
-      // only the actually-covered sub-range so the broker keeps that prefix as
-      // a gap and re-requests it on the next query (progressive backfill).
-      //
-      // If the first candle is at or before `from`, the response was not
-      // truncated on the left, so the whole request is exhausted.
-      if (firstT <= req.range.start) {
-        return { samples, searchedInterval: req.range };
-      }
-      if (firstT < req.range.end) {
-        return { samples, searchedInterval: Interval.create(firstT, req.range.end) };
-      }
-      return { samples, searchedInterval: req.range };
+      // Every available native level agreed that the range is empty.
+      return { samples: [], searchedInterval: req.range };
     },
   });
 }

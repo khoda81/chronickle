@@ -139,7 +139,7 @@ async function fetchYahooWindow(
   const timestamps = result?.timestamp;
   const opens = result?.indicators?.quote?.[0]?.open;
   if (!Array.isArray(timestamps) || !Array.isArray(opens)) {
-    return { samples: [] };
+    throw new Error("Yahoo Finance chart returned no timestamp/open arrays");
   }
 
   const points: PricePoint[] = [];

@@ -57,6 +57,11 @@ export const Interval = {
     return this.create(interval.start, Math.min(interval.end, end));
   },
 
+  clampStart(interval: Interval, start: number): Interval {
+    if (!Number.isFinite(start)) throw new Error(`Interval start clamp must be finite: ${start}`);
+    return this.create(Math.max(interval.start, start), interval.end);
+  },
+
   pan(interval: Interval, delta: number): Interval {
     if (!Number.isFinite(delta)) throw new Error(`Pan delta must be finite: ${delta}`);
     return this.create(interval.start + delta, interval.end + delta);

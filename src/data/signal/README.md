@@ -38,10 +38,12 @@ prices and converts them to log-price samples before crossing this boundary.
 6. `setDemands` replaces the session's complete interest snapshot. The adapter
    may keep a live transport warm after live interest disappears, but must not
    multiply work when the viewport moves.
-7. A delivery reports the range actually searched and the native resolution
-   used. Empty results still settle that searched range at that actual quality.
-   Partial API responses report only the part searched so the remaining gap can
-   be scheduled later.
+7. A delivery reports the range actually searched and the cadence of its
+   returned samples. These may differ: a source can exhaust a fine search but
+   return a coarser retained fallback, which the broker must cache at its actual
+   quality. Empty results settle a range only when the adapter considers them
+   authoritative. Partial responses report only the part searched so the
+   remaining gap can be scheduled later.
 8. Reads are side-effect-free. Only subscriptions change acquisition demand.
 9. Status diagnostics have two explicit layers. The broker returns the selected
    observation identity beside every reconstructed value. The wavelet input

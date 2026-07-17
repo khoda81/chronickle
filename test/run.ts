@@ -9,6 +9,7 @@ import type {
   BrokerDemand,
 } from "../src/data/signal/broker.ts";
 import { createBinanceAdapter } from "../src/data/signal/market/adapters/binanceFetcher.ts";
+import { createNobitexAdapter } from "../src/data/signal/market/adapters/nobitexFetcher.ts";
 import {
   chooseYahooInterval,
   createYahooAdapter,
@@ -18,6 +19,7 @@ import {
   createPollingSignalSource,
   type AcquisitionActivity,
   type AdapterBatch,
+  type AdapterDelivery,
   type SignalAdapter,
 } from "../src/data/signal/fetcher.ts";
 import { priceSignalSource } from "../src/data/signal/market/market.ts";
@@ -187,7 +189,7 @@ function adaptFetcher(fetcher: Fetcher, now: () => number): SignalAdapter {
   });
 }
 
-function fetchOnce(adapter: SignalAdapter, demand: BrokerDemand): Promise<AdapterBatch> {
+function fetchOnce(adapter: SignalAdapter, demand: BrokerDemand): Promise<AdapterDelivery> {
   return new Promise((resolve, reject) => {
     const lifetime = new AbortController();
     const session = adapter.connect(
@@ -1913,6 +1915,47 @@ test("Binance adapter maps arbitrary symbols and range resolution", async () => 
     assert(url.searchParams.get("symbol") === "ETHUSDT", "symbol was not normalized");
     assert(url.searchParams.get("interval") === "1h", "wrong Binance interval");
     assert(result.samples.length === 2, "Binance rows were not converted");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Nobitex empty fine history falls back without inventing no-data evidence", async () => {
+  const originalFetch = globalThis.fetch;
+  const requestedResolutions: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = new URL(input instanceof Request ? input.url : input.toString());
+    const resolution = url.searchParams.get("resolution") ?? "";
+    requestedResolutions.push(resolution);
+    const payload =
+      resolution === "1"
+        ? { s: "no_data", t: [], o: [], h: [], l: [], c: [], v: [] }
+        : {
+            s: "ok",
+            t: [0, 300],
+            o: [100, 101],
+            h: [100, 101],
+            l: [100, 101],
+            c: [100, 101],
+            v: [1, 1],
+          };
+    return new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const result = await fetchOnce(createNobitexAdapter({ symbol: "USDTIRT" }), {
+      range: Interval.create(0, 600_000),
+      maxDeltaTMs: 60_000,
+    });
+    assert(
+      requestedResolutions[0] === "1" && requestedResolutions[1] === "5",
+      "Nobitex did not probe the next retained resolution",
+    );
+    assert(result.samples.length === 2, "coarser retained candles were discarded");
+    assert(result.resolutionMs === 300_000, "fallback samples were mislabeled as fine data");
   } finally {
     globalThis.fetch = originalFetch;
   }

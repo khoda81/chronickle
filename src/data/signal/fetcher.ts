@@ -15,6 +15,8 @@ export interface AdapterBatch {
   readonly samples: readonly Sample[];
   /** Everything searched by the source, which may be wider than requested. */
   readonly searchedInterval: Interval;
+  /** Actual cadence of returned samples when it differs from the attempted resolution. */
+  readonly sampleResolutionMs?: number;
 }
 
 /** A cache delivery is self-describing and independent of a broker request. */
@@ -30,11 +32,11 @@ interface AcquisitionActivityBase {
 export type AcquisitionActivity =
   | (AcquisitionActivityBase & { readonly state: "pending" })
   | (AcquisitionActivityBase & {
-      readonly state: "retrying";
-      readonly attempt: number;
-      readonly message: string;
-      readonly retryAtMs: number;
-    });
+    readonly state: "retrying";
+    readonly attempt: number;
+    readonly message: string;
+    readonly retryAtMs: number;
+  });
 
 export interface SignalSink {
   next(batch: AdapterDelivery): void;
@@ -485,6 +487,7 @@ class PollingSession implements AdapterSession {
     // Commit coordinator state before delivery. Sink callbacks may synchronously
     // clear the cache or replace demands; those operations must win reentrantly.
     this.coverageFor(work.plan.resolutionMs).add(batch.searchedInterval);
+    const resolutionMs = batch.sampleResolutionMs ?? work.plan.resolutionMs;
 
     if (
       work.kind === "live" &&
@@ -493,7 +496,7 @@ class PollingSession implements AdapterSession {
     ) {
       const wallNow = this.now();
       const last = batch.samples[batch.samples.length - 1];
-      const expectedNextMs = last === undefined ? null : last.t + work.plan.resolutionMs;
+      const expectedNextMs = last === undefined ? null : last.t + resolutionMs;
       this.live.cursorMs = Math.max(batch.searchedInterval.end, expectedNextMs ?? -Infinity);
       this.live.activityRange = work.requiredInterval;
       this.live.pollAtMs =
@@ -502,7 +505,7 @@ class PollingSession implements AdapterSession {
           : wallNow + (this.policy.livePollDelayMs ?? defaultPollDelay(work.plan.resolutionMs));
     }
 
-    this.sink.next({ ...batch, resolutionMs: work.plan.resolutionMs });
+    this.sink.next({ ...batch, resolutionMs });
   }
 
   private failWork(work: Work, error: unknown): void {
@@ -624,6 +627,14 @@ function validateDemand(demand: BrokerDemand): void {
 function validateBatch(requiredInterval: Interval, batch: AdapterBatch): void {
   if (!Interval.overlaps(requiredInterval, batch.searchedInterval)) {
     throw new Error("SignalAdapter: searched range made no progress on the required range");
+  }
+  if (
+    batch.sampleResolutionMs !== undefined &&
+    (!(batch.sampleResolutionMs > 0) || !Number.isFinite(batch.sampleResolutionMs))
+  ) {
+    throw new Error(
+      `SignalAdapter: invalid returned sample resolution ${batch.sampleResolutionMs}`,
+    );
   }
 }
 

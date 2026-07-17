@@ -57,9 +57,9 @@ export async function fetchOhlc(opts: FetchOhlcOptions): Promise<NobitexOhlcResp
   }
 
   const json = (await res.json()) as NobitexOhlcResponse;
-  // "no_data" is not an error — it means no candles exist for this range
-  // (e.g. before the symbol listed, or future dates). Return null so the
-  // caller can treat it as an empty result rather than an exceptional case.
+  // "no_data" is not an error, but it is ambiguous: the range may truly be
+  // empty or Nobitex may no longer retain this resolution that far back. The
+  // adapter resolves that ambiguity by probing coarser resolutions.
   if (json.s === "no_data") return null;
   if (json.s !== "ok") {
     throw new Error(`Nobitex OHLC returned status: ${json.s}`);
