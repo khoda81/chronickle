@@ -3,14 +3,30 @@ import type { Frame } from "./context.ts";
 import { COVERAGE_BAR_HEIGHT } from "./layout.ts";
 
 const QUALITY_STEPS = 256;
-const FONT = "9px ui-monospace, monospace";
 /** Vertical height in CSS pixels; density bins themselves are one device pixel wide. */
 const DATA_HEIGHT = 4;
 const REQUEST_HEIGHT = COVERAGE_BAR_HEIGHT - DATA_HEIGHT;
-const LIGHT_TEXT = "#f3f8fc";
-const QUALITY_PALETTE = buildQualityPalette();
+const REQUEST_UNDERLINE_DEVICE_PX = 2;
 
-const REQUEST_FILL = { pending: "rgb(61 70 85)", retrying: "rgb(132 48 61)" } as const;
+interface LabelStyle {
+  readonly text: string;
+  readonly shadow: string;
+}
+
+interface RequestStyle extends LabelStyle {
+  readonly fill: string;
+}
+
+interface StatusBarStyle {
+  readonly font: string;
+  readonly densityEmpty: string;
+  readonly densityFull: string;
+  readonly requestEmpty: string;
+  readonly divider: string;
+  readonly requests: Readonly<Record<RequestSegment["state"], RequestStyle>>;
+}
+
+const STYLE_BY_CANVAS = new WeakMap<HTMLCanvasElement, StatusBarStyle>();
 
 export interface StatusBarLayer {
   /** True when a visible retry countdown needs another clock redraw. */
@@ -29,7 +45,11 @@ export const StatusBar = {
 };
 
 class StatusBarImpl implements StatusBarLayer {
-  constructor(private readonly frame: Frame) {}
+  private readonly style: StatusBarStyle;
+
+  constructor(private readonly frame: Frame) {
+    this.style = statusBarStyle(frame.ctx.canvas);
+  }
 
   draw(
     sampleDensity: Float64Array,
@@ -46,28 +66,34 @@ class StatusBarImpl implements StatusBarLayer {
       );
     }
 
+    frame.fillRectPx(0, y, frame.width, DATA_HEIGHT, this.style.densityEmpty);
     let runStart = 0;
     let runIndex = qualityIndex(sampleDensity[0]!);
     for (let x = 1; x <= deviceWidth; x++) {
       const nextIndex = x < deviceWidth ? qualityIndex(sampleDensity[x]!) : -1;
       if (nextIndex === runIndex) continue;
-      frame.fillRectPx(
-        runStart / frame.dpr,
-        y,
-        (x - runStart) / frame.dpr,
-        DATA_HEIGHT,
-        QUALITY_PALETTE.colors[runIndex]!,
-      );
+      if (runIndex > 0) {
+        const ctx = frame.ctx;
+        ctx.save();
+        ctx.globalAlpha = qualityStrength(runIndex);
+        frame.fillRectPx(
+          runStart / frame.dpr,
+          y,
+          (x - runStart) / frame.dpr,
+          DATA_HEIGHT,
+          this.style.densityFull,
+        );
+        ctx.restore();
+      }
       runStart = x;
       runIndex = nextIndex;
     }
 
-    frame.fillRectPx(0, y + DATA_HEIGHT, frame.width, REQUEST_HEIGHT, "rgb(11 17 27)");
+    frame.fillRectPx(0, y + DATA_HEIGHT, frame.width, REQUEST_HEIGHT, this.style.requestEmpty);
     this.drawRequests(requests, "pending", y);
     const hasVisibleRetry = this.drawRequests(requests, "retrying", y);
     this.drawRequestLabels(requests, y, wallNow);
-    frame.fillRectPx(0, y + DATA_HEIGHT, frame.width, 1, "rgba(255, 255, 255, 0.18)");
-    frame.fillRectPx(0, y + COVERAGE_BAR_HEIGHT - 1, frame.width, 1, "rgba(2, 6, 12, 0.38)");
+    frame.fillRectPx(0, y + DATA_HEIGHT, frame.width, 1, this.style.divider);
     return hasVisibleRetry;
   }
 
@@ -83,7 +109,15 @@ class StatusBarImpl implements StatusBarLayer {
       const x0 = Math.max(0, frame.tx.timeToX(segment.range.start));
       const x1 = Math.min(frame.width, frame.tx.timeToX(segment.range.end));
       if (x1 > x0) {
-        frame.fillRectPx(x0, y + DATA_HEIGHT, x1 - x0, REQUEST_HEIGHT, REQUEST_FILL[state]);
+        const underlineHeight = REQUEST_UNDERLINE_DEVICE_PX / frame.dpr;
+        const underlineBottom = Math.round((y + COVERAGE_BAR_HEIGHT) * frame.dpr) / frame.dpr;
+        frame.fillRectPx(
+          x0,
+          underlineBottom - underlineHeight,
+          x1 - x0,
+          underlineHeight,
+          this.style.requests[state].fill,
+        );
         drew = true;
       }
     }
@@ -93,7 +127,7 @@ class StatusBarImpl implements StatusBarLayer {
   private drawRequestLabels(requests: readonly RequestSegment[], y: number, wallNow: number): void {
     const { frame } = this;
     const ctx = frame.ctx;
-    ctx.font = FONT;
+    ctx.font = this.style.font;
     let nextLabelX = 6;
     for (const segment of requests) {
       const x0 = Math.max(0, frame.tx.timeToX(segment.range.start));
@@ -109,19 +143,33 @@ class StatusBarImpl implements StatusBarLayer {
       ctx.beginPath();
       ctx.rect(x0, y + DATA_HEIGHT, x1 - x0, REQUEST_HEIGHT);
       ctx.clip();
-      drawLabel(frame, text, labelX, y + DATA_HEIGHT + REQUEST_HEIGHT / 2, LIGHT_TEXT);
+      drawLabel(
+        frame,
+        text,
+        labelX,
+        y + DATA_HEIGHT + REQUEST_HEIGHT / 2,
+        this.style.font,
+        this.style.requests[segment.state],
+      );
       ctx.restore();
       nextLabelX = labelX + textWidth + 12;
     }
   }
 }
 
-function drawLabel(frame: Frame, text: string, x: number, centerY: number, color: string): void {
+function drawLabel(
+  frame: Frame,
+  text: string,
+  x: number,
+  centerY: number,
+  font: string,
+  style: LabelStyle,
+): void {
   const ctx = frame.ctx;
   ctx.save();
-  ctx.shadowColor = color === LIGHT_TEXT ? "rgba(0, 0, 0, 0.68)" : "rgba(255, 255, 255, 0.34)";
+  ctx.shadowColor = style.shadow;
   ctx.shadowBlur = 2;
-  frame.text(text, x, centerY, FONT, color, "left", "middle");
+  frame.text(text, x, centerY, font, style.text, "left", "middle");
   ctx.restore();
 }
 
@@ -155,19 +203,40 @@ function qualityIndex(value: number): number {
   return Math.max(0, Math.min(QUALITY_STEPS - 1, Math.round(value * (QUALITY_STEPS - 1))));
 }
 
-function buildQualityPalette(): { readonly colors: readonly string[] } {
-  const low = [8, 13, 23] as const;
-  const high = [118, 130, 145] as const;
-  const colors: string[] = [];
-  for (let index = 0; index < QUALITY_STEPS; index++) {
-    const t = index / (QUALITY_STEPS - 1);
-    const curved = t ** 0.82;
-    const r = Math.round(low[0] + (high[0] - low[0]) * curved);
-    const g = Math.round(low[1] + (high[1] - low[1]) * curved);
-    const b = Math.round(low[2] + (high[2] - low[2]) * curved);
-    colors.push(`rgb(${r} ${g} ${b})`);
-  }
-  return { colors };
+function qualityStrength(index: number): number {
+  return (index / (QUALITY_STEPS - 1)) ** 0.82;
+}
+
+function statusBarStyle(canvas: HTMLCanvasElement): StatusBarStyle {
+  const cached = STYLE_BY_CANVAS.get(canvas);
+  if (cached !== undefined) return cached;
+  const css = getComputedStyle(canvas);
+  const read = (name: string): string => {
+    const value = css.getPropertyValue(name).trim();
+    if (value.length === 0) throw new Error(`Missing canvas style ${name}`);
+    return value;
+  };
+  const style: StatusBarStyle = {
+    font: read("--timeline-status-font"),
+    densityEmpty: read("--timeline-status-density-empty"),
+    densityFull: read("--timeline-status-density-full"),
+    requestEmpty: read("--timeline-status-request-empty"),
+    divider: read("--timeline-status-divider"),
+    requests: {
+      pending: {
+        fill: read("--timeline-status-pending"),
+        text: read("--timeline-status-pending-text"),
+        shadow: read("--timeline-status-pending-shadow"),
+      },
+      retrying: {
+        fill: read("--timeline-status-retrying"),
+        text: read("--timeline-status-retrying-text"),
+        shadow: read("--timeline-status-retrying-shadow"),
+      },
+    },
+  };
+  STYLE_BY_CANVAS.set(canvas, style);
+  return style;
 }
 
 export function formatResolution(ms: number): string {
