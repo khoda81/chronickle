@@ -144,7 +144,7 @@ export class TimelineGestureController {
     if (rect.height > 0) {
       this.host.panRow(
         state.row,
-        (event.clientY - previousY) * (this.viewport.height / rect.height),
+        (previousY - event.clientY) * (this.viewport.height / rect.height),
       );
     }
   };

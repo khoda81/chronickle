@@ -85,7 +85,7 @@ class HeatmapImpl implements HeatmapLayer {
   constructor(
     private readonly frame: Frame,
     private readonly resources: HeatmapResources,
-  ) {}
+  ) { }
 
   drawWaveletField(
     padded: PaddedEval,
@@ -193,7 +193,9 @@ class HeatmapImpl implements HeatmapLayer {
       const mix = sourceBand - lowerBand;
       const lowerOffset = lowerBand * value.length + padLeft;
       const upperOffset = upperBand * value.length + padLeft;
-      const pixelBandOffset = band * visibleCells;
+      // Larger sigma means lower temporal frequency. Display it at the top,
+      // adjacent to the status/time boundary, with frequency increasing down.
+      const pixelBandOffset = (bandCount - 1 - band) * visibleCells;
       for (let x = 0; x < visibleCells; x++) {
         const lower = field.values[lowerOffset + x]!;
         const upper = field.values[upperOffset + x]!;

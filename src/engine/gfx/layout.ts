@@ -17,25 +17,31 @@ const HEATMAP_FIELD_HEIGHT = 640;
 /** Pointer hit target around each draggable horizontal boundary. */
 export const RESIZE_HANDLE_RADIUS = 6;
 
+export const QUALITY_STEPS = 256;
+/** Vertical height in CSS pixels; density bins themselves are one device pixel wide. */
+export const DATA_HEIGHT = 2;
+export const REQUEST_HEIGHT = COVERAGE_BAR_HEIGHT - DATA_HEIGHT;
+export const REQUEST_UNDERLINE_DEVICE_PX = 2;
+
 export interface SignalRowLayout {
   readonly top: number;
   readonly height: number;
   readonly heatmapTop: number;
   readonly heatmapHeight: number;
-  readonly heatmapCenter: number;
+  readonly tooltipPosition: number;
   readonly drawable: boolean;
 }
 
 /** Resolve all vertical signal-row geometry in one place. */
 export function signalRowLayout(top: number, height: number): SignalRowLayout {
-  const heatmapTop = top + COVERAGE_BAR_HEIGHT;
+  const heatmapTop = top;
   const heatmapHeight = Math.max(0, height - COVERAGE_BAR_HEIGHT);
   return {
     top,
     height,
     heatmapTop,
     heatmapHeight,
-    heatmapCenter: heatmapTop + heatmapHeight / 2,
+    tooltipPosition: heatmapTop + heatmapHeight + DATA_HEIGHT / 2,
     drawable: heatmapHeight > MIN_HEATMAP_HEIGHT,
   };
 }

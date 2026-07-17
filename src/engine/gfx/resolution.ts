@@ -1,12 +1,7 @@
 import type { RequestSegment } from "../../data/signal/requests.ts";
 import type { Frame } from "./context.ts";
-import { COVERAGE_BAR_HEIGHT } from "./layout.ts";
+import { COVERAGE_BAR_HEIGHT, DATA_HEIGHT, QUALITY_STEPS, REQUEST_HEIGHT, REQUEST_UNDERLINE_DEVICE_PX } from "./layout.ts";
 
-const QUALITY_STEPS = 256;
-/** Vertical height in CSS pixels; density bins themselves are one device pixel wide. */
-const DATA_HEIGHT = 4;
-const REQUEST_HEIGHT = COVERAGE_BAR_HEIGHT - DATA_HEIGHT;
-const REQUEST_UNDERLINE_DEVICE_PX = 2;
 
 interface LabelStyle {
   readonly text: string;

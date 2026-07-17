@@ -3,7 +3,7 @@ import type { BrokerDemand, ReadRequest, SignalView } from "../../data/index.ts"
 import { kernelContext, type WaveletMode } from "../wavelet.ts";
 import type { PaletteName } from "../ramp.ts";
 import type { Frame } from "./context.ts";
-import { heatmapScaleWindow, signalRowLayout, type SignalRowLayout } from "./layout.ts";
+import { COVERAGE_BAR_HEIGHT, heatmapScaleWindow, signalRowLayout, type SignalRowLayout } from "./layout.ts";
 import { TIMELINE_OVERLAY_METRICS } from "../../ui/timelineOverlayMetrics.ts";
 
 export interface SignalRowDrawOptions {
@@ -59,7 +59,7 @@ class SignalRowStackImpl implements SignalRowStack {
   constructor(
     private readonly frame: Frame,
     private top: number,
-  ) {}
+  ) { }
 
   next(rowId: string, height: number): SignalRowLayer {
     const row = SignalRows.create(this.frame, rowId, this.top, height);
@@ -73,7 +73,7 @@ class SignalRowImpl implements SignalRowLayer {
   readonly height: number;
   readonly heatmapTop: number;
   readonly heatmapHeight: number;
-  readonly heatmapCenter: number;
+  readonly tooltipPosition: number;
   readonly drawable: boolean;
 
   constructor(
@@ -87,7 +87,7 @@ class SignalRowImpl implements SignalRowLayer {
     this.height = layout.height;
     this.heatmapTop = layout.heatmapTop;
     this.heatmapHeight = layout.heatmapHeight;
-    this.heatmapCenter = layout.heatmapCenter;
+    this.tooltipPosition = layout.tooltipPosition;
     this.drawable = layout.drawable;
   }
 
@@ -135,7 +135,7 @@ class SignalRowImpl implements SignalRowLayer {
       );
     const hasVisibleRetry = frame
       .statusBar()
-      .draw(density, view.requests, this.top, options.wallNow);
+      .draw(density, view.requests, this.top + this.height - COVERAGE_BAR_HEIGHT, options.wallNow);
     frame.fillRectPx(0, this.top + this.height - 1, frame.width, 1, "rgba(255,255,255,0.18)");
     return hasVisibleRetry;
   }
@@ -154,25 +154,25 @@ class SignalRowImpl implements SignalRowLayer {
     placement.x = fitsLeft
       ? anchorX - metrics.gapPx - placement.width
       : Math.max(
-          metrics.marginPx,
-          Math.min(frame.width - placement.width - metrics.marginPx, anchorX + metrics.gapPx),
-        );
+        metrics.marginPx,
+        Math.min(frame.width - placement.width - metrics.marginPx, anchorX + metrics.gapPx),
+      );
     placement.y = Math.max(
       metrics.marginPx,
       Math.min(
         frame.height - placement.height - metrics.marginPx,
-        this.heatmapCenter - placement.height / 2,
+        this.tooltipPosition - placement.height / 2,
       ),
     );
 
     ctx.strokeStyle = "rgba(226, 232, 240, 0.58)";
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(anchorX, this.heatmapCenter);
-    ctx.lineTo(cursorX, this.heatmapCenter);
+    ctx.moveTo(anchorX, this.tooltipPosition);
+    ctx.lineTo(cursorX, this.tooltipPosition);
     ctx.stroke();
     ctx.beginPath();
-    ctx.arc(anchorX, this.heatmapCenter, 2.5, 0, Math.PI * 2);
+    ctx.arc(anchorX, this.tooltipPosition, 2.5, 0, Math.PI * 2);
     ctx.fillStyle = "#f8fafc";
     ctx.fill();
     ctx.restore();

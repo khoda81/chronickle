@@ -714,7 +714,7 @@ test("stack layout fills the canvas and preserves every resizable row", () => {
 test("signal row layout owns status, heatmap, hit-test, and collapse geometry", () => {
   const row = signalRowLayout(100, 130);
   assert(row.heatmapTop === 116, "status-strip height leaked into the caller");
-  assert(row.heatmapHeight === 114 && row.heatmapCenter === 173, "bad heatmap geometry");
+  assert(row.heatmapHeight === 114 && row.tooltipPosition === 173, "bad heatmap geometry");
   assert(row.drawable, "normal row was not drawable");
   assert(!signalRowContainsHeatmap(100, 130, 115), "status strip entered heatmap hit testing");
   assert(signalRowContainsHeatmap(100, 130, 116), "heatmap top was excluded from hit testing");
