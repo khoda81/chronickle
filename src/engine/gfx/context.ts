@@ -26,11 +26,11 @@ import type { DataTransform } from "../transform.ts";
 import type { HeatmapLayer } from "./heatmap.ts";
 import type { EventLayer } from "./events.ts";
 import type { AxisLayer } from "./axis.ts";
-import type { ResolutionLayer } from "./resolution.ts";
+import type { StatusBarLayer } from "./resolution.ts";
 import { Heatmap } from "./heatmap.ts";
 import { Events } from "./events.ts";
 import { Axis } from "./axis.ts";
-import { CoverageBar } from "./resolution.ts";
+import { StatusBar } from "./resolution.ts";
 
 export class Frame implements Disposable {
   constructor(
@@ -158,8 +158,8 @@ export class Frame implements Disposable {
     return Axis.create(this);
   }
 
-  resolution(): ResolutionLayer {
-    return CoverageBar.create(this);
+  statusBar(): StatusBarLayer {
+    return StatusBar.create(this);
   }
 
   /** Draw the time axis with an explicit minimum tick spacing (CSS px). */

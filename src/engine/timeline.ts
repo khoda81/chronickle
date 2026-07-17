@@ -475,6 +475,8 @@ export class Timeline {
     frame.events().drawRow(this.state.events, this.feedColorOf, this.state.hovered, eventY);
 
     let rowY = this.state.newsHeight;
+    let hasVisibleRetry = false;
+    const densityBinCount = Math.ceil(width);
     for (let index = 0; index < this.rows.length; index++) {
       const runtime = this.rows[index]!;
       const { row, height: rowHeight, waveletMode } = runtime;
@@ -522,7 +524,11 @@ export class Timeline {
       } satisfies BrokerDemand;
       this.syncPriceSubscription(index, demand);
 
-      const result = row.read({ evalTime: evalView, maxSampleGapMs: gridStepMs });
+      const result = row.read({
+        evalTime: evalView,
+        maxSampleGapMs: gridStepMs,
+        density: { range: timeInterval, binCount: densityBinCount },
+      });
       frame
         .heatmap(row.id)
         .drawWaveletField(
@@ -536,12 +542,14 @@ export class Timeline {
           },
           priceScale,
           waveletMode,
-          rowY,
+          rowY + COVERAGE_BAR_HEIGHT,
           heatHeight,
           scaleInterval,
           runtime.palette,
         );
-      frame.resolution().draw(result.coverage, gridStepMs, rowY + heatHeight);
+      hasVisibleRetry =
+        frame.statusBar().draw(result.sampleDensity, result.requests, rowY, wallNow) ||
+        hasVisibleRetry;
       rowY += rowHeight;
       frame.fillRectPx(0, rowY - 1, width, 1, "rgba(255,255,255,0.18)");
     }
@@ -552,7 +560,7 @@ export class Timeline {
     frame.fillRectPx(0, this.state.newsHeight, width, 1, "rgba(255,255,255,0.3)");
     frame.drawTimeAxis(this.state.newsHeight, this.config.minTickPx);
     this.updateNowLine(wallNow);
-    this.scheduleClock(timePerDevicePx / 2, wallNow);
+    this.scheduleClock(timePerDevicePx / 2, wallNow, hasVisibleRetry);
   };
 
   private advanceFollowNow(now: number): void {
@@ -609,7 +617,15 @@ export class Timeline {
       const hasSample = row.readSampleAt(hoverTime, sample);
       const anchorX = hasSample ? frame.tx.timeToX(sample.t) : x;
       const text = !hasSample ? "loading…" : formatPrice(Math.exp(sample.value));
-      positionSignalTooltip(frame, this.overlay, row.id, anchorX, rowY + heatHeight / 2, x, text);
+      positionSignalTooltip(
+        frame,
+        this.overlay,
+        row.id,
+        anchorX,
+        rowY + COVERAGE_BAR_HEIGHT + heatHeight / 2,
+        x,
+        text,
+      );
       rowY += rowHeight;
     }
   }
@@ -655,7 +671,7 @@ export class Timeline {
     let rowY = this.state.newsHeight;
     for (let index = 0; index < this.rows.length; index++) {
       const nextY = rowY + this.rows[index]!.height;
-      if (y >= rowY && y < nextY - COVERAGE_BAR_HEIGHT) return index;
+      if (y >= rowY + COVERAGE_BAR_HEIGHT && y < nextY) return index;
       rowY = nextY;
     }
     return null;
@@ -695,19 +711,30 @@ export class Timeline {
     );
   }
 
-  private scheduleClock(timePerDevicePx: number, renderedNow: number): void {
+  private scheduleClock(
+    timePerDevicePx: number,
+    renderedNow: number,
+    hasVisibleRetry: boolean,
+  ): void {
     if (this.nowTimer !== null) clearTimeout(this.nowTimer);
     let delayMs = this.state.timeInterval.start - renderedNow;
 
     if (this.state.playback.mode === "following") delayMs = timePerDevicePx;
-    else if (renderedNow > this.state.timeInterval.end) return;
+    else if (renderedNow > this.state.timeInterval.end) delayMs = Number.POSITIVE_INFINITY;
+
+    // A broker status update redraws immediately when a retry starts or ends.
+    // This clock keeps the visible countdown current without a needless 60 fps
+    // loop: the human-scale label changes materially at most once per second.
+    delayMs = Math.max(delayMs, timePerDevicePx);
+    if (hasVisibleRetry) delayMs = Math.min(delayMs, 1_000);
+    if (!Number.isFinite(delayMs)) return;
 
     this.nowTimer = setTimeout(
       () => {
         this.nowTimer = null;
         this.reqDraw();
       },
-      Math.max(delayMs, timePerDevicePx),
+      Math.max(delayMs, 16),
     );
   }
 

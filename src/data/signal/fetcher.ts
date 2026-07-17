@@ -29,7 +29,6 @@ interface AcquisitionActivityBase {
 
 export type AcquisitionActivity =
   | (AcquisitionActivityBase & { readonly state: "pending" })
-  | (AcquisitionActivityBase & { readonly state: "fetching"; readonly attempt: number })
   | (AcquisitionActivityBase & {
       readonly state: "retrying";
       readonly attempt: number;
@@ -270,12 +269,7 @@ class PollingSession implements AdapterSession {
     if (this.active !== null) {
       const { plan } = this.active.work;
       if (this.active.state === "fetching") {
-        activities.push({
-          state: "fetching",
-          range: plan.range,
-          resolutionMs: plan.resolutionMs,
-          attempt: this.active.work.attempt,
-        });
+        activities.push({ state: "pending", range: plan.range, resolutionMs: plan.resolutionMs });
       } else {
         activities.push({
           state: "retrying",

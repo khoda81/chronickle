@@ -7,15 +7,16 @@ prices and converts them to log-price samples before crossing this boundary.
 
 ## Roles
 
-- `Broker` owns subscriptions, cached reconstruction segments, settled-search
-  diagnostics, and pure reads for the renderer.
+- `Broker` owns subscriptions, cached reconstruction segments, the observation
+  timestamp index, request diagnostics, and pure reads for the renderer.
 - `SignalAdapter` owns acquisition policy: native sample-period selection,
   request expansion, deduplication, cancellation, retry/backoff, and live
   transport lifetime.
 - `IntervalLoader` is the adapter's low-level range fetch operation. It knows the
   exchange/API wire format but not the broker or renderer.
 - `SignalSegmentStore` retains the finest reconstruction evidence for each cached
-  interval and evaluates the signal on the renderer's time grid.
+  interval, indexes unique observations, and evaluates both the signal and
+  screen-bin sample density.
 
 ## Core contracts
 
@@ -26,8 +27,8 @@ prices and converts them to log-price samples before crossing this boundary.
    renderer uses zero-order-hold reconstruction. `HeldSignalSegment` is that
    derived reconstruction: one observation held over a half-open range plus its
    source cadence, not a claim of continuous observation.
-3. Smaller sample periods are finer. Fine cached or settled evidence satisfies
-   a coarser demand; coarse evidence never satisfies a finer demand.
+3. Smaller sample periods are finer. Fine adapter search evidence satisfies a
+   coarser demand; coarse evidence never satisfies a finer demand.
 4. All coverage intervals are half-open `[start, end)`. Touching ranges may merge;
    no millisecond adjacency tolerance is used.
 5. A broker demand means “make at least this range available with sample
@@ -42,18 +43,18 @@ prices and converts them to log-price samples before crossing this boundary.
    Partial API responses report only the part searched so the remaining gap can
    be scheduled later.
 8. Reads are side-effect-free. Only subscriptions change acquisition demand.
-9. Coverage diagnostics have two explicit layers. Data coverage is `ready`
-   inside an observation's expected native lifetime, `held` where the selected
-   zero-order reconstruction carries an older value, and `empty` where a
-   completed search left no reconstructable value. Request coverage is
-   `pending`, `fetching`, or `retrying`; serialized gaps waiting behind the
-   active request remain visible. These layers may overlap because cached data
-   can remain usable while a finer request is in flight.
+9. Status diagnostics have two explicit layers. Data availability is a scalar
+   per time bin: `min(1, observed samples / samples required at the requested
+cadence)`. It depends only on observations, so reconstructed holds and empty
+   search evidence cannot create contradictory data states. Request status is
+   `pending` or `retrying`; serialized gaps waiting behind active work remain
+   visible. The adapter privately distinguishes queued from executing work to
+   serialize I/O, but both mean `pending` from the broker's point of view.
 10. Visible future time has no samples and is presented as `pending`. A demand
     containing the adapter's current clock creates an internal live lease, not
     a separate broker-level data state.
 11. `sampleRevision` changes only when cached values can change (ingestion or
-    clear). Pending/fetching/retry changes notify subscribers but do not
+    clear). Pending/retry changes notify subscribers but do not
     invalidate the heatmap's numerical cache.
 12. Clearing or disposing a session aborts in-flight work. Results from stale
     work must never be delivered after the generation/session is gone.

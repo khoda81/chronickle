@@ -1,7 +1,7 @@
 /** Evidence-backed cache and subscription boundary for a sampled signal. */
 
-import { Interval, IntervalSet } from "../../core/interval.ts";
-import { SettledCoverageIndex, type CoverageSegment } from "./coverage.ts";
+import { Interval } from "../../core/interval.ts";
+import type { RequestSegment } from "./requests.ts";
 import type {
   AcquisitionActivity,
   AdapterDelivery,
@@ -13,7 +13,9 @@ import { SignalSegmentStore, type HeldSignalSegment } from "./store.ts";
 
 export interface SignalView {
   readonly value: Float64Array;
-  readonly coverage: readonly CoverageSegment[];
+  /** Per-bin sample count normalized to the requested cadence, clamped to [0, 1]. */
+  readonly sampleDensity: Float64Array;
+  readonly requests: readonly RequestSegment[];
   /** Changes only when cached sample values change, never for status-only updates. */
   readonly sampleRevision: number;
 }
@@ -21,6 +23,7 @@ export interface SignalView {
 export interface ReadRequest {
   readonly evalTime: Float64Array;
   readonly maxSampleGapMs: number;
+  readonly density?: { readonly range: Interval; readonly binCount: number };
 }
 
 export interface BrokerDemand {
@@ -50,7 +53,6 @@ interface DemandSubscription {
 
 export class Broker {
   private readonly store = new SignalSegmentStore();
-  private readonly fetchedCoverage = new SettledCoverageIndex();
   private readonly demandSubscriptions = new Set<DemandSubscription>();
   private readonly adapterSession: AdapterSession;
   private readonly signal: AbortSignal;
@@ -60,6 +62,7 @@ export class Broker {
   private sampleRevision = 0;
   private adapterActivities: readonly AcquisitionActivity[] = [];
   private valueBuffer: Float64Array<ArrayBufferLike> = new Float64Array(0);
+  private densityBuffer: Float64Array<ArrayBufferLike> = new Float64Array(0);
 
   constructor(adapter: SignalAdapter, opts: BrokerOptions) {
     this.signal = opts.signal;
@@ -105,34 +108,34 @@ export class Broker {
           ? this.valueBuffer
           : (this.valueBuffer = new Float64Array(evalTime.length));
       value.fill(NaN);
-      return { value, coverage: [], sampleRevision: this.sampleRevision };
+      return {
+        value,
+        sampleDensity: this.readSampleDensity(opts),
+        requests: [],
+        sampleRevision: this.sampleRevision,
+      };
     }
 
     const queryInterval = Interval.create(evalTime[0]!, evalTime[evalTime.length - 1]!);
     const wallNow = this.now();
-    const historicalInterval = clampToNow(queryInterval, wallNow);
     const value = this.store.sample(evalTime, wallNow, this.valueBuffer);
     this.valueBuffer = value;
-
-    const readyCoverage = new IntervalSet();
-    if (!Interval.isEmpty(historicalInterval)) {
-      this.store.addReadyBlockers(readyCoverage, maxDeltaTMs, historicalInterval);
-    }
-    const coverage = [
-      ...this.dataSegments(queryInterval, wallNow),
-      ...(Interval.isEmpty(historicalInterval)
-        ? []
-        : this.fetchedCoverage.emptySegments(historicalInterval, maxDeltaTMs, readyCoverage)),
+    const requests = [
       ...this.transientSegments(queryInterval),
       ...this.futureSegments(queryInterval, wallNow, maxDeltaTMs),
     ].sort(
       (a, b) =>
         a.range.start - b.range.start ||
-        coverageLabelRank(b) - coverageLabelRank(a) ||
+        requestLabelRank(b) - requestLabelRank(a) ||
         a.range.end - b.range.end,
     );
 
-    return { value, coverage, sampleRevision: this.sampleRevision };
+    return {
+      value,
+      sampleDensity: this.readSampleDensity(opts),
+      requests,
+      sampleRevision: this.sampleRevision,
+    };
   }
 
   subscribe(demand: BrokerDemand, fn: () => void, signal: AbortSignal): Subscription {
@@ -163,9 +166,9 @@ export class Broker {
   /** Drop observations and adapter scheduling evidence, then reacquire current demands. */
   clearCache(): void {
     this.store.clear();
-    this.fetchedCoverage.clear();
     this.adapterActivities = [];
     this.valueBuffer = new Float64Array(0);
+    this.densityBuffer = new Float64Array(0);
     this.adapterSession.clearCache();
     this.sampleRevision++;
     this.notify();
@@ -189,6 +192,7 @@ export class Broker {
   private ingest(result: AdapterDelivery): boolean {
     const clipped = clipSamples(normalizeSamples(result.samples), result.searchedInterval);
     const samples = clipped.samples;
+    this.store.insertSamples(samples);
     if (clipped.discardedFutureCount > 0) {
       this.onWarning(
         `[Broker] discarded ${clipped.discardedFutureCount} future point(s); ` +
@@ -205,7 +209,6 @@ export class Broker {
       // wall clock from manufacturing millisecond-sized "uncovered" tails.
       changed = this.ingestObserved(samples, result.resolutionMs);
     }
-    this.fetchedCoverage.add(result.resolutionMs, result.searchedInterval);
     return changed;
   }
 
@@ -232,25 +235,13 @@ export class Broker {
     return this.store.insertBatch(segments);
   }
 
-  private dataSegments(range: Interval, wallNow: number): CoverageSegment[] {
-    return this.store
-      .coverage(range, wallNow)
-      .map(span => ({
-        kind: "data" as const,
-        range: span.range,
-        samplePeriodMs: span.resolutionMs,
-        state: span.state,
-      }));
-  }
-
-  private transientSegments(range: Interval): CoverageSegment[] {
-    const out: CoverageSegment[] = [];
+  private transientSegments(range: Interval): RequestSegment[] {
+    const out: RequestSegment[] = [];
     for (const activity of this.adapterActivities) {
       const overlap = Interval.intersection(activity.range, range);
       if (Interval.isEmpty(overlap)) continue;
       if (activity.state === "retrying") {
         out.push({
-          kind: "request",
           range: overlap,
           samplePeriodMs: activity.resolutionMs,
           state: "retrying",
@@ -258,21 +249,8 @@ export class Broker {
           message: activity.message,
           retryAtMs: activity.retryAtMs,
         });
-      } else if (activity.state === "fetching") {
-        out.push({
-          kind: "request",
-          range: overlap,
-          samplePeriodMs: activity.resolutionMs,
-          state: "fetching",
-          attempt: activity.attempt,
-        });
       } else {
-        out.push({
-          kind: "request",
-          range: overlap,
-          samplePeriodMs: activity.resolutionMs,
-          state: "pending",
-        });
+        out.push({ range: overlap, samplePeriodMs: activity.resolutionMs, state: "pending" });
       }
     }
     return out;
@@ -283,18 +261,26 @@ export class Broker {
     range: Interval,
     wallNow: number,
     samplePeriodMs: number,
-  ): CoverageSegment[] {
+  ): RequestSegment[] {
     const start = Math.max(range.start, wallNow);
     return start < range.end
-      ? [
-          {
-            kind: "request",
-            range: Interval.create(start, range.end),
-            samplePeriodMs,
-            state: "pending",
-          },
-        ]
+      ? [{ range: Interval.create(start, range.end), samplePeriodMs, state: "pending" }]
       : [];
+  }
+
+  private readSampleDensity(opts: ReadRequest): Float64Array {
+    const density = opts.density;
+    if (density === undefined) {
+      if (this.densityBuffer.length !== 0) this.densityBuffer = new Float64Array(0);
+      return this.densityBuffer;
+    }
+    this.densityBuffer = this.store.sampleDensity(
+      density.range,
+      density.binCount,
+      opts.maxSampleGapMs,
+      this.densityBuffer,
+    );
+    return this.densityBuffer;
   }
 
   private notify(): void {
@@ -319,20 +305,8 @@ function sameDemand(a: BrokerDemand, b: BrokerDemand): boolean {
   return Interval.equals(a.range, b.range) && a.maxDeltaTMs === b.maxDeltaTMs;
 }
 
-function clampToNow(range: Interval, now: number): Interval {
-  if (!Number.isFinite(now)) throw new Error(`Broker: invalid wall clock ${now}`);
-  return Interval.clampEnd(range, now);
-}
-
-function coverageLabelRank(segment: CoverageSegment): number {
-  if (segment.kind === "request") {
-    if (segment.state === "retrying") return 6;
-    if (segment.state === "fetching") return 5;
-    return 4;
-  }
-  if (segment.state === "ready") return 3;
-  if (segment.state === "held") return 2;
-  return 1;
+function requestLabelRank(segment: RequestSegment): number {
+  return segment.state === "retrying" ? 1 : 0;
 }
 
 interface ClippedPoints {

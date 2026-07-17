@@ -8,7 +8,6 @@ import type {
   SignalView,
   BrokerDemand,
 } from "../src/data/signal/broker.ts";
-import { SettledCoverageIndex } from "../src/data/signal/coverage.ts";
 import { createBinanceAdapter } from "../src/data/signal/market/adapters/binanceFetcher.ts";
 import {
   chooseYahooInterval,
@@ -802,23 +801,16 @@ test("signal segment store returns NaN outside coverage and holds ZOH values", (
   assertPoint(selected, 15, 2, "held value lost its observation timestamp");
 });
 
-test("coverage distinguishes fresh samples from carried values exactly", () => {
+test("sample density measures observations rather than reconstructed holds", () => {
   const store = new SignalSegmentStore();
+  store.insertSamples([
+    { t: 0, value: 1 },
+    { t: 2_000, value: 2 },
+  ]);
   store.insertBatch([heldSegment(0, 10_000, 0, 1, 1_000)]);
-  const coverage = store.coverage(Interval.create(0, 10_000), 10_000);
-  assert(coverage.length === 2, "fresh and held coverage were not split");
-  assert(
-    coverage[0]?.state === "ready" &&
-      coverage[0].range.start === 0 &&
-      coverage[0].range.end === 1_000,
-    "fresh observation lifetime was not exact",
-  );
-  assert(
-    coverage[1]?.state === "held" &&
-      coverage[1].range.start === 1_000 &&
-      coverage[1].range.end === 10_000,
-    "market-closure hold was still presented as fresh data",
-  );
+  const density = store.sampleDensity(Interval.create(0, 10_000), 10, 1_000);
+  assert(density[0] === 1 && density[2] === 1, "observed bins were not full");
+  assert(density[1] === 0 && density.slice(3).every(value => value === 0), "hold invented samples");
 });
 
 test("segment coverage is half-open while predecessor lookup keeps the observation", () => {
@@ -894,7 +886,7 @@ test("broker read is side-effect-free and viewport subscriptions drive fetching"
   broker.close();
 });
 
-test("broker trusts the adapter plan, not irregular observation spacing", async () => {
+test("broker density exposes irregular observation spacing", async () => {
   const adapter = createPollingSignalSource({
     now: () => 20_000,
     resolve: () => 1_000,
@@ -914,13 +906,12 @@ test("broker trusts the adapter plan, not irregular observation spacing", async 
 
   const result = broker.read({
     evalTime: new Float64Array([0, 5_000, 10_000]),
-    maxSampleGapMs: 5_000,
+    maxSampleGapMs: 1_000,
+    density: { range: Interval.create(0, 10_000), binCount: 10 },
   });
-  const ready = result.coverage.filter(segment => segment.state === "ready");
-  assert(ready.length > 0, "adapter observations were not cached");
   assert(
-    ready.every(segment => segment.samplePeriodMs === 1_000),
-    "broker inferred resolution from an irregular timestamp gap",
+    result.sampleDensity[0] === 1 && result.sampleDensity.slice(1).every(value => value === 0),
+    "irregular gap was hidden by reconstructed or searched coverage",
   );
 });
 
@@ -991,18 +982,16 @@ test("future coverage remains pending while request status does not invalidate s
   const request = { evalTime: new Float64Array([50, 100, 150]), maxSampleGapMs: 10 };
   const pending = broker.read(request);
   assert(
-    pending.coverage.some(segment => segment.state === "pending" && segment.range.start === 100),
+    pending.requests.some(segment => segment.state === "pending" && segment.range.start === 100),
     "visible future was not marked pending",
   );
   const initialRevision = pending.sampleRevision;
   const connectedSink = sink as unknown as Parameters<SignalAdapter["connect"]>[0];
-  connectedSink.status([
-    { state: "fetching", range: Interval.create(90, 100), resolutionMs: 10, attempt: 0 },
-  ]);
+  connectedSink.status([{ state: "pending", range: Interval.create(90, 100), resolutionMs: 10 }]);
   const fetching = broker.read(request);
   assert(fetching.sampleRevision === initialRevision, "status-only update invalidated samples");
   assert(
-    fetching.coverage.some(segment => segment.state === "pending" && segment.range.start === 100),
+    fetching.requests.some(segment => segment.state === "pending" && segment.range.start === 100),
     "visible future stopped being pending during a fetch",
   );
   const delivery = {
@@ -1281,14 +1270,11 @@ test("follow-now demand updates keep one live lease and do not feed notification
     `follow updates fed ${notifications - settledNotifications} status notifications back`,
   );
   const status = broker.read({ evalTime: new Float64Array([0, now]), maxSampleGapMs: 1_000 });
-  assert(
-    status.coverage.every(segment => segment.state !== "fetching"),
-    "settled live lease was still presented as an active fetch",
-  );
+  assert(status.requests.length === 0, "settled live lease was still presented as pending");
   broker.close();
 });
 
-test("empty coverage is classified by the native resolution actually searched", async () => {
+test("a completed empty search leaves zero sample density", async () => {
   let calls = 0;
   const adapter = createPollingSignalSource({
     now: () => 10_000,
@@ -1309,11 +1295,12 @@ test("empty coverage is classified by the native resolution actually searched", 
   const view = broker.read({
     evalTime: new Float64Array([0, 2_500, 5_000]),
     maxSampleGapMs: 1_500,
+    density: { range: Interval.create(0, 5_000), binCount: 5 },
   });
   assert(calls === 1, "native fine coverage was refetched for a nearby zoom level");
   assert(
-    view.coverage.some(segment => segment.state === "empty"),
-    "settled native-resolution coverage disappeared at a finer requested threshold",
+    view.sampleDensity.every(value => value === 0),
+    "empty search invented data availability",
   );
   broker.close();
 });
@@ -1359,6 +1346,7 @@ test("adapter expands tiny demands and broker caches the complete delivery", asy
 
 test("a demand ending at wall now remains historical", () => {
   const states: string[] = [];
+  let activityEnds: readonly number[] = [];
   const lifetime = new AbortController();
   const adapter = createPollingSignalSource({
     now: () => 10_000,
@@ -1370,6 +1358,7 @@ test("a demand ending at wall now remains historical", () => {
       next: () => undefined,
       status: activities => {
         states.splice(0, states.length, ...activities.map(activity => activity.state));
+        activityEnds = activities.map(activity => activity.range.end);
       },
       error: () => undefined,
     },
@@ -1377,7 +1366,11 @@ test("a demand ending at wall now remains historical", () => {
   );
 
   session.setDemands([{ range: Interval.create(0, 10_000), maxDeltaTMs: 1_000 }]);
-  assert(!states.includes("pending"), "half-open demand end invented future pending work");
+  assert(states.includes("pending"), "historical request was not reported as pending");
+  assert(
+    activityEnds.every(end => end <= 10_000),
+    "half-open demand end invented future work",
+  );
   lifetime.abort();
 });
 
@@ -1436,11 +1429,14 @@ test("returned future points are discarded while the last valid sample is held",
   const evalTime = new Float64Array([0, 5_000, 10_000]);
   broker.query({ evalTime, maxSampleGapMs: 5_000 });
   await new Promise(resolve => setTimeout(resolve, 0));
-  const result = broker.query({ evalTime, maxSampleGapMs: 5_000 });
-  const ready = result.coverage.filter(segment => segment.state === "ready");
+  const result = broker.query({
+    evalTime,
+    maxSampleGapMs: 5_000,
+    density: { range: Interval.create(0, 10_000), binCount: 2 },
+  });
   assert(
-    ready.every(segment => segment.range.end <= 7_500),
-    "presented coverage entered the future",
+    result.sampleDensity.every(value => value >= 0 && value <= 1),
+    "density was invalid",
   );
   assert(Number.isNaN(result.value[2]!), "future value was rendered");
   const latest = { t: Number.NaN, value: Number.NaN };
@@ -1453,63 +1449,33 @@ test("returned future points are discarded while the last valid sample is held",
   );
 });
 
-test("large segment stores expose ready coverage without a redundant summary API", () => {
+test("sample density scales across timestamp block boundaries", () => {
   const store = new SignalSegmentStore();
-  const segments = Array.from({ length: 2_000 }, (_, index) =>
-    heldSegment(
-      index * 1_000,
-      (index + 1) * 1_000,
-      index * 1_000,
-      index,
-      index === 1_000 ? 5_000 : 1_000,
-    ),
+  store.insertSamples(
+    Array.from({ length: 2_048 }, (_, index) => ({ t: index * 1_000, value: index })),
   );
-  store.insertBatch(segments);
-  const coarse = new IntervalSet();
-  store.addReadyBlockers(coarse, 5_000, Interval.create(0, 2_000_000));
-  assert(coarse.covers(Interval.create(0, 2_000_000)), "coarse coverage was incomplete");
-  const fine = new IntervalSet();
-  store.addReadyBlockers(fine, 1_000, Interval.create(0, 2_000_000));
-  assert(!fine.covers(Interval.create(0, 2_000_000)), "coarse interval satisfied fine demand");
-});
-
-test("ready coverage isolates gaps at leaf-block boundaries", () => {
-  const store = new SignalSegmentStore();
-  const segments = Array.from({ length: 1_024 }, (_, index) => {
-    const gap = index >= 512 ? 10_000 : 0;
-    const start = index * 1_000 + gap;
-    return heldSegment(start, start + 1_000, start, index, 1_000);
-  });
-  store.insertBatch(segments);
-  const ready = new IntervalSet();
-  store.addReadyBlockers(ready, 1_000, Interval.create(0, 1_034_000));
-  assert(ready.covers(Interval.create(522_000, 1_034_000)), "post-gap coverage was rejected");
-  assert(!ready.covers(Interval.create(0, 1_034_000)), "block-boundary gap was hidden");
-});
-
-test("ready data is projected out of fetched-but-empty coverage", () => {
-  const coverage = new SettledCoverageIndex();
-  coverage.add(5_000, Interval.create(0, 10_000));
-  const ready = new IntervalSet();
-  ready.add(Interval.create(2_000, 8_000));
-  const empty = coverage.emptySegments(Interval.create(0, 10_000), 5_000, ready);
-  for (const segment of empty) {
-    assert(segment.range.end <= 2_000 || segment.range.start >= 8_000, "ready/empty overlap");
-  }
-});
-
-test("finer fetched evidence satisfies coarser continuously varying zoom demands", () => {
-  const coverage = new SettledCoverageIndex();
-  coverage.add(1_001.25, Interval.create(0, 10_000));
-  const coarse = new IntervalSet();
-  coverage.addBlockers(coarse, 5_432.1, Interval.create(0, 10_000));
-  assert(coarse.covers(Interval.create(0, 10_000)), "finer empty evidence was ignored");
-  const fine = new IntervalSet();
-  coverage.addBlockers(fine, 500, Interval.create(0, 10_000));
+  const density = store.sampleDensity(Interval.create(0, 2_048_000), 4, 1_000);
   assert(
-    !fine.covers(Interval.create(0, 10_000)),
-    "coarse empty evidence suppressed a finer query",
+    density.every(value => value === 1),
+    "full timestamp blocks were miscounted",
   );
+});
+
+test("sample density exposes gaps and fractional sufficiency", () => {
+  const store = new SignalSegmentStore();
+  store.insertSamples([
+    { t: 0, value: 0 },
+    { t: 1_000, value: 1 },
+    { t: 4_000, value: 4 },
+  ]);
+  const density = store.sampleDensity(Interval.create(0, 6_000), 3, 1_000);
+  assert(density[0] === 1, "sufficient bin was not saturated");
+  assert(density[1] === 0, "gap was hidden");
+  assert(density[2] === 0.5, "partially sufficient bin lost its magnitude");
+
+  store.insertSamples([{ t: 4_000, value: 99 }]);
+  const deduplicated = store.sampleDensity(Interval.create(4_000, 6_000), 1, 1_000);
+  assert(deduplicated[0] === 0.5, "duplicate timestamp was counted twice");
 });
 
 test("IntervalSet preserves many chronological fragments without full-list rebuilds", () => {
@@ -1548,9 +1514,16 @@ test("searched market closures do not create an intermediate-zoom fetch storm", 
   broker.query({ evalTime, maxSampleGapMs: 1_001.25 });
   await new Promise(resolve => setTimeout(resolve, 0));
 
-  const intermediate = broker.query({ evalTime, maxSampleGapMs: 5_432.1 });
+  const intermediate = broker.query({
+    evalTime,
+    maxSampleGapMs: 5_432.1,
+    density: { range: Interval.create(0, 11_000), binCount: 11 },
+  });
   assert(calls === 1, `market closure triggered ${calls - 1} redundant request(s)`);
-  assert(intermediate.coverage.length > 0, "searched closure lost its coverage diagnostics");
+  assert(
+    intermediate.sampleDensity.slice(3, 10).every(value => value === 0),
+    "market closure was hidden by reconstructed data",
+  );
   broker.close();
 });
 
@@ -1623,8 +1596,8 @@ test("finer pending work suppresses only coarser duplicate requests", () => {
   const evalTime = new Float64Array([0, 5_000, 10_000]);
   const first = broker.query({ evalTime, maxSampleGapMs: 1_000 });
   assert(
-    first.coverage.some(segment => segment.state === "fetching"),
-    "active request hidden",
+    first.requests.some(segment => segment.state === "pending"),
+    "active request was not exposed as pending",
   );
   broker.query({ evalTime, maxSampleGapMs: 5_000 });
   assert(count(requests) === 1, "fine pending request did not suppress coarse duplicate");
@@ -1655,8 +1628,11 @@ test("serialized acquisition exposes demanded work waiting behind the active req
     { range: Interval.create(0, 1_000), maxDeltaTMs: 1_000 },
     { range: Interval.create(5_000, 6_000), maxDeltaTMs: 1_000 },
   ]);
-  assert(latest.includes("fetching"), "active request was not reported");
-  assert(latest.includes("pending"), "queued demand was hidden");
+  assert(latest.length >= 2, "active or queued demand was hidden");
+  assert(
+    latest.every(state => state === "pending"),
+    "broker-visible pending states diverged",
+  );
   lifetime.abort();
 });
 
@@ -1733,7 +1709,7 @@ test("subscriber failures are not reclassified as fetch failures", async () => {
   await new Promise(resolve => setTimeout(resolve, 0));
   const result = broker.query(query);
   assert(
-    result.coverage.every(segment => segment.state !== "retrying"),
+    result.requests.every(segment => segment.state !== "retrying"),
     "subscriber exception became a failed exchange range",
   );
   assert(errors.includes("[Broker] subscriber failed"), "subscriber exception was hidden");
@@ -1996,7 +1972,7 @@ test("broker exposes failures and uses the fetcher's retry policy", async () => 
   broker.query({ evalTime, maxSampleGapMs: 1_000 });
   await new Promise(resolve => setTimeout(resolve, 0));
   const result = broker.query({ evalTime, maxSampleGapMs: 1_000 });
-  const retrying = result.coverage.find(segment => segment.state === "retrying");
+  const retrying = result.requests.find(segment => segment.state === "retrying");
   assert(retrying !== undefined, "failed request was still presented as pending");
   assert(retrying.message === "upstream unavailable", "failure detail was lost");
   broker.query({ evalTime, maxSampleGapMs: 1_000 });
@@ -2025,7 +2001,7 @@ test("an unexpected AbortError fails visibly instead of deadlocking acquisition"
   await new Promise(resolve => setTimeout(resolve, 0));
   const result = broker.query({ evalTime, maxSampleGapMs: 1_000 });
   assert(
-    result.coverage.some(segment => segment.state === "retrying"),
+    result.requests.some(segment => segment.state === "retrying"),
     "current AbortError remained silently stuck as fetching",
   );
   assert(errors.includes("upstream aborted"), "current AbortError was not surfaced");
