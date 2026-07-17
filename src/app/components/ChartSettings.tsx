@@ -1,7 +1,7 @@
 import { Popover } from "@kobalte/core/popover";
 import { Settings2 } from "lucide-solid";
 import type { PaletteName } from "../../engine/ramp.ts";
-import type { WaveletMode } from "../../engine/wavelet.ts";
+import { computeWaveletField, type WaveletMode } from "../../engine/wavelet.ts";
 import surfaceStyles from "../../styles/floatingSurface.module.css";
 import controlStyles from "./ui/Control.module.css";
 import styles from "./ChartSettings.module.css";
@@ -58,15 +58,18 @@ export function ChartSettings(props: ChartSettingsProps) {
             </div>
           </fieldset>
 
-          <fieldset class={styles.fieldset}>
-            <legend class={`${styles.legend} ${controlStyles.sectionLabel}`}>Color</legend>
-
+          <div class={styles.colorRow} role="group" aria-labelledby={`color-${props.id}`}>
+            <span
+              id={`color-${props.id}`}
+              class={`${styles.colorLabel} ${controlStyles.sectionLabel}`}>
+              Color
+            </span>
             <PalettePicker
               label={props.label}
               value={props.palette}
               onChange={props.onPaletteChange}
             />
-          </fieldset>
+          </div>
           <Popover.Arrow class={styles.arrow} />
         </Popover.Content>
       </Popover.Portal>
@@ -78,17 +81,31 @@ function KernelPreview(props: { readonly mode: WaveletMode }) {
   return (
     <svg class={styles.preview} viewBox="0 0 64 28" aria-hidden="true">
       <path class={styles.previewAxis} d="M2 24.5H62" />
-      {props.mode === "centered" ? (
-        <path
-          class={styles.previewCurve}
-          d="M3 24C16 24 19 22 24 13C27 7 29 4 32 4C35 4 37 7 40 13C45 22 48 24 61 24"
-        />
-      ) : (
-        <path
-          class={styles.previewCurve}
-          d="M3 24H17C19 11 23 5 28 5C35 5 39 13 44 18C49 22 54 23.5 61 24"
-        />
-      )}
+      <path class={styles.previewCurve} d={KERNEL_PREVIEW_PATHS[props.mode]} />
     </svg>
   );
+}
+
+const KERNEL_PREVIEW_PATHS: Record<WaveletMode, string> = {
+  centered: kernelPreviewPath("centered"),
+  causal: kernelPreviewPath("causal"),
+};
+
+/** Sample the production transform's response rather than approximating its named kernel. */
+function kernelPreviewPath(mode: WaveletMode): string {
+  const sampleCount = 61;
+  const impulse = new Float64Array(sampleCount);
+  impulse[mode === "centered" ? Math.floor(sampleCount / 2) : 8] = 1;
+  const response = computeWaveletField(impulse, 1, new Float64Array([6]), mode).values;
+  let peak = 0;
+  for (const value of response) peak = Math.max(peak, value);
+  if (!(peak > 0)) return "M2 24.5H62";
+
+  const points: string[] = [];
+  for (let index = 0; index < response.length; index++) {
+    const x = 2 + (index / (sampleCount - 1)) * 60;
+    const y = 24 - (Math.max(0, response[index]!) / peak) * 20;
+    points.push(`${index === 0 ? "M" : "L"}${x.toFixed(2)} ${y.toFixed(2)}`);
+  }
+  return points.join("");
 }
