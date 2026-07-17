@@ -11,6 +11,7 @@ interface PalettePickerProps {
   readonly onChange: (palette: PaletteName) => void;
 }
 
+// TODO: Palette should be reversible, aka the place of 0 and 1 should be switchable
 /**
  * Compact palette scrubber for timeline rows.
  *
@@ -30,12 +31,10 @@ export function PalettePicker(props: PalettePickerProps) {
   const alignSelected = (): void => {
     if (!open()) return;
     queueMicrotask(() => {
-      const currentDeck = deck;
-      const selected = currentDeck?.querySelector<HTMLElement>("[aria-selected='true']");
-      if (currentDeck === undefined || selected === null || selected === undefined || !open())
-        return;
+      const selected = deck?.querySelector<HTMLElement>("[aria-selected='true']");
+      if (deck === undefined || selected === null || selected === undefined || !open()) return;
       const selectedCenter = selected.offsetTop + selected.offsetHeight / 2;
-      currentDeck.style.setProperty("--palette-deck-offset", `${-selectedCenter}px`);
+      deck.style.setProperty("--palette-deck-offset", `${-selectedCenter}px`);
     });
   };
 
@@ -68,6 +67,7 @@ export function PalettePicker(props: PalettePickerProps) {
   const onWheel = (event: WheelEvent): void => {
     if (event.deltaY === 0) return;
     event.preventDefault();
+    // TODO: The same scroll scaling happens in timelineGestureControls, we should probably refactor a unified scroll to multiplier conversion
     const scale =
       event.deltaMode === WheelEvent.DOM_DELTA_PIXEL
         ? 1

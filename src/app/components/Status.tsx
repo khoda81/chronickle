@@ -8,6 +8,7 @@ interface StatusProps {
 }
 
 export function Status(props: StatusProps) {
+  // TODO: Why is this checking for the string just to switch on it and isn't using StatusKind to set the classes directly?
   const error = () => props.kind === "error";
 
   return (

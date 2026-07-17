@@ -52,6 +52,8 @@
   left: 50%;
   width: max-content;
   padding: var(--space-1) var(--space-2);
+  /* TODO: Can we refactor the 2px solid border out instead of keeping it in every single box class? There are other box properties that can be refactored into a bunch of shared classes to improve ui consistency */
+  /* TODO: Should border radius be in pixels or rem to scale with ui? */
   border: 2px solid var(--glass-border);
   border-radius: var(--radius-sm);
   background:
@@ -65,6 +67,7 @@
   line-height: var(--line-tight);
   opacity: 0;
   pointer-events: none;
+  /* TODO: Why rem and not --spacing? */
   transform: translate(-50%, -0.1875rem);
   transition:
     opacity var(--duration-fast) ease,

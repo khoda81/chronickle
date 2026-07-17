@@ -16,22 +16,12 @@ import type { PaletteName } from "./ramp.ts";
 import { kernelContext, type WaveletMode } from "./wavelet.ts";
 import { DEFAULT_MIN_TICK_PX } from "./gfx/axis.ts";
 import type { Frame } from "./gfx/context.ts";
-import {
-  fitStackLayout,
-  MIN_NEWS_HEIGHT,
-  RESIZE_HANDLE_RADIUS,
-  COVERAGE_BAR_HEIGHT,
-  heatmapScaleWindow,
-} from "./gfx/layout.ts";
+import { fitStackLayout, MIN_NEWS_HEIGHT, RESIZE_HANDLE_RADIUS, COVERAGE_BAR_HEIGHT, heatmapScaleWindow } from "./gfx/layout.ts";
 import { BrokerDemand } from "../data/index.ts";
 
 export type DataReader = (request: ReadRequest) => SignalView;
 export type SampleAtReader = (time: number, out: MutableSample) => boolean;
-export type DataSubscriber = (
-  demand: BrokerDemand,
-  onChange: () => void,
-  signal: AbortSignal,
-) => Subscription;
+export type DataSubscriber = (demand: BrokerDemand, onChange: () => void, signal: AbortSignal) => Subscription;
 export type EventSource = (range: Interval) => EventQueryResult;
 
 export interface SignalRow {
@@ -240,16 +230,8 @@ export class Timeline {
           currentCenterX,
           previousDistance,
           currentDistance,
-        ) =>
-          this.pinchTime(
-            viewportWidth,
-            previousCenterX,
-            currentCenterX,
-            previousDistance,
-            currentDistance,
-          ),
-        wheel: (point, deltaX, deltaY, shiftKey) =>
-          this.onGestureWheel(point, deltaX, deltaY, shiftKey),
+        ) => this.pinchTime(viewportWidth, previousCenterX, currentCenterX, previousDistance, currentDistance),
+        wheel: (point, deltaX, deltaY, shiftKey) => this.onGestureWheel(point, deltaX, deltaY, shiftKey),
         hoverMoved: (point, pointerInside) => this.onGestureHoverMove(point, pointerInside),
         pointerLeft: () => this.onGesturePointerLeave(),
         tap: point => this.onGestureTap(point),
@@ -404,8 +386,8 @@ export class Timeline {
     this.layoutDirty = false;
     const collapsedRowIds = removeCollapsedRows
       ? this.rows
-          .filter(runtime => runtime.height <= ROW_REMOVE_THRESHOLD)
-          .map(runtime => runtime.row.id)
+        .filter(runtime => runtime.height <= ROW_REMOVE_THRESHOLD)
+        .map(runtime => runtime.row.id)
       : [];
     this.callbacks.onLayoutChange?.(this.getLayout(), collapsedRowIds);
   }
@@ -504,9 +486,9 @@ export class Timeline {
           : activeBoundary !== null && (index === activeBoundary - 1 || index === activeBoundary);
       const collapseProgress = rowTouchesActiveBoundary
         ? Math.max(
-            0,
-            Math.min(1, 1 - (rowHeight - ROW_REMOVE_THRESHOLD) / ROW_COLLAPSE_HINT_HEIGHT),
-          )
+          0,
+          Math.min(1, 1 - (rowHeight - ROW_REMOVE_THRESHOLD) / ROW_COLLAPSE_HINT_HEIGHT),
+        )
         : 0;
       this.overlay?.setRowCollapseProgress(row.id, collapseProgress);
       if (rowHeight <= COVERAGE_BAR_HEIGHT + 2) {
@@ -959,8 +941,8 @@ export class Timeline {
     const point = this.gestures.pointer;
     const index =
       (this.gestures.pointerInside || this.eventTooltipHovered || this.crosshairPinned) &&
-      !this.gestures.active &&
-      this.boundaryAt(point.y) === null
+        !this.gestures.active &&
+        this.boundaryAt(point.y) === null
         ? eventIndexAtOrBefore(this.state.events, tx, point.x)
         : null;
     this.state.hovered = index;
