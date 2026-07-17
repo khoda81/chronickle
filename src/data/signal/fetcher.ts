@@ -32,11 +32,11 @@ interface AcquisitionActivityBase {
 export type AcquisitionActivity =
   | (AcquisitionActivityBase & { readonly state: "pending" })
   | (AcquisitionActivityBase & {
-    readonly state: "retrying";
-    readonly attempt: number;
-    readonly message: string;
-    readonly retryAtMs: number;
-  });
+      readonly state: "retrying";
+      readonly attempt: number;
+      readonly message: string;
+      readonly retryAtMs: number;
+    });
 
 export interface SignalSink {
   next(batch: AdapterDelivery): void;

@@ -538,18 +538,12 @@ export class Timeline {
       const demand = { range: readTimeRange, maxDeltaTMs: gridStepMs } satisfies BrokerDemand;
       this.syncPriceSubscription(index, demand);
 
-      const result = row.read({ evalTime });
+      const view = row.read({ evalTime });
 
       const sampleDensity = frame
         .heatmap(row.id)
         .drawWaveletField(
-          {
-            evalTime,
-            view: result,
-            padLeft,
-            padRight,
-            visibleCells,
-          },
+          { evalTime, view, padLeft, padRight, visibleCells },
           priceScale,
           waveletMode,
           rowY + COVERAGE_BAR_HEIGHT,
@@ -559,7 +553,7 @@ export class Timeline {
         );
 
       hasVisibleRetry =
-        frame.statusBar().draw(sampleDensity, result.requests, rowY, wallNow) || hasVisibleRetry;
+        frame.statusBar().draw(sampleDensity, view.requests, rowY, wallNow) || hasVisibleRetry;
 
       rowY += rowHeight;
       frame.fillRectPx(0, rowY - 1, width, 1, "rgba(255,255,255,0.18)");

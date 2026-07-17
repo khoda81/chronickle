@@ -387,10 +387,10 @@ test("gesture session transitions touch drag through pinch without parallel flag
   const remaining = gesture.state;
   assert(
     remaining.kind === "drag" &&
-      remaining.input === "touch" &&
-      remaining.pointerId === 5 &&
-      remaining.row === 7 &&
-      remaining.moved,
+    remaining.input === "touch" &&
+    remaining.pointerId === 5 &&
+    remaining.row === 7 &&
+    remaining.moved,
     "pinch did not become a moved drag for the remaining touch",
   );
   assert(gesture.end(5), "remaining touch did not end");
@@ -440,15 +440,15 @@ test("timeline gesture controller owns native drag events and canvas projection"
         panRow = row ?? Number.NaN;
         panY = deltaY;
       },
-      resizeBoundary() {},
-      pinchTime() {},
-      wheel() {},
-      hoverMoved() {},
-      pointerLeft() {},
+      resizeBoundary() { },
+      pinchTime() { },
+      wheel() { },
+      hoverMoved() { },
+      pointerLeft() { },
       tap() {
         taps++;
       },
-      doubleTap() {},
+      doubleTap() { },
     };
     const controller = new TimelineGestureController({
       canvas,
@@ -512,27 +512,27 @@ test("timeline gesture controller combines two touch pointers into one pinch upd
     const finishedStates: boolean[] = [];
     const host: TimelineGestureHost = {
       targetAt: () => ({ kind: "viewport", row: 6 }),
-      gestureStarted() {},
+      gestureStarted() { },
       gestureEnded(_input, _cancelled, finished) {
         finishedStates.push(finished);
       },
-      panTimeByPixels() {},
+      panTimeByPixels() { },
       panRow(nextRow, deltaY) {
         row = nextRow ?? Number.NaN;
         verticalDelta = deltaY;
       },
-      resizeBoundary() {},
+      resizeBoundary() { },
       pinchTime(_viewportWidth, previousCenter, currentCenter, previousSpan, currentSpan) {
         previousCenterX = previousCenter;
         currentCenterX = currentCenter;
         previousDistance = previousSpan;
         currentDistance = currentSpan;
       },
-      wheel() {},
-      hoverMoved() {},
-      pointerLeft() {},
-      tap() {},
-      doubleTap() {},
+      wheel() { },
+      hoverMoved() { },
+      pointerLeft() { },
+      tap() { },
+      doubleTap() { },
     };
     const controller = new TimelineGestureController({
       canvas: canvasTarget as unknown as HTMLCanvasElement,
@@ -598,12 +598,12 @@ test("timeline gesture controller normalizes wheel units without allocating a po
     let shifted = false;
     const host: TimelineGestureHost = {
       targetAt: () => ({ kind: "viewport", row: null }),
-      gestureStarted() {},
-      gestureEnded() {},
-      panTimeByPixels() {},
-      panRow() {},
-      resizeBoundary() {},
-      pinchTime() {},
+      gestureStarted() { },
+      gestureEnded() { },
+      panTimeByPixels() { },
+      panRow() { },
+      resizeBoundary() { },
+      pinchTime() { },
       wheel(point, deltaX, deltaY, shiftKey) {
         pointX = point.x;
         pointY = point.y;
@@ -611,10 +611,10 @@ test("timeline gesture controller normalizes wheel units without allocating a po
         wheelY = deltaY;
         shifted = shiftKey;
       },
-      hoverMoved() {},
-      pointerLeft() {},
-      tap() {},
-      doubleTap() {},
+      hoverMoved() { },
+      pointerLeft() { },
+      tap() { },
+      doubleTap() { },
     };
     new TimelineGestureController({
       canvas: canvasTarget as unknown as HTMLCanvasElement,
@@ -1931,14 +1931,14 @@ test("Nobitex empty fine history falls back without inventing no-data evidence",
       resolution === "1"
         ? { s: "no_data", t: [], o: [], h: [], l: [], c: [], v: [] }
         : {
-            s: "ok",
-            t: [0, 300],
-            o: [100, 101],
-            h: [100, 101],
-            l: [100, 101],
-            c: [100, 101],
-            v: [1, 1],
-          };
+          s: "ok",
+          t: [0, 300],
+          o: [100, 101],
+          h: [100, 101],
+          l: [100, 101],
+          c: [100, 101],
+          v: [1, 1],
+        };
     return new Response(JSON.stringify(payload), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -1992,7 +1992,7 @@ test("Yahoo adapter supports WTI and Brent futures with range-aware intervals", 
     assert(calls === 1, "same Yahoo candle window caused another HTTP request");
     assert(
       cached.searchedInterval.start <= secondInterval.start &&
-        cached.searchedInterval.end >= secondInterval.end,
+      cached.searchedInterval.end >= secondInterval.end,
       "cached expanded response did not cover the requested range",
     );
 

@@ -85,7 +85,7 @@ class HeatmapImpl implements HeatmapLayer {
   constructor(
     private readonly frame: Frame,
     private readonly resources: HeatmapResources,
-  ) { }
+  ) {}
 
   drawWaveletField(
     padded: PaddedEval,

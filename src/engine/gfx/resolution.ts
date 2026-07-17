@@ -29,7 +29,7 @@ export const StatusBar = {
 };
 
 class StatusBarImpl implements StatusBarLayer {
-  constructor(private readonly frame: Frame) { }
+  constructor(private readonly frame: Frame) {}
 
   draw(
     sampleDensity: Float64Array,
