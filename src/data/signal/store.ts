@@ -1,9 +1,8 @@
 import { lowerBoundBy, upperBoundBy } from "../../core/binarySearch.ts";
 import { Interval } from "../../core/interval.ts";
-import type { MutableSample, Sample } from "./sample.ts";
+import type { MutableSample } from "./sample.ts";
 
 const MAX_BLOCK_LENGTH = 512;
-const MAX_SAMPLE_BLOCK_LENGTH = 1_024;
 
 /**
  * Zero-order-held reconstruction of one observed sample over `range`.
@@ -56,29 +55,9 @@ const numberValue = (value: number): number => value;
  */
 export class SignalSegmentStore {
   private readonly blocks: SegmentBlock[] = [];
-  private readonly sampleTimes = new SampleTimeIndex();
 
   clear(): void {
     this.blocks.length = 0;
-    this.sampleTimes.clear();
-  }
-
-  /** Retain unique observation timestamps independently of ZOH reconstruction. */
-  insertSamples(samples: readonly Sample[]): void {
-    this.sampleTimes.add(samples);
-  }
-
-  /**
-   * Count observations per equal-width time bin and normalize by the requested
-   * cadence. Whole timestamp blocks are counted without visiting each sample.
-   */
-  sampleDensity(
-    range: Interval,
-    binCount: number,
-    targetSamplePeriodMs: number,
-    reuse?: Float64Array,
-  ): Float64Array {
-    return this.sampleTimes.density(range, binCount, targetSamplePeriodMs, reuse);
   }
 
   timeInterval(): Interval | null {
@@ -126,8 +105,20 @@ export class SignalSegmentStore {
     return true;
   }
 
-  sample(evalTime: Float64Array, wallNow: number, reuseValue?: Float64Array): Float64Array {
-    validateTime(wallNow, "sample now");
+  /**
+   * Sample the selected reconstruction and, when supplied, record the exact
+   * observation timestamp that supplied every grid value.
+   */
+  sample(
+    evalTime: Float64Array,
+    reuseValue?: Float64Array,
+    sampleTime?: Float64Array,
+  ): Float64Array {
+    if (sampleTime !== undefined && sampleTime.length !== evalTime.length) {
+      throw new Error(
+        `SignalSegmentStore.sample: sample-time length ${sampleTime.length} does not match ${evalTime.length}`,
+      );
+    }
     const value =
       reuseValue?.length === evalTime.length ? reuseValue : new Float64Array(evalTime.length);
 
@@ -136,13 +127,15 @@ export class SignalSegmentStore {
       if (!Number.isFinite(t)) {
         throw new Error(`SignalSegmentStore.sample: non-finite time at ${index}`);
       }
-      if (t > wallNow) {
+      const location = this.findContainingSegment(t);
+      if (location === null) {
         value[index] = NaN;
+        if (sampleTime !== undefined) sampleTime[index] = NaN;
         continue;
       }
-      const location = this.findContainingSegment(t);
-      value[index] =
-        location === null ? NaN : this.blocks[location.blockIndex]!.value[location.segmentIndex]!;
+      const block = this.blocks[location.blockIndex]!;
+      value[index] = block.value[location.segmentIndex]!;
+      if (sampleTime !== undefined) sampleTime[index] = block.sampleTime[location.segmentIndex]!;
     }
     return value;
   }
@@ -341,125 +334,6 @@ function validateTime(time: number, operation: string): void {
   if (!Number.isFinite(time)) {
     throw new Error(`SignalSegmentStore.${operation}: invalid time ${time}`);
   }
-}
-
-/** Sorted unique observation timestamps in fixed-size immutable leaves. */
-class SampleTimeIndex {
-  private readonly blocks: Float64Array[] = [];
-
-  clear(): void {
-    this.blocks.length = 0;
-  }
-
-  add(samples: readonly Sample[]): void {
-    if (samples.length === 0) return;
-    const first = samples[0]!.t;
-    const last = samples[samples.length - 1]!.t;
-    const overlapStart = lowerBoundBy(this.blocks, first, sampleBlockEnd);
-    const overlapEnd = upperBoundBy(this.blocks, last, sampleBlockStart, overlapStart);
-    // Include neighboring leaves so repeated live singleton deliveries fill a
-    // bounded block instead of degrading into one block per observation.
-    const spliceStart = Math.max(0, overlapStart - 1);
-    const spliceEnd = Math.min(this.blocks.length, overlapEnd + 1);
-    const existingLength = countSampleBlockItems(this.blocks, spliceStart, spliceEnd);
-    const merged = new Float64Array(existingLength + samples.length);
-    let existingBlock = spliceStart;
-    let existingIndex = 0;
-    let sampleIndex = 0;
-    let outputLength = 0;
-
-    const existingTime = (): number => {
-      while (existingBlock < spliceEnd && existingIndex >= this.blocks[existingBlock]!.length) {
-        existingBlock++;
-        existingIndex = 0;
-      }
-      return existingBlock < spliceEnd
-        ? this.blocks[existingBlock]![existingIndex]!
-        : Number.POSITIVE_INFINITY;
-    };
-
-    while (existingBlock < spliceEnd || sampleIndex < samples.length) {
-      const cached = existingTime();
-      const incoming = samples[sampleIndex]?.t ?? Number.POSITIVE_INFINITY;
-      const next = Math.min(cached, incoming);
-      if (merged[outputLength - 1] !== next) merged[outputLength++] = next;
-      if (cached === next) existingIndex++;
-      if (incoming === next) sampleIndex++;
-    }
-
-    const replacement: Float64Array[] = [];
-    for (let offset = 0; offset < outputLength; offset += MAX_SAMPLE_BLOCK_LENGTH) {
-      replacement.push(
-        merged.slice(offset, Math.min(outputLength, offset + MAX_SAMPLE_BLOCK_LENGTH)),
-      );
-    }
-    this.blocks.splice(spliceStart, spliceEnd - spliceStart, ...replacement);
-  }
-
-  density(
-    range: Interval,
-    binCount: number,
-    targetSamplePeriodMs: number,
-    reuse?: Float64Array,
-  ): Float64Array {
-    if (!Number.isInteger(binCount) || binCount < 0) {
-      throw new Error(`SignalSegmentStore.sampleDensity: invalid bin count ${binCount}`);
-    }
-    validateResolution(targetSamplePeriodMs);
-    const out = reuse?.length === binCount ? reuse : new Float64Array(binCount);
-    out.fill(0);
-    if (binCount === 0 || Interval.isEmpty(range) || this.blocks.length === 0) return out;
-
-    const binSpan = Interval.span(range) / binCount;
-    let blockIndex = lowerBoundBy(this.blocks, range.start, sampleBlockEnd);
-    let itemIndex =
-      blockIndex < this.blocks.length
-        ? lowerBoundBy(this.blocks[blockIndex]!, range.start, numberValue)
-        : 0;
-
-    for (let bin = 0; bin < binCount; bin++) {
-      const binEnd = bin + 1 === binCount ? range.end : range.start + (bin + 1) * binSpan;
-      let count = 0;
-      while (blockIndex < this.blocks.length) {
-        const block = this.blocks[blockIndex]!;
-        if (itemIndex >= block.length) {
-          blockIndex++;
-          itemIndex = 0;
-          continue;
-        }
-        if (block[itemIndex]! >= binEnd) break;
-        if (itemIndex === 0 && sampleBlockEnd(block) < binEnd) {
-          count += block.length;
-          blockIndex++;
-          continue;
-        }
-        while (itemIndex < block.length && block[itemIndex]! < binEnd) {
-          count++;
-          itemIndex++;
-        }
-      }
-      out[bin] = Math.min(1, (count * targetSamplePeriodMs) / binSpan);
-    }
-    return out;
-  }
-}
-
-function countSampleBlockItems(
-  blocks: readonly Float64Array[],
-  start: number,
-  end: number,
-): number {
-  let count = 0;
-  for (let index = start; index < end; index++) count += blocks[index]!.length;
-  return count;
-}
-
-function sampleBlockStart(block: Float64Array): number {
-  return block[0]!;
-}
-
-function sampleBlockEnd(block: Float64Array): number {
-  return block[block.length - 1]!;
 }
 
 function validateResolution(resolutionMs: number): void {

@@ -532,29 +532,23 @@ export class Timeline {
       for (let sample = 0; sample < edgeCount; sample++) {
         evalTime[sample] = timeInterval.start + (sample - padLeft) * gridStepMs;
       }
-      const evalView = evalTime.subarray(0, edgeCount) as Float64Array;
-      const demand = {
-        range: Interval.create(evalView[0]!, evalView[evalView.length - 1]!),
-        maxDeltaTMs: gridStepMs,
-      } satisfies BrokerDemand;
+
+      evalTime = evalTime.subarray(0, edgeCount) as Float64Array;
+      const readTimeRange = Interval.create(evalTime[0]!, evalTime[evalTime.length - 1]!);
+      const demand = { range: readTimeRange, maxDeltaTMs: gridStepMs } satisfies BrokerDemand;
       this.syncPriceSubscription(index, demand);
 
-      const result = row.read({
-        evalTime: evalView,
-        maxSampleGapMs: gridStepMs,
-        density: { range: timeInterval, binCount: numDevicePx },
-      });
+      const result = row.read({ evalTime });
 
-      frame
+      const sampleDensity = frame
         .heatmap(row.id)
         .drawWaveletField(
           {
-            evalTime: evalView,
-            value: result.value,
+            evalTime,
+            view: result,
             padLeft,
             padRight,
             visibleCells,
-            revision: result.sampleRevision,
           },
           priceScale,
           waveletMode,
@@ -565,8 +559,7 @@ export class Timeline {
         );
 
       hasVisibleRetry =
-        frame.statusBar().draw(result.sampleDensity, result.requests, rowY, wallNow) ||
-        hasVisibleRetry;
+        frame.statusBar().draw(sampleDensity, result.requests, rowY, wallNow) || hasVisibleRetry;
 
       rowY += rowHeight;
       frame.fillRectPx(0, rowY - 1, width, 1, "rgba(255,255,255,0.18)");

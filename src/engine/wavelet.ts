@@ -92,6 +92,39 @@ export function signalEdgesToDeltas(logPrice: Float64Array, reuse?: Float64Array
   return out;
 }
 
+/**
+ * Report which visible transform cells receive a new selected observation.
+ *
+ * `sampleTime` is parallel to the ZOH price-edge grid. A held observation may
+ * supply many edges, but it is counted only when its identity advances. This
+ * makes density describe the exact reconstruction consumed by the transform,
+ * not unrelated coarser/finer observations that happen to remain cached.
+ */
+export function usedSampleDensity(
+  sampleTime: Float64Array,
+  start: number,
+  count: number,
+  reuse?: Float64Array,
+): Float64Array {
+  if (!Number.isInteger(start) || !Number.isInteger(count) || start < 1 || count < 0) {
+    throw new Error(`usedSampleDensity: invalid window ${start}+${count}`);
+  }
+  if (start + count > sampleTime.length) {
+    throw new Error(
+      `usedSampleDensity: window ${start}..${start + count} exceeds ${sampleTime.length}`,
+    );
+  }
+  const density = reuse?.length === count ? reuse : new Float64Array(count);
+  for (let x = 0; x < count; x++) {
+    const index = start + x;
+    const current = sampleTime[index]!;
+    const previous = sampleTime[index - 1]!;
+    density[x] =
+      Number.isFinite(current) && (!Number.isFinite(previous) || current > previous) ? 1 : 0;
+  }
+  return density;
+}
+
 /** Context required for the largest scale, expressed in input cells. */
 export function kernelContext(
   mode: WaveletMode,

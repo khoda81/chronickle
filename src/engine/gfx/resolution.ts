@@ -29,7 +29,7 @@ export const StatusBar = {
 };
 
 class StatusBarImpl implements StatusBarLayer {
-  constructor(private readonly frame: Frame) {}
+  constructor(private readonly frame: Frame) { }
 
   draw(
     sampleDensity: Float64Array,
@@ -131,7 +131,7 @@ function requestLabel(segment: RequestSegment, wallNow: number): string {
     case "pending":
       return `pending ${resolution}`;
     case "retrying": {
-      const delay = formatResolution(Math.max(0, segment.retryAtMs - wallNow));
+      const delay = formatResolution(Math.floor((segment.retryAtMs - wallNow) / 1000) * 1000);
       return `retry ${resolution} in ${delay} #${segment.attempt} · ${segment.message}`;
     }
   }

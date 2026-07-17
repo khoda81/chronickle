@@ -17,9 +17,8 @@
  * across nested save/restore.
  *
  * GC discipline: the frame itself is the only per-frame allocation. L2 layers
- * are tiny bound objects (one per call). The hot path (per-pixel work in the
- * heatmap) uses a scratch buffer owned by `Plot` and passed in here, so it
- * never allocates.
+ * are tiny bound objects (one per call), while row-owned rendering resources
+ * retain the hot-path typed arrays.
  */
 
 import type { DataTransform } from "../transform.ts";
@@ -36,7 +35,6 @@ export class Frame implements Disposable {
   constructor(
     readonly ctx: CanvasRenderingContext2D,
     readonly tx: DataTransform,
-    readonly scratch: Float64Array,
     readonly dpr: number,
   ) {
     // Establish a DPR-scaled identity for this frame. Any prior caller state

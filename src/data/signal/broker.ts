@@ -13,17 +13,15 @@ import { SignalSegmentStore, type HeldSignalSegment } from "./store.ts";
 
 export interface SignalView {
   readonly value: Float64Array;
-  /** Per-bin sample count normalized to the requested cadence, clamped to [0, 1]. */
-  readonly sampleDensity: Float64Array;
+  /** Observation identity selected for each reconstructed value; NaN where unavailable. */
+  readonly sampleTime: Float64Array;
   readonly requests: readonly RequestSegment[];
-  /** Changes only when cached sample values change, never for status-only updates. */
+  /** Changes only when the selected reconstruction changes, never for status-only updates. */
   readonly sampleRevision: number;
 }
 
 export interface ReadRequest {
   readonly evalTime: Float64Array;
-  readonly maxSampleGapMs: number;
-  readonly density?: { readonly range: Interval; readonly binCount: number };
 }
 
 export interface BrokerDemand {
@@ -40,8 +38,6 @@ export interface Subscription {
 export interface BrokerOptions {
   /** The broker and its acquisition session cannot outlive this signal. */
   readonly signal: AbortSignal;
-  /** Injectable wall clock for deterministic tests. */
-  readonly now?: () => number;
   readonly onError?: (message: string, error?: unknown) => void;
   readonly onWarning?: (message: string) => void;
 }
@@ -56,18 +52,17 @@ export class Broker {
   private readonly demandSubscriptions = new Set<DemandSubscription>();
   private readonly adapterSession: AdapterSession;
   private readonly signal: AbortSignal;
-  private readonly now: () => number;
   private readonly onError: (message: string, error?: unknown) => void;
   private readonly onWarning: (message: string) => void;
   private sampleRevision = 0;
   private adapterActivities: readonly AcquisitionActivity[] = [];
+  private syncingAdapterDemands = false;
   private valueBuffer: Float64Array<ArrayBufferLike> = new Float64Array(0);
-  private densityBuffer: Float64Array<ArrayBufferLike> = new Float64Array(0);
+  private sampleTimeBuffer: Float64Array<ArrayBufferLike> = new Float64Array(0);
 
   constructor(adapter: SignalAdapter, opts: BrokerOptions) {
     this.signal = opts.signal;
     this.signal.throwIfAborted();
-    this.now = opts.now ?? Date.now;
     this.onError = opts.onError ?? ((message, error) => console.error(message, error));
     this.onWarning = opts.onWarning ?? (message => console.warn(message));
     this.adapterSession = adapter.connect(
@@ -78,7 +73,10 @@ export class Broker {
         },
         status: activities => {
           this.adapterActivities = activities;
-          this.notify();
+          // A synchronous status update caused by setDemands already belongs to
+          // the render/update flowing into the broker. Feeding it back to the
+          // same subscriber would create a demand -> status -> demand loop.
+          if (!this.syncingAdapterDemands) this.notify();
         },
         error: (error, activity) => {
           this.onError(
@@ -97,33 +95,28 @@ export class Broker {
    * it never starts requests or changes broker demand.
    */
   read(opts: ReadRequest): SignalView {
-    const { evalTime, maxSampleGapMs: maxDeltaTMs } = opts;
-    if (!(maxDeltaTMs > 0) || !Number.isFinite(maxDeltaTMs)) {
-      throw new Error(`Broker.read: invalid maxDeltaTMs ${maxDeltaTMs}`);
+    const { evalTime } = opts;
+    if (this.valueBuffer.length !== evalTime.length) {
+      this.valueBuffer = new Float64Array(evalTime.length);
+    }
+    if (this.sampleTimeBuffer.length !== evalTime.length) {
+      this.sampleTimeBuffer = new Float64Array(evalTime.length);
     }
 
     if (evalTime.length < 2) {
-      const value =
-        this.valueBuffer.length === evalTime.length
-          ? this.valueBuffer
-          : (this.valueBuffer = new Float64Array(evalTime.length));
-      value.fill(NaN);
+      this.valueBuffer.fill(NaN);
+      this.sampleTimeBuffer.fill(NaN);
       return {
-        value,
-        sampleDensity: this.readSampleDensity(opts),
+        value: this.valueBuffer,
+        sampleTime: this.sampleTimeBuffer,
         requests: [],
         sampleRevision: this.sampleRevision,
       };
     }
 
     const queryInterval = Interval.create(evalTime[0]!, evalTime[evalTime.length - 1]!);
-    const wallNow = this.now();
-    const value = this.store.sample(evalTime, wallNow, this.valueBuffer);
-    this.valueBuffer = value;
-    const requests = [
-      ...this.transientSegments(queryInterval),
-      ...this.futureSegments(queryInterval, wallNow, maxDeltaTMs),
-    ].sort(
+    this.store.sample(evalTime, this.valueBuffer, this.sampleTimeBuffer);
+    const requests = this.transientSegments(queryInterval).sort(
       (a, b) =>
         a.range.start - b.range.start ||
         requestLabelRank(b) - requestLabelRank(a) ||
@@ -131,8 +124,8 @@ export class Broker {
     );
 
     return {
-      value,
-      sampleDensity: this.readSampleDensity(opts),
+      value: this.valueBuffer,
+      sampleTime: this.sampleTimeBuffer,
       requests,
       sampleRevision: this.sampleRevision,
     };
@@ -168,7 +161,7 @@ export class Broker {
     this.store.clear();
     this.adapterActivities = [];
     this.valueBuffer = new Float64Array(0);
-    this.densityBuffer = new Float64Array(0);
+    this.sampleTimeBuffer = new Float64Array(0);
     this.adapterSession.clearCache();
     this.sampleRevision++;
     this.notify();
@@ -178,26 +171,30 @@ export class Broker {
     return this.store.timeInterval();
   }
 
-  /** Write the latest selected observation at or before `time`, clamped to now. */
+  /** Write the latest selected observation at or before `time`. */
   readPointAtOrBefore(time: number, out: MutableSample): boolean {
-    return this.store.readPointAtOrBefore(Math.min(time, this.now()), out);
+    return this.store.readPointAtOrBefore(time, out);
   }
 
   private syncAdapterDemands(): void {
-    this.adapterSession.setDemands(
-      [...this.demandSubscriptions].map(subscription => subscription.demand),
-    );
+    this.syncingAdapterDemands = true;
+    try {
+      this.adapterSession.setDemands(
+        [...this.demandSubscriptions].map(subscription => subscription.demand),
+      );
+    } finally {
+      this.syncingAdapterDemands = false;
+    }
   }
 
   private ingest(result: AdapterDelivery): boolean {
     const clipped = clipSamples(normalizeSamples(result.samples), result.searchedInterval);
     const samples = clipped.samples;
-    this.store.insertSamples(samples);
-    if (clipped.discardedFutureCount > 0) {
+    if (clipped.discardedAfterRangeCount > 0) {
       this.onWarning(
-        `[Broker] discarded ${clipped.discardedFutureCount} future point(s); ` +
+        `[Broker] discarded ${clipped.discardedAfterRangeCount} point(s) after the searched range; ` +
           `searched range ended at ${result.searchedInterval.end}, ` +
-          `latest returned timestamp was ${clipped.latestFutureT}`,
+          `latest returned timestamp was ${clipped.latestAfterRangeT}`,
       );
     }
     let changed = false;
@@ -205,8 +202,8 @@ export class Broker {
       // A sample represents its zero-order-held value for one native sample
       // period. In particular, an OHLC candle open is already known at the
       // candle boundary and remains the displayed value until the next open.
-      // Extending that final step to its expected lifetime prevents the moving
-      // wall clock from manufacturing millisecond-sized "uncovered" tails.
+      // Extending that final step to its expected lifetime prevents moving
+      // demand boundaries from manufacturing millisecond-sized uncovered tails.
       changed = this.ingestObserved(samples, result.resolutionMs);
     }
     return changed;
@@ -256,33 +253,6 @@ export class Broker {
     return out;
   }
 
-  /** Future values are unavailable by definition; a live lease is not a data state. */
-  private futureSegments(
-    range: Interval,
-    wallNow: number,
-    samplePeriodMs: number,
-  ): RequestSegment[] {
-    const start = Math.max(range.start, wallNow);
-    return start < range.end
-      ? [{ range: Interval.create(start, range.end), samplePeriodMs, state: "pending" }]
-      : [];
-  }
-
-  private readSampleDensity(opts: ReadRequest): Float64Array {
-    const density = opts.density;
-    if (density === undefined) {
-      if (this.densityBuffer.length !== 0) this.densityBuffer = new Float64Array(0);
-      return this.densityBuffer;
-    }
-    this.densityBuffer = this.store.sampleDensity(
-      density.range,
-      density.binCount,
-      opts.maxSampleGapMs,
-      this.densityBuffer,
-    );
-    return this.densityBuffer;
-  }
-
   private notify(): void {
     for (const subscription of this.demandSubscriptions) {
       try {
@@ -311,15 +281,15 @@ function requestLabelRank(segment: RequestSegment): number {
 
 interface ClippedPoints {
   readonly samples: readonly Sample[];
-  readonly discardedFutureCount: number;
-  readonly latestFutureT: number | null;
+  readonly discardedAfterRangeCount: number;
+  readonly latestAfterRangeT: number | null;
 }
 
 function clipSamples(samples: readonly Sample[], range: Interval): ClippedPoints {
   let predecessor: Sample | undefined;
   const inside: Sample[] = [];
-  let discardedFutureCount = 0;
-  let latestFutureT: number | null = null;
+  let discardedAfterRangeCount = 0;
+  let latestAfterRangeT: number | null = null;
   for (const sample of samples) {
     if (sample.t < range.start) predecessor = sample;
     // A sample exactly at `end` is valid boundary evidence: it closes the
@@ -327,13 +297,13 @@ function clipSamples(samples: readonly Sample[], range: Interval): ClippedPoints
     // coverage remains half-open independently of observation lifetimes.
     else if (sample.t <= range.end) inside.push(sample);
     else {
-      discardedFutureCount++;
-      latestFutureT = sample.t;
+      discardedAfterRangeCount++;
+      latestAfterRangeT = sample.t;
     }
   }
   return {
     samples: predecessor === undefined ? inside : [predecessor, ...inside],
-    discardedFutureCount,
-    latestFutureT,
+    discardedAfterRangeCount,
+    latestAfterRangeT,
   };
 }

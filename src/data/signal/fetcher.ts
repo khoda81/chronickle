@@ -233,12 +233,15 @@ class PollingSession implements AdapterSession {
     }
 
     this.emitStatus();
+    const futureStartMs = this.nextFutureStart(wallNow);
     if (this.live !== null) {
       const nextAtMs =
         this.live.expiresAtMs === null
           ? this.live.pollAtMs
           : Math.min(this.live.pollAtMs, this.live.expiresAtMs);
-      this.schedule(nextAtMs);
+      this.schedule(Math.min(nextAtMs, futureStartMs ?? Number.POSITIVE_INFINITY));
+    } else if (futureStartMs !== null) {
+      this.schedule(futureStartMs);
     }
   };
 
@@ -302,6 +305,9 @@ class PollingSession implements AdapterSession {
         blockers.add(Interval.intersection(this.active.work.plan.range, historical));
       }
       for (const gap of blockers.gaps(historical)) ranges.add(gap);
+
+      const future = Interval.create(Math.max(plan.range.start, wallNow), plan.range.end);
+      if (!Interval.isEmpty(future)) ranges.add(future);
     }
 
     const out: AcquisitionActivity[] = [];
@@ -309,6 +315,16 @@ class PollingSession implements AdapterSession {
       for (const range of ranges.view()) out.push({ state: "pending", range, resolutionMs });
     }
     return out;
+  }
+
+  /** Wake a future-only demand when it first becomes actionable. */
+  private nextFutureStart(wallNow: number): number | null {
+    let next: number | null = null;
+    for (const plan of this.plans) {
+      if (plan.range.start <= wallNow) continue;
+      next = next === null ? plan.range.start : Math.min(next, plan.range.start);
+    }
+    return next;
   }
 
   private coverageFor(resolutionMs: number): IntervalSet {

@@ -8,10 +8,6 @@ export const DEFAULT_SIGNAL_ROW_HEIGHT = 130;
 export const COVERAGE_BAR_HEIGHT = 16;
 /** Reference height that defines the logarithmic vertical scale spacing. */
 const HEATMAP_FIELD_HEIGHT = 640;
-/** Maximum horizontal supersampling used when viewing sub-pixel scales. */
-const MAX_SAMPLE_DENSITY = 8;
-/** Maximum horizontal decimation used when viewing very broad scales. */
-const MAX_SAMPLE_STRIDE = 64;
 /** Pointer hit target around each draggable horizontal boundary. */
 export const RESIZE_HANDLE_RADIUS = 6;
 
@@ -35,9 +31,8 @@ export interface HeatmapScaleWindow {
  *
  * At offset zero this exactly follows the old 640-row intrinsic field. Rows
  * outside that old field continue the same logarithmic progression instead of
- * becoming blank. The smallest visible scale also selects a power-of-two
- * horizontal sampling stride, keeping at least MIN_SIGMA input cells beneath
- * the finest convolution while avoiding request churn for every drag pixel.
+ * becoming blank. The horizontal grid is always exactly one cell per device
+ * pixel so the FFT input, rendered field, and status density share one axis.
  */
 export function heatmapScaleWindow(
   numDevicePx: number,
@@ -61,11 +56,7 @@ export function heatmapScaleWindow(
   const minSigmaPx = MIN_SIGMA * Math.exp(logStep * firstFieldRow);
   const maxSigmaPx = MIN_SIGMA * Math.exp(logStep * lastFieldRow);
 
-  const idealStride = minSigmaPx / MIN_SIGMA;
-  const quantizedStride = 2 ** Math.floor(Math.log2(idealStride));
-  const stride = Math.max(1 / MAX_SAMPLE_DENSITY, Math.min(MAX_SAMPLE_STRIDE, quantizedStride));
-  const sampleCellCount = Math.max(2, Math.ceil(numDevicePx / stride));
-  return { minSigmaPx, maxSigmaPx, sampleCellCount };
+  return { minSigmaPx, maxSigmaPx, sampleCellCount: Math.max(2, Math.ceil(numDevicePx)) };
 }
 
 export interface StackLayout {

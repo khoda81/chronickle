@@ -4,8 +4,8 @@
  * Owns only what must survive between frames:
  *   - the canvas (and its cached 2D context),
  *   - the current time range (the plot's persistent state),
- *   - the device pixel ratio (updated on resize),
- *   - a reusable, resizable scratch buffer for the heatmap's per-pixel work.
+ *   - the device pixel ratio (updated on resize).
+ * Heatmap rows separately own their persistent numerical and raster workspaces.
  *
  * Everything else — the transform, the frame, the data — is computed fresh
  * each frame from the arguments passed to `draw(...)`. The plot does not
@@ -30,8 +30,6 @@ export class Plot {
   private readonly ctx: CanvasRenderingContext2D;
   private timeInterval: Interval;
   private dpr = 1;
-  /** Reusable per-pixel price buffer. Grows as needed, never shrinks. */
-  private scratch: Float64Array = new Float64Array(0);
 
   constructor(opts: PlotOptions) {
     this.canvas = opts.canvas;
@@ -79,18 +77,12 @@ export class Plot {
    * Throws if the canvas has a non-positive CSS size.
    */
   beginFrame(): Frame {
-    // Ensure scratch can hold width+1 samples (heatmap per-pixel buffer).
-    const needed = Math.ceil(this.cssWidth) + 1;
-    if (this.scratch.length < needed) {
-      this.scratch = new Float64Array(needed);
-    }
-
     const tx = new DataTransform(
       this.timeInterval,
       Interval.create(0, this.cssWidth),
       Interval.create(0, this.cssHeight),
     );
 
-    return new Frame(this.ctx, tx, this.scratch, this.dpr);
+    return new Frame(this.ctx, tx, this.dpr);
   }
 }

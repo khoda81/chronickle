@@ -4,10 +4,12 @@ import { RAMP_RESOLUTION, rampLut, rampIndex, type PaletteName } from "../ramp.t
 import {
   computeWaveletField,
   signalEdgesToDeltas,
+  usedSampleDensity,
   WaveletWorkspace,
   type WaveletMode,
   type WaveletWindow,
 } from "../wavelet.ts";
+import { SignalView } from "../../data/index.ts";
 
 /**
  * Uniform time-cell grid passed to the transform.
@@ -18,12 +20,10 @@ import {
  */
 export interface PaddedEval {
   readonly evalTime: Float64Array;
-  readonly value: Float64Array;
+  readonly view: SignalView;
   readonly padLeft: number;
   readonly padRight: number;
   readonly visibleCells: number;
-  /** Broker cache revision, used to avoid recomputation on hover-only draws. */
-  readonly revision: number;
 }
 
 export interface HeatmapLayer {
@@ -35,7 +35,7 @@ export interface HeatmapLayer {
     viewportHeight: number,
     scaleInterval: Interval,
     palette: PaletteName,
-  ): void;
+  ): Float64Array;
   drawFadeOverlay(y: number, heatHeight: number): void;
 }
 
@@ -43,6 +43,7 @@ interface HeatmapResources {
   readonly offscreen: OffscreenCanvas;
   readonly offCtx: OffscreenCanvasRenderingContext2D;
   returns: Float64Array;
+  density: Float64Array;
   scalesMs: Float64Array;
   imageData: ImageData | null;
   imagePixels: Uint32Array | null;
@@ -56,6 +57,7 @@ interface HeatmapResources {
 // interpolate values before the sigmoid. The transform count also shrinks when
 // a row is vertically compacted.
 const MAX_TRANSFORM_BANDS = 32;
+const EMPTY_DENSITY = new Float64Array(0);
 
 const SIGMOID_MIN = -18;
 const SIGMOID_MAX = 18;
@@ -83,7 +85,7 @@ class HeatmapImpl implements HeatmapLayer {
   constructor(
     private readonly frame: Frame,
     private readonly resources: HeatmapResources,
-  ) {}
+  ) { }
 
   drawWaveletField(
     padded: PaddedEval,
@@ -93,18 +95,23 @@ class HeatmapImpl implements HeatmapLayer {
     viewportHeight: number,
     scaleInterval: Interval,
     palette: PaletteName,
-  ): void {
+  ): Float64Array {
     const { tx, ctx } = this.frame;
     const width = tx.screenDomain.end - tx.screenDomain.start;
+    // Time maximizes physical-pixel density; scale remains CSS-pixel geometry
+    // and is enlarged by the frame's DPR transform with the rest of the UI.
     const bandCount = Math.max(2, Math.ceil(viewportHeight));
     const transformBandCount = Math.min(bandCount, MAX_TRANSFORM_BANDS);
-    if (!(width > 0) || !(viewportHeight > 0)) return;
+    if (!(width > 0) || !(viewportHeight > 0)) return EMPTY_DENSITY;
 
-    const { evalTime, value, padLeft, padRight, visibleCells } = padded;
-    if (evalTime.length !== value.length) {
-      throw new Error(`drawWaveletField: length mismatch (${evalTime.length} vs ${value.length})`);
+    const { evalTime, view, padLeft, padRight, visibleCells } = padded;
+    const { value, sampleTime } = view;
+    if (evalTime.length !== value.length || value.length !== sampleTime.length) {
+      throw new Error(
+        `drawWaveletField: length mismatch (${evalTime.length}/${value.length}/${sampleTime.length})`,
+      );
     }
-    if (value.length < 2) return;
+    if (value.length < 2) return EMPTY_DENSITY;
     const cellCount = value.length - 1;
     if (
       !Number.isInteger(padLeft) ||
@@ -130,7 +137,7 @@ class HeatmapImpl implements HeatmapLayer {
 
     const resources = this.resources;
     const renderKey = [
-      padded.revision,
+      padded.view.sampleRevision,
       evalTime[0],
       stepMs,
       visibleCells,
@@ -145,9 +152,10 @@ class HeatmapImpl implements HeatmapLayer {
     ].join("|");
     if (resources.lastRenderKey === renderKey) {
       drawField(ctx, resources.offscreen, tx.screenDomain.start, y, width, viewportHeight);
-      return;
+      return resources.density;
     }
     resources.returns = signalEdgesToDeltas(value, resources.returns);
+    resources.density = usedSampleDensity(sampleTime, padLeft, visibleCells, resources.density);
 
     if (resources.scalesMs.length !== transformBandCount) {
       resources.scalesMs = new Float64Array(transformBandCount);
@@ -211,6 +219,7 @@ class HeatmapImpl implements HeatmapLayer {
     resources.offCtx.putImageData(resources.imageData!, 0, 0);
     resources.lastRenderKey = renderKey;
     drawField(ctx, resources.offscreen, tx.screenDomain.start, y, width, viewportHeight);
+    return resources.density;
   }
 
   drawFadeOverlay(y: number, heatHeight: number): void {
@@ -239,6 +248,7 @@ function resourcesFor(ctx: CanvasRenderingContext2D, rowId: string): HeatmapReso
     offscreen,
     offCtx,
     returns: new Float64Array(0),
+    density: new Float64Array(0),
     scalesMs: new Float64Array(0),
     imageData: null,
     imagePixels: null,

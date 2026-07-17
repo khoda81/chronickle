@@ -16,6 +16,7 @@ import {
 import { logPriceSamples } from "../src/data/signal/market/price.ts";
 import {
   createPollingSignalSource,
+  type AcquisitionActivity,
   type AdapterBatch,
   type SignalAdapter,
 } from "../src/data/signal/fetcher.ts";
@@ -39,6 +40,7 @@ import {
   computeWaveletField,
   kernelContext,
   signalEdgesToDeltas,
+  usedSampleDensity,
 } from "../src/engine/wavelet.ts";
 
 type Test = { readonly name: string; readonly run: () => void | Promise<void> };
@@ -103,14 +105,25 @@ interface Fetcher {
 
 const brokers = new Set<Broker>();
 
+interface TestBrokerOptions extends Omit<BrokerOptions, "signal"> {
+  /** Test adapter clock; the broker itself is deliberately clock-free. */
+  readonly now?: () => number;
+}
+
+interface QueryRequest extends ReadRequest {
+  /** Compatibility helper turns this into subscription demand before reading. */
+  readonly maxSampleGapMs: number;
+}
+
 class Broker extends PriceBroker {
   private compatibilitySubscription: Subscription | null = null;
   private readonly lifetime: AbortController;
 
-  constructor(source: Fetcher | SignalAdapter, opts: Omit<BrokerOptions, "signal"> = {}) {
+  constructor(source: Fetcher | SignalAdapter, opts: TestBrokerOptions = {}) {
     const lifetime = new AbortController();
-    super(isAdapter(source) ? source : adaptFetcher(source, opts.now ?? Date.now), {
-      ...opts,
+    const { now = Date.now, ...brokerOptions } = opts;
+    super(isAdapter(source) ? source : adaptFetcher(source, now), {
+      ...brokerOptions,
       signal: lifetime.signal,
     });
     this.lifetime = lifetime;
@@ -125,7 +138,7 @@ class Broker extends PriceBroker {
     return super.subscribe(demand, fn, signal);
   }
 
-  query(opts: ReadRequest): SignalView {
+  query(opts: QueryRequest): SignalView {
     if (opts.evalTime.length >= 2) {
       const demand = {
         range: Interval.create(opts.evalTime[0]!, opts.evalTime[opts.evalTime.length - 1]!),
@@ -137,7 +150,7 @@ class Broker extends PriceBroker {
         this.compatibilitySubscription.update(demand);
       }
     }
-    return this.read(opts);
+    return this.read({ evalTime: opts.evalTime });
   }
 
   close(): void {
@@ -687,20 +700,15 @@ test("stack layout fills the canvas and preserves every resizable row", () => {
   );
 });
 
-test("vertical heatmap pan selects scale-aware sampling density", () => {
+test("vertical heatmap pan preserves a device-pixel time grid", () => {
   const neutral = heatmapScaleWindow(2_000, 220, 0);
   const finer = heatmapScaleWindow(2_000, 220, 480);
   const coarser = heatmapScaleWindow(2_000, 220, -480);
   assert(finer.minSigmaPx < neutral.minSigmaPx, "downward pan did not expose finer scales");
   assert(coarser.minSigmaPx > neutral.minSigmaPx, "upward pan did not expose coarser scales");
-  assert(
-    finer.sampleCellCount > neutral.sampleCellCount,
-    "fine scales did not request denser time samples",
-  );
-  assert(
-    coarser.sampleCellCount < neutral.sampleCellCount,
-    "coarse scales did not reduce time samples",
-  );
+  assert(neutral.sampleCellCount === 2_000, "neutral grid was not device-pixel aligned");
+  assert(finer.sampleCellCount === 2_000, "fine scale changed the device-pixel grid");
+  assert(coarser.sampleCellCount === 2_000, "coarse scale changed the device-pixel grid");
   assert(
     neutral.maxSigmaPx > neutral.minSigmaPx,
     "visible heatmap range did not cover multiple convolution scales",
@@ -783,13 +791,19 @@ test("event hover selects the last visible event at or before the pointer", () =
 test("signal segment store returns NaN outside coverage and holds ZOH values", () => {
   const evalTime = new Float64Array([0, 10, 15, 20]);
   const store = new SignalSegmentStore();
-  const empty = store.sample(evalTime, 20);
+  const empty = store.sample(evalTime);
   assert(empty.every(Number.isNaN), "empty store did not return NaN");
 
   store.insertBatch([heldSegment(5, 15, 5, 1, 10), heldSegment(15, 25, 15, 2, 10)]);
-  const sampled = store.sample(evalTime, 20);
+  const sampleTime = new Float64Array(evalTime.length);
+  const sampled = store.sample(evalTime, undefined, sampleTime);
   assert(Number.isNaN(sampled[0]!), "value before first observation was defined");
   assert(sampled[1] === 1 && sampled[2] === 2 && sampled[3] === 2, "ZOH evaluation is incorrect");
+  assert(Number.isNaN(sampleTime[0]!), "missing value received an observation identity");
+  assert(
+    sampleTime[1] === 5 && sampleTime[2] === 15 && sampleTime[3] === 15,
+    "sample grid lost selected observation identity",
+  );
 
   const selected = { t: Number.NaN, value: Number.NaN };
   assert(!store.readPointAtOrBefore(4, selected), "predecessor lookup invented a leading value");
@@ -801,23 +815,25 @@ test("signal segment store returns NaN outside coverage and holds ZOH values", (
   assertPoint(selected, 15, 2, "held value lost its observation timestamp");
 });
 
-test("sample density measures observations rather than reconstructed holds", () => {
+test("wavelet density measures selected observations rather than reconstructed holds", () => {
   const store = new SignalSegmentStore();
-  store.insertSamples([
-    { t: 0, value: 1 },
-    { t: 2_000, value: 2 },
+  store.insertBatch([
+    heldSegment(0, 2_000, 0, 1, 1_000),
+    heldSegment(2_000, 10_000, 2_000, 2, 1_000),
   ]);
-  store.insertBatch([heldSegment(0, 10_000, 0, 1, 1_000)]);
-  const density = store.sampleDensity(Interval.create(0, 10_000), 10, 1_000);
-  assert(density[0] === 1 && density[2] === 1, "observed bins were not full");
-  assert(density[1] === 0 && density.slice(3).every(value => value === 0), "hold invented samples");
+  const evalTime = new Float64Array([0, 1_000, 2_000, 3_000, 4_000]);
+  const sampleTime = new Float64Array(evalTime.length);
+  store.sample(evalTime, undefined, sampleTime);
+  const density = usedSampleDensity(sampleTime, 1, 4);
+  assert(density[0] === 0 && density[1] === 1, "selected observation was misplaced");
+  assert(density[2] === 0 && density[3] === 0, "reconstructed hold invented observations");
 });
 
 test("segment coverage is half-open while predecessor lookup keeps the observation", () => {
   const store = new SignalSegmentStore();
   store.insertBatch([heldSegment(5, 15, 5, 1, 10)]);
   assert(
-    Number.isNaN(store.sample(new Float64Array([15]), 15)[0]!),
+    Number.isNaN(store.sample(new Float64Array([15]))[0]!),
     "segment end leaked into coverage",
   );
 
@@ -886,7 +902,7 @@ test("broker read is side-effect-free and viewport subscriptions drive fetching"
   broker.close();
 });
 
-test("broker density exposes irregular observation spacing", async () => {
+test("broker render grid exposes irregular selected observation spacing", async () => {
   const adapter = createPollingSignalSource({
     now: () => 20_000,
     resolve: () => 1_000,
@@ -904,13 +920,10 @@ test("broker density exposes irregular observation spacing", async () => {
   broker.subscribe({ range: Interval.create(0, 10_000), maxDeltaTMs: 5_000 }, () => undefined);
   await new Promise(resolve => setTimeout(resolve, 0));
 
-  const result = broker.read({
-    evalTime: new Float64Array([0, 5_000, 10_000]),
-    maxSampleGapMs: 1_000,
-    density: { range: Interval.create(0, 10_000), binCount: 10 },
-  });
+  const result = broker.read({ evalTime: new Float64Array([0, 5_000, 10_000]) });
+  const density = usedSampleDensity(result.sampleTime, 1, 2);
   assert(
-    result.sampleDensity[0] === 1 && result.sampleDensity.slice(1).every(value => value === 0),
+    density[0] === 0 && density[1] === 1,
     "irregular gap was hidden by reconstructed or searched coverage",
   );
 });
@@ -970,7 +983,7 @@ test("aborting a broker subscription removes its adapter demand", () => {
   brokerLifetime.abort();
 });
 
-test("future coverage remains pending while request status does not invalidate samples", () => {
+test("broker forwards adapter status without interpreting future time", () => {
   let sink: Parameters<SignalAdapter["connect"]>[0] | null = null;
   const adapter: SignalAdapter = {
     connect(nextSink) {
@@ -978,21 +991,21 @@ test("future coverage remains pending while request status does not invalidate s
       return { setDemands: () => undefined, clearCache: () => undefined };
     },
   };
-  const broker = new Broker(adapter, { now: () => 100 });
-  const request = { evalTime: new Float64Array([50, 100, 150]), maxSampleGapMs: 10 };
-  const pending = broker.read(request);
-  assert(
-    pending.requests.some(segment => segment.state === "pending" && segment.range.start === 100),
-    "visible future was not marked pending",
-  );
-  const initialRevision = pending.sampleRevision;
+  const broker = new Broker(adapter);
+  const evalTime = new Float64Array([50, 100, 150]);
+  const initial = broker.read({ evalTime });
+  assert(initial.requests.length === 0, "broker invented request status without adapter evidence");
+  const initialRevision = initial.sampleRevision;
   const connectedSink = sink as unknown as Parameters<SignalAdapter["connect"]>[0];
-  connectedSink.status([{ state: "pending", range: Interval.create(90, 100), resolutionMs: 10 }]);
-  const fetching = broker.read(request);
-  assert(fetching.sampleRevision === initialRevision, "status-only update invalidated samples");
+  connectedSink.status([{ state: "pending", range: Interval.create(100, 150), resolutionMs: 10 }]);
+  const pending = broker.read({ evalTime });
+  assert(pending.sampleRevision === initialRevision, "status-only update invalidated samples");
   assert(
-    fetching.requests.some(segment => segment.state === "pending" && segment.range.start === 100),
-    "visible future stopped being pending during a fetch",
+    pending.requests.some(
+      segment =>
+        segment.state === "pending" && segment.range.start === 100 && segment.range.end === 150,
+    ),
+    "broker did not forward the adapter's future status",
   );
   const delivery = {
     samples: [
@@ -1003,14 +1016,40 @@ test("future coverage remains pending while request status does not invalidate s
     resolutionMs: 10,
   };
   connectedSink.next(delivery);
-  const loadedRevision = broker.read(request).sampleRevision;
+  const loadedRevision = broker.read({ evalTime }).sampleRevision;
   assert(loadedRevision === initialRevision + 1, "sample delivery did not advance revision");
   connectedSink.next(delivery);
   assert(
-    broker.read(request).sampleRevision === loadedRevision,
+    broker.read({ evalTime }).sampleRevision === loadedRevision,
     "identical redelivery invalidated cached samples",
   );
   broker.close();
+});
+
+test("broker can select an observation beyond wall time when the adapter delivered it", () => {
+  let sink: Parameters<SignalAdapter["connect"]>[0] | null = null;
+  const adapter: SignalAdapter = {
+    connect(nextSink) {
+      sink = nextSink;
+      return { setDemands: () => undefined, clearCache: () => undefined };
+    },
+  };
+  const lifetime = new AbortController();
+  const broker = new PriceBroker(adapter, { signal: lifetime.signal });
+  const connectedSink = sink as unknown as Parameters<SignalAdapter["connect"]>[0];
+  connectedSink.next({
+    samples: [{ t: 150, value: 3 }],
+    searchedInterval: Interval.create(100, 200),
+    resolutionMs: 25,
+  });
+
+  const point = { t: Number.NaN, value: Number.NaN };
+  assert(broker.readPointAtOrBefore(175, point), "delivered observation was not selectable");
+  assertPoint(point, 150, 3, "broker applied an implicit evaluation horizon");
+  const view = broker.read({ evalTime: new Float64Array([150, 174]) });
+  assert(view.value[0] === 3 && view.value[1] === 3, "future-dated reconstruction was hidden");
+  assert(view.sampleTime[0] === 150 && view.sampleTime[1] === 150, "observation identity was lost");
+  lifetime.abort();
 });
 
 test("an empty signal segment store has no invalid cached range", () => {
@@ -1023,7 +1062,7 @@ test("finer signal segments replace coarse history and reject late coarse overwr
   store.insertBatch([heldSegment(0, 20, 0, 1, 20)]);
   store.insertBatch([heldSegment(5, 15, 5, 10, 10), heldSegment(15, 25, 15, 11, 10)]);
   store.insertBatch([heldSegment(0, 20, 0, -1, 30)]);
-  const sampled = store.sample(new Float64Array([2, 7, 15, 18, 24]), 25);
+  const sampled = store.sample(new Float64Array([2, 7, 15, 18, 24]));
   assert(sampled[0] === 1, "late coarse response overwrote leading history");
   assert(sampled[1] === 10, "fine history was not selected");
   assert(sampled[2] === 11, "new fine observation did not own its boundary");
@@ -1269,12 +1308,12 @@ test("follow-now demand updates keep one live lease and do not feed notification
     notifications === settledNotifications,
     `follow updates fed ${notifications - settledNotifications} status notifications back`,
   );
-  const status = broker.read({ evalTime: new Float64Array([0, now]), maxSampleGapMs: 1_000 });
+  const status = broker.read({ evalTime: new Float64Array([0, now]) });
   assert(status.requests.length === 0, "settled live lease was still presented as pending");
   broker.close();
 });
 
-test("a completed empty search leaves zero sample density", async () => {
+test("a completed empty search leaves no selected observations", async () => {
   let calls = 0;
   const adapter = createPollingSignalSource({
     now: () => 10_000,
@@ -1292,16 +1331,9 @@ test("a completed empty search leaves zero sample density", async () => {
   await new Promise(resolve => setTimeout(resolve, 0));
 
   subscription.update({ range: Interval.create(0, 5_000), maxDeltaTMs: 1_500 });
-  const view = broker.read({
-    evalTime: new Float64Array([0, 2_500, 5_000]),
-    maxSampleGapMs: 1_500,
-    density: { range: Interval.create(0, 5_000), binCount: 5 },
-  });
+  const view = broker.read({ evalTime: new Float64Array([0, 2_500, 5_000]) });
   assert(calls === 1, "native fine coverage was refetched for a nearby zoom level");
-  assert(
-    view.sampleDensity.every(value => value === 0),
-    "empty search invented data availability",
-  );
+  assert(view.sampleTime.every(Number.isNaN), "empty search invented data availability");
   broker.close();
 });
 
@@ -1374,6 +1406,36 @@ test("a demand ending at wall now remains historical", () => {
   lifetime.abort();
 });
 
+test("adapter presents future-only demand as pending", () => {
+  const activities: AcquisitionActivity[] = [];
+  const lifetime = new AbortController();
+  const adapter = createPollingSignalSource({
+    now: () => 10_000,
+    resolve: () => 1_000,
+    fetchInterval: () => Promise.resolve({ samples: [], searchedInterval: Interval.empty(0) }),
+  });
+  const session = adapter.connect(
+    {
+      next: () => undefined,
+      status: next => activities.splice(0, activities.length, ...next),
+      error: () => undefined,
+    },
+    lifetime.signal,
+  );
+
+  session.setDemands([{ range: Interval.create(15_000, 20_000), maxDeltaTMs: 1_000 }]);
+  assert(
+    activities.some(
+      activity =>
+        activity.state === "pending" &&
+        activity.range.start === 15_000 &&
+        activity.range.end === 20_000,
+    ),
+    "adapter did not translate future demand into pending status",
+  );
+  lifetime.abort();
+});
+
 test("adapter keeps a live lease warm for its configured grace period", async () => {
   let now = 10_000;
   let calls = 0;
@@ -1408,7 +1470,7 @@ test("adapter keeps a live lease warm for its configured grace period", async ()
   lifetime.abort();
 });
 
-test("returned future points are discarded while the last valid sample is held", async () => {
+test("points after the adapter's searched range are discarded with a warning", async () => {
   const warnings: string[] = [];
   const fetcher: Fetcher = {
     async fetchInterval({ range }) {
@@ -1416,7 +1478,7 @@ test("returned future points are discarded while the last valid sample is held",
         points: [
           { t: 0, price: 10 },
           { t: 5_000, price: 11 },
-          { t: 10_000, price: 12 }, // invalid future timestamp for this request
+          { t: 10_000, price: 12 }, // outside this delivery's declared searched range
         ],
         searchedInterval: range,
       };
@@ -1429,53 +1491,39 @@ test("returned future points are discarded while the last valid sample is held",
   const evalTime = new Float64Array([0, 5_000, 10_000]);
   broker.query({ evalTime, maxSampleGapMs: 5_000 });
   await new Promise(resolve => setTimeout(resolve, 0));
-  const result = broker.query({
-    evalTime,
-    maxSampleGapMs: 5_000,
-    density: { range: Interval.create(0, 10_000), binCount: 2 },
-  });
-  assert(
-    result.sampleDensity.every(value => value >= 0 && value <= 1),
-    "density was invalid",
-  );
-  assert(Number.isNaN(result.value[2]!), "future value was rendered");
+  const result = broker.query({ evalTime, maxSampleGapMs: 5_000 });
+  assert(Number.isNaN(result.sampleTime[2]!), "out-of-range observation entered the render grid");
+  assert(Number.isNaN(result.value[2]!), "out-of-range value was rendered");
   const latest = { t: Number.NaN, value: Number.NaN };
   assert(broker.readPointAtOrBefore(10_000, latest), "latest cached observation was missing");
-  assert(latest.t === 5_000, "future clamp selected the wrong timestamp");
+  assert(latest.t === 5_000, "range clipping selected the wrong timestamp");
   approx(Math.exp(latest.value), 11, 1e-12);
   assert(
     warnings.some(message => message.includes("10000")),
-    "future API point was silent",
+    "out-of-range API point was silent",
   );
 });
 
-test("sample density scales across timestamp block boundaries", () => {
+test("wavelet density ignores cached observations not selected for rendering", () => {
   const store = new SignalSegmentStore();
-  store.insertSamples(
-    Array.from({ length: 2_048 }, (_, index) => ({ t: index * 1_000, value: index })),
-  );
-  const density = store.sampleDensity(Interval.create(0, 2_048_000), 4, 1_000);
-  assert(
-    density.every(value => value === 1),
-    "full timestamp blocks were miscounted",
-  );
+  store.insertBatch([heldSegment(0, 100, 0, 1, 100)]);
+  store.insertBatch([heldSegment(20, 40, 20, 2, 20), heldSegment(40, 60, 40, 3, 20)]);
+  const evalTime = new Float64Array([0, 20, 40, 60, 80]);
+  const sampleTime = new Float64Array(evalTime.length);
+  store.sample(evalTime, undefined, sampleTime);
+  const density = usedSampleDensity(sampleTime, 1, 4);
+  assert(density[0] === 1 && density[1] === 1, "selected fine observations were missing");
+  assert(density[2] === 0, "resumed older coarse evidence became a new observation");
+  assert(density[3] === 0, "unused cached evidence leaked into density");
 });
 
-test("sample density exposes gaps and fractional sufficiency", () => {
-  const store = new SignalSegmentStore();
-  store.insertSamples([
-    { t: 0, value: 0 },
-    { t: 1_000, value: 1 },
-    { t: 4_000, value: 4 },
-  ]);
-  const density = store.sampleDensity(Interval.create(0, 6_000), 3, 1_000);
-  assert(density[0] === 1, "sufficient bin was not saturated");
-  assert(density[1] === 0, "gap was hidden");
-  assert(density[2] === 0.5, "partially sufficient bin lost its magnitude");
-
-  store.insertSamples([{ t: 4_000, value: 99 }]);
-  const deduplicated = store.sampleDensity(Interval.create(4_000, 6_000), 1, 1_000);
-  assert(deduplicated[0] === 0.5, "duplicate timestamp was counted twice");
+test("wavelet density exposes holds, gaps, and resumed observations", () => {
+  const density = usedSampleDensity(new Float64Array([NaN, 0, 0, NaN, 4, 4]), 1, 5);
+  assert(density[0] === 1, "first available observation was missing");
+  assert(density[1] === 0, "held observation was counted twice");
+  assert(density[2] === 0, "unavailable edge invented an observation");
+  assert(density[3] === 1, "observation after a gap was missing");
+  assert(density[4] === 0, "resumed hold was counted twice");
 });
 
 test("IntervalSet preserves many chronological fragments without full-list rebuilds", () => {
@@ -1510,18 +1558,15 @@ test("searched market closures do not create an intermediate-zoom fetch storm", 
     },
   };
   const broker = new Broker(fetcher, { now: () => 11_000 });
-  const evalTime = new Float64Array([0, 5_500, 11_000]);
+  const evalTime = Float64Array.from({ length: 12 }, (_, index) => index * 1_000);
   broker.query({ evalTime, maxSampleGapMs: 1_001.25 });
   await new Promise(resolve => setTimeout(resolve, 0));
 
-  const intermediate = broker.query({
-    evalTime,
-    maxSampleGapMs: 5_432.1,
-    density: { range: Interval.create(0, 11_000), binCount: 11 },
-  });
+  const intermediate = broker.query({ evalTime, maxSampleGapMs: 5_432.1 });
   assert(calls === 1, `market closure triggered ${calls - 1} redundant request(s)`);
+  const density = usedSampleDensity(intermediate.sampleTime, 1, 11);
   assert(
-    intermediate.sampleDensity.slice(3, 10).every(value => value === 0),
+    density.slice(2, 9).every(value => value === 0),
     "market closure was hidden by reconstructed data",
   );
   broker.close();
