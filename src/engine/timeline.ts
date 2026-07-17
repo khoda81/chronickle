@@ -16,12 +16,22 @@ import type { PaletteName } from "./ramp.ts";
 import { kernelContext, type WaveletMode } from "./wavelet.ts";
 import { DEFAULT_MIN_TICK_PX } from "./gfx/axis.ts";
 import type { Frame } from "./gfx/context.ts";
-import { fitStackLayout, MIN_NEWS_HEIGHT, RESIZE_HANDLE_RADIUS, COVERAGE_BAR_HEIGHT, heatmapScaleWindow } from "./gfx/layout.ts";
+import {
+  fitStackLayout,
+  MIN_NEWS_HEIGHT,
+  RESIZE_HANDLE_RADIUS,
+  COVERAGE_BAR_HEIGHT,
+  heatmapScaleWindow,
+} from "./gfx/layout.ts";
 import { BrokerDemand } from "../data/index.ts";
 
 export type DataReader = (request: ReadRequest) => SignalView;
 export type SampleAtReader = (time: number, out: MutableSample) => boolean;
-export type DataSubscriber = (demand: BrokerDemand, onChange: () => void, signal: AbortSignal) => Subscription;
+export type DataSubscriber = (
+  demand: BrokerDemand,
+  onChange: () => void,
+  signal: AbortSignal,
+) => Subscription;
 export type EventSource = (range: Interval) => EventQueryResult;
 
 export interface SignalRow {
@@ -230,8 +240,16 @@ export class Timeline {
           currentCenterX,
           previousDistance,
           currentDistance,
-        ) => this.pinchTime(viewportWidth, previousCenterX, currentCenterX, previousDistance, currentDistance),
-        wheel: (point, deltaX, deltaY, shiftKey) => this.onGestureWheel(point, deltaX, deltaY, shiftKey),
+        ) =>
+          this.pinchTime(
+            viewportWidth,
+            previousCenterX,
+            currentCenterX,
+            previousDistance,
+            currentDistance,
+          ),
+        wheel: (point, deltaX, deltaY, shiftKey) =>
+          this.onGestureWheel(point, deltaX, deltaY, shiftKey),
         hoverMoved: (point, pointerInside) => this.onGestureHoverMove(point, pointerInside),
         pointerLeft: () => this.onGesturePointerLeave(),
         tap: point => this.onGestureTap(point),
@@ -476,21 +494,18 @@ export class Timeline {
 
     let rowY = this.state.newsHeight;
     let hasVisibleRetry = false;
-    const densityBinCount = Math.ceil(width);
     for (let index = 0; index < this.rows.length; index++) {
       const runtime = this.rows[index]!;
       const { row, height: rowHeight, waveletMode } = runtime;
-      this.overlay?.setRowTop(row.id, rowY);
+      this.overlay?.setRowTop(row.id, rowY + COVERAGE_BAR_HEIGHT);
       const activeBoundary = this.gestures.activeBoundary;
       const rowTouchesActiveBoundary =
         activeBoundary === 0
           ? index === 0
           : activeBoundary !== null && (index === activeBoundary - 1 || index === activeBoundary);
+      const collapseProgressRaw = 1 - (rowHeight - ROW_REMOVE_THRESHOLD) / ROW_COLLAPSE_HINT_HEIGHT;
       const collapseProgress = rowTouchesActiveBoundary
-        ? Math.max(
-          0,
-          Math.min(1, 1 - (rowHeight - ROW_REMOVE_THRESHOLD) / ROW_COLLAPSE_HINT_HEIGHT),
-        )
+        ? Math.max(0, Math.min(1, collapseProgressRaw))
         : 0;
       this.overlay?.setRowCollapseProgress(row.id, collapseProgress);
       if (rowHeight <= COVERAGE_BAR_HEIGHT + 2) {
@@ -527,8 +542,9 @@ export class Timeline {
       const result = row.read({
         evalTime: evalView,
         maxSampleGapMs: gridStepMs,
-        density: { range: timeInterval, binCount: densityBinCount },
+        density: { range: timeInterval, binCount: numDevicePx },
       });
+
       frame
         .heatmap(row.id)
         .drawWaveletField(
@@ -547,9 +563,11 @@ export class Timeline {
           scaleInterval,
           runtime.palette,
         );
+
       hasVisibleRetry =
         frame.statusBar().draw(result.sampleDensity, result.requests, rowY, wallNow) ||
         hasVisibleRetry;
+
       rowY += rowHeight;
       frame.fillRectPx(0, rowY - 1, width, 1, "rgba(255,255,255,0.18)");
     }

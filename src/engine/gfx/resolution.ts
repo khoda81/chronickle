@@ -4,6 +4,7 @@ import { COVERAGE_BAR_HEIGHT } from "./layout.ts";
 
 const QUALITY_STEPS = 256;
 const FONT = "9px ui-monospace, monospace";
+/** Vertical height in CSS pixels; density bins themselves are one device pixel wide. */
 const DATA_HEIGHT = 4;
 const REQUEST_HEIGHT = COVERAGE_BAR_HEIGHT - DATA_HEIGHT;
 const LIGHT_TEXT = "#f3f8fc";
@@ -37,20 +38,26 @@ class StatusBarImpl implements StatusBarLayer {
     wallNow: number,
   ): boolean {
     const { frame } = this;
-    const width = Math.ceil(frame.width);
-    if (width <= 0) return false;
-    if (sampleDensity.length !== width) {
+    const deviceWidth = Math.round(frame.width * frame.dpr);
+    if (deviceWidth <= 0) return false;
+    if (sampleDensity.length !== deviceWidth) {
       throw new Error(
-        `StatusBar.draw: density width ${sampleDensity.length} does not match ${width}`,
+        `StatusBar.draw: density width ${sampleDensity.length} does not match ${deviceWidth}`,
       );
     }
 
     let runStart = 0;
     let runIndex = qualityIndex(sampleDensity[0]!);
-    for (let x = 1; x <= width; x++) {
-      const nextIndex = x < width ? qualityIndex(sampleDensity[x]!) : -1;
+    for (let x = 1; x <= deviceWidth; x++) {
+      const nextIndex = x < deviceWidth ? qualityIndex(sampleDensity[x]!) : -1;
       if (nextIndex === runIndex) continue;
-      frame.fillRectPx(runStart, y, x - runStart, DATA_HEIGHT, QUALITY_PALETTE.colors[runIndex]!);
+      frame.fillRectPx(
+        runStart / frame.dpr,
+        y,
+        (x - runStart) / frame.dpr,
+        DATA_HEIGHT,
+        QUALITY_PALETTE.colors[runIndex]!,
+      );
       runStart = x;
       runIndex = nextIndex;
     }

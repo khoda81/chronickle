@@ -16,7 +16,7 @@ prices and converts them to log-price samples before crossing this boundary.
   exchange/API wire format but not the broker or renderer.
 - `SignalSegmentStore` retains the finest reconstruction evidence for each cached
   interval, indexes unique observations, and evaluates both the signal and
-  screen-bin sample density.
+  device-pixel-bin sample density.
 
 ## Core contracts
 
