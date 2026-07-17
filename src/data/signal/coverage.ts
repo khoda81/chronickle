@@ -1,14 +1,19 @@
 import { Interval, IntervalSet } from "../../core/interval.ts";
 
-export type CoverageState = "ready" | "empty" | "pending" | "watching" | "failed";
-
-export interface CoverageSegment {
+interface CoverageSegmentBase {
   readonly range: Interval;
   readonly samplePeriodMs: number;
-  readonly state: CoverageState;
-  readonly message?: string;
-  readonly retryAtMs?: number;
 }
+
+export type CoverageSegment =
+  | (CoverageSegmentBase & { readonly state: "ready" | "empty" | "pending" | "watching" })
+  | (CoverageSegmentBase & {
+      readonly state: "failed";
+      readonly message: string;
+      readonly retryAtMs: number;
+    });
+
+export type CoverageState = CoverageSegment["state"];
 
 /** Request-quality-local evidence that an adapter definitively searched a range. */
 export class SettledCoverageIndex {

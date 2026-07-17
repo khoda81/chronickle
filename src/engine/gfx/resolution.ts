@@ -136,9 +136,7 @@ function segmentLabel(segment: CoverageSegment): string {
     case "watching":
       return `live ${formatResolution(segment.samplePeriodMs)}`;
     case "failed":
-      return segment.message === undefined
-        ? `error ${formatResolution(segment.samplePeriodMs)}`
-        : `error · ${segment.message}`;
+      return `error · ${segment.message}`;
   }
 }
 

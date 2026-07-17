@@ -66,6 +66,12 @@ interface RowElements {
   readonly tooltip: HTMLDivElement;
 }
 
+interface StaticElements {
+  readonly nowLine: HTMLDivElement;
+  readonly hoverLine: HTMLDivElement;
+  readonly timeHover: HTMLDivElement;
+}
+
 const HOVER_TIME_FORMAT = new Intl.DateTimeFormat(undefined, {
   month: "short",
   day: "numeric",
@@ -82,9 +88,7 @@ const HOVER_TIME_FORMAT = new Intl.DateTimeFormat(undefined, {
  * reactive snapshots on the render hot path.
  */
 export class TimelineOverlayController implements TimelineOverlaySink {
-  private nowLine: HTMLDivElement | null = null;
-  private hoverLine: HTMLDivElement | null = null;
-  private timeHover: HTMLDivElement | null = null;
+  private staticElements: StaticElements | null = null;
   private eventTooltip: HTMLDivElement | null = null;
   private eventTooltipVisible = false;
   private readonly eventTooltipAnchor: MutableCanvasPoint = { x: 0, y: 0 };
@@ -100,15 +104,11 @@ export class TimelineOverlayController implements TimelineOverlaySink {
     hoverLine: HTMLDivElement,
     timeHover: HTMLDivElement,
   ): void {
-    this.nowLine = nowLine;
-    this.hoverLine = hoverLine;
-    this.timeHover = timeHover;
+    this.staticElements = { nowLine, hoverLine, timeHover };
   }
 
   detachStaticElements(): void {
-    this.nowLine = null;
-    this.hoverLine = null;
-    this.timeHover = null;
+    this.staticElements = null;
   }
 
   attachEventTooltip(element: HTMLDivElement): void {
@@ -147,8 +147,8 @@ export class TimelineOverlayController implements TimelineOverlaySink {
   }
 
   setNowLine(visible: boolean, x: number, width: number, stroke: string): void {
-    const line = this.nowLine;
-    if (line === null) return;
+    const line = this.staticElements?.nowLine;
+    if (line === undefined) return;
     line.hidden = !visible;
     if (!visible) return;
     line.style.width = `${width}px`;
@@ -157,9 +157,9 @@ export class TimelineOverlayController implements TimelineOverlaySink {
   }
 
   setCrosshair(visible: boolean, x: number, time: number, viewportWidth: number): void {
-    const line = this.hoverLine;
-    const label = this.timeHover;
-    if (line === null || label === null) return;
+    const staticElements = this.staticElements;
+    if (staticElements === null) return;
+    const { hoverLine: line, timeHover: label } = staticElements;
     line.hidden = !visible;
     label.hidden = !visible;
     if (!visible) return;

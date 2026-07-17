@@ -247,19 +247,21 @@ export class Broker {
     for (const activity of this.adapterActivities) {
       const overlap = Interval.intersection(activity.range, range);
       if (Interval.isEmpty(overlap)) continue;
-      out.push({
-        range: overlap,
-        samplePeriodMs: activity.resolutionMs,
-        state:
-          activity.state === "failed"
-            ? "failed"
-            : activity.state === "watching"
-              ? "watching"
-              : "pending",
-        ...(activity.state === "failed"
-          ? { message: activity.message, retryAtMs: activity.retryAtMs }
-          : {}),
-      });
+      if (activity.state === "failed") {
+        out.push({
+          range: overlap,
+          samplePeriodMs: activity.resolutionMs,
+          state: "failed",
+          message: activity.message,
+          retryAtMs: activity.retryAtMs,
+        });
+      } else {
+        out.push({
+          range: overlap,
+          samplePeriodMs: activity.resolutionMs,
+          state: activity.state === "watching" ? "watching" : "pending",
+        });
+      }
     }
     return out;
   }
