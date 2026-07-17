@@ -1,7 +1,8 @@
 .trigger {
-  width: 1.125rem;
+  position: relative;
+  width: 1.375rem;
   height: 1.125rem;
-  flex: 0 0 1.125rem;
+  flex: 0 0 1.375rem;
   border-radius: var(--radius-xs);
   color: var(--color-fg);
   pointer-events: auto;
@@ -14,14 +15,27 @@
 }
 
 .trigger svg {
-  width: 0.875rem;
-  height: 0.875rem;
+  width: 0.8125rem;
+  height: 0.8125rem;
+}
+
+.paletteIndicator {
+  position: absolute;
+  right: 0.125rem;
+  bottom: 0.0625rem;
+  left: 0.125rem;
+  height: 2px;
+  border-radius: var(--radius-pill);
+  background-size: 100% 100%;
+  opacity: 0.72;
 }
 
 .content {
-  width: min(21rem, calc(100vw - 2rem));
-  padding: var(--space-3);
-  border-radius: var(--radius-lg);
+  display: grid;
+  width: min(17rem, calc(100vw - 2rem));
+  gap: var(--space-3);
+  padding: var(--space-2-5);
+  border-radius: var(--radius-md);
   transform-origin: var(--kb-popover-content-transform-origin);
   animation: settingsIn var(--duration-fast) var(--ease-out);
   pointer-events: auto;
@@ -43,25 +57,27 @@
 }
 
 .legend {
-  margin-bottom: var(--space-2);
+  margin-bottom: var(--space-1-5);
+  color: var(--color-fg);
   font-weight: 600;
 }
 
 .kernelGrid {
   display: grid;
-  gap: var(--space-2);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-1-5);
 }
 
 .kernelOption {
   position: relative;
   display: grid;
-  grid-template-columns: 4rem minmax(0, 1fr);
-  align-items: center;
-  gap: var(--space-3);
-  min-height: 3.5rem;
-  padding: var(--space-2);
-  border: 2px solid var(--color-border-control);
-  border-radius: var(--radius-md);
+  grid-template-rows: 1.5rem auto;
+  align-items: start;
+  gap: var(--space-1);
+  min-height: 3.25rem;
+  padding: var(--space-1-5);
+  border: 1px solid var(--color-border-control);
+  border-radius: var(--radius-sm);
   background: rgba(5, 7, 13, 0.18);
   cursor: pointer;
   transition:
@@ -81,8 +97,8 @@
 }
 
 .preview {
-  width: 4rem;
-  height: 1.75rem;
+  width: 100%;
+  height: 1.5rem;
   overflow: visible;
 }
 
@@ -107,18 +123,53 @@
 .kernelText {
   display: grid;
   min-width: 0;
-  gap: var(--space-0-5);
+  gap: 1px;
 }
 
 .kernelText strong {
   color: var(--color-fg-strong);
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
   font-weight: 600;
 }
 
 .kernelText small {
-  color: var(--color-muted);
-  font-size: var(--text-xs);
+  overflow: hidden;
+  color: var(--color-fg);
+  font-size: 0.625rem;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.paletteGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-1);
+}
+
+.paletteOption {
+  height: 1.125rem;
+  padding: 2px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  cursor: pointer;
+}
+
+.paletteOption:hover,
+.paletteOption:focus-visible,
+.paletteSelected {
+  border-color: var(--color-border-hover);
+  background: var(--color-surface-hover);
+  outline: none;
+}
+
+.paletteOption span {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background-size: 100% 100%;
 }
 
 .arrow {

@@ -189,10 +189,6 @@ export function App() {
       signal: AbortSignal.any([lifetime.signal, controller.signal]),
       onError: (message, error) => {
         console.error(message, error);
-        setStatus(
-          `${source.label} ${symbol}: ${String((error as Error | undefined)?.message ?? error)}`,
-          "error",
-        );
       },
     });
     const paletteNames = Object.keys(PALETTES) as PaletteName[];

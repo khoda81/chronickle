@@ -1,14 +1,18 @@
 import { Popover } from "@kobalte/core/popover";
 import { Settings2 } from "lucide-solid";
+import type { PaletteName } from "../../engine/ramp.ts";
 import type { WaveletMode } from "../../engine/wavelet.ts";
 import surfaceStyles from "../../styles/floatingSurface.module.css";
 import controlStyles from "./ui/Control.module.css";
 import styles from "./ChartSettings.module.css";
+import { PalettePicker } from "./PalettePicker.tsx";
 
 interface ChartSettingsProps {
   readonly id: string;
   readonly label: string;
+  readonly palette: PaletteName;
   readonly waveletMode: WaveletMode;
+  readonly onPaletteChange: (palette: PaletteName) => void;
   readonly onWaveletModeChange: (mode: WaveletMode) => void;
 }
 
@@ -30,7 +34,7 @@ export function ChartSettings(props: ChartSettingsProps) {
       <Popover.Portal>
         <Popover.Content class={styles.content} classList={{ [surfaceStyles.menu!]: true }}>
           <fieldset class={styles.fieldset}>
-            <legend class={`${styles.legend} ${controlStyles.sectionLabel}`}>Kernel</legend>
+            <legend class={`${styles.legend} ${controlStyles.sectionLabel}`}>Curve</legend>
             <div class={styles.kernelGrid}>
               {KERNELS.map(kernel => (
                 <label
@@ -52,6 +56,16 @@ export function ChartSettings(props: ChartSettingsProps) {
                 </label>
               ))}
             </div>
+          </fieldset>
+
+          <fieldset class={styles.fieldset}>
+            <legend class={`${styles.legend} ${controlStyles.sectionLabel}`}>Color</legend>
+
+            <PalettePicker
+              label={props.label}
+              value={props.palette}
+              onChange={props.onPaletteChange}
+            />
           </fieldset>
           <Popover.Arrow class={styles.arrow} />
         </Popover.Content>

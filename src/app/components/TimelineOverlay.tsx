@@ -6,7 +6,6 @@ import type { WaveletMode } from "../../engine/wavelet.ts";
 import { TIMELINE_OVERLAY_METRICS } from "../../ui/timelineOverlayMetrics.ts";
 import type { TimelineOverlayController } from "../timeline/TimelineOverlayController.ts";
 import { ChartSettings } from "./ChartSettings.tsx";
-import { PalettePicker } from "./PalettePicker.tsx";
 import controlStyles from "./ui/Control.module.css";
 import styles from "./TimelineOverlay.module.css";
 
@@ -136,15 +135,12 @@ function TimelineRowChrome(props: TimelineRowChromeProps) {
           </span>
           <span class={styles.rowSource}>{props.row().sourceLabel}</span>
         </span>
-        <PalettePicker
-          label={label()}
-          value={props.row().palette}
-          onChange={props.onChoosePalette}
-        />
         <ChartSettings
           id={key}
           label={label()}
+          palette={props.row().palette}
           waveletMode={props.row().waveletMode}
+          onPaletteChange={props.onChoosePalette}
           onWaveletModeChange={props.onChooseWaveletMode}
         />
         <button

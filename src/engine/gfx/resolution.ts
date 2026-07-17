@@ -10,7 +10,7 @@ const REQUEST_HEIGHT = COVERAGE_BAR_HEIGHT - DATA_HEIGHT;
 const LIGHT_TEXT = "#f3f8fc";
 const QUALITY_PALETTE = buildQualityPalette();
 
-const REQUEST_FILL = { pending: "rgb(46 77 105)", retrying: "rgb(132 48 61)" } as const;
+const REQUEST_FILL = { pending: "rgb(61 70 85)", retrying: "rgb(132 48 61)" } as const;
 
 export interface StatusBarLayer {
   /** True when a visible retry countdown needs another clock redraw. */
@@ -94,13 +94,13 @@ class StatusBarImpl implements StatusBarLayer {
     const { frame } = this;
     const ctx = frame.ctx;
     ctx.font = FONT;
-    let nextLabelX = 5;
+    let nextLabelX = 6;
     for (const segment of requests) {
       const x0 = Math.max(0, frame.tx.timeToX(segment.range.start));
       const x1 = Math.min(frame.width, frame.tx.timeToX(segment.range.end));
       if (!(x1 > x0)) continue;
-      const labelX = Math.max(x0 + 4, nextLabelX);
-      const availableWidth = x1 - labelX - 4;
+      const labelX = Math.max(x0 + 6, nextLabelX);
+      const availableWidth = x1 - labelX - 6;
       if (!(availableWidth > 0)) continue;
       const text = ellipsize(ctx, requestLabel(segment, wallNow), availableWidth);
       if (text.length === 0) continue;
@@ -111,7 +111,7 @@ class StatusBarImpl implements StatusBarLayer {
       ctx.clip();
       drawLabel(frame, text, labelX, y + DATA_HEIGHT + REQUEST_HEIGHT / 2, LIGHT_TEXT);
       ctx.restore();
-      nextLabelX = labelX + textWidth + 10;
+      nextLabelX = labelX + textWidth + 12;
     }
   }
 }
@@ -129,10 +129,10 @@ function requestLabel(segment: RequestSegment, wallNow: number): string {
   const resolution = formatResolution(segment.samplePeriodMs);
   switch (segment.state) {
     case "pending":
-      return `pending ${resolution}`;
+      return `fetching · ${resolution} spacing`;
     case "retrying": {
       const delay = formatResolution(Math.floor((segment.retryAtMs - wallNow) / 1000) * 1000);
-      return `retry ${resolution} in ${delay} #${segment.attempt} · ${segment.message}`;
+      return `retrying · ${resolution} spacing · in ${delay} #${segment.attempt} · ${segment.message}`;
     }
   }
 }
@@ -157,7 +157,7 @@ function qualityIndex(value: number): number {
 
 function buildQualityPalette(): { readonly colors: readonly string[] } {
   const low = [8, 13, 23] as const;
-  const high = [126, 188, 208] as const;
+  const high = [118, 130, 145] as const;
   const colors: string[] = [];
   for (let index = 0; index < QUALITY_STEPS; index++) {
     const t = index / (QUALITY_STEPS - 1);
