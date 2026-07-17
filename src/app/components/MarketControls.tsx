@@ -128,7 +128,10 @@ function SymbolCombobox(props: SymbolComboboxProps) {
         sameWidth={false}
         fitViewport
         itemComponent={itemProps => (
-          <Combobox.Item item={itemProps.item} class={styles.symbolItem}>
+          <Combobox.Item
+            item={itemProps.item}
+            class={styles.symbolItem}
+            classList={{ [surfaceStyles.listboxItem!]: true }}>
             <Combobox.ItemLabel class={styles.symbolTicker}>
               {itemProps.item.rawValue.symbol}
             </Combobox.ItemLabel>
@@ -137,7 +140,10 @@ function SymbolCombobox(props: SymbolComboboxProps) {
             </Combobox.ItemDescription>
           </Combobox.Item>
         )}>
-        <Combobox.Control class={styles.symbolControl} aria-label={`${props.sourceLabel} ticker`}>
+        <Combobox.Control
+          class={styles.symbolControl}
+          classList={{ [controlStyles.frame!]: true }}
+          aria-label={`${props.sourceLabel} ticker`}>
           <Combobox.Input
             ref={input}
             class={styles.symbolInput}

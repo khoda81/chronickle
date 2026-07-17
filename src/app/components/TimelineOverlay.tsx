@@ -7,6 +7,7 @@ import { TIMELINE_OVERLAY_METRICS } from "../../ui/timelineOverlayMetrics.ts";
 import type { TimelineOverlayController } from "../timeline/TimelineOverlayController.ts";
 import { ChartSettings } from "./ChartSettings.tsx";
 import { PalettePicker } from "./PalettePicker.tsx";
+import controlStyles from "./ui/Control.module.css";
 import styles from "./TimelineOverlay.module.css";
 
 export interface TimelineOverlayRowView {
@@ -54,6 +55,7 @@ export function TimelineOverlay(props: TimelineOverlayProps) {
         <button
           type="button"
           class={styles.timelineButton}
+          classList={{ [controlStyles.iconAction!]: true }}
           title="Reload data"
           aria-label="Reload data"
           onClick={props.onReload}>
@@ -62,6 +64,7 @@ export function TimelineOverlay(props: TimelineOverlayProps) {
         <button
           type="button"
           class={styles.timelineButton}
+          classList={{ [controlStyles.iconAction!]: true }}
           aria-pressed={props.playback.mode === "following"}
           title={
             props.playback.mode === "following" ? "Pause current-time playback" : "Play from here"
@@ -147,6 +150,7 @@ function TimelineRowChrome(props: TimelineRowChromeProps) {
         <button
           type="button"
           class={styles.removeRow}
+          classList={{ [controlStyles.iconAction!]: true }}
           title={`Remove`}
           aria-label={`Remove ${label()}`}
           onClick={props.onRemove}>

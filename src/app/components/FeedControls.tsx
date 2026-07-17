@@ -105,6 +105,7 @@ function FeedChip(props: FeedChipProps) {
       <button
         type="button"
         class={styles.toggle}
+        classList={{ [controlStyles.iconAction!]: true }}
         aria-pressed={props.feed.enabled}
         title={props.feed.enabled ? `Hide ${props.feed.source}` : `Show ${props.feed.source}`}
         aria-label={props.feed.enabled ? `Hide ${props.feed.source}` : `Show ${props.feed.source}`}
@@ -141,6 +142,7 @@ function FeedChip(props: FeedChipProps) {
       <button
         type="button"
         class={styles.remove}
+        classList={{ [controlStyles.iconAction!]: true }}
         title={`Remove ${props.feed.source}`}
         aria-label={`Remove ${props.feed.source}`}
         onClick={props.onRemove}>

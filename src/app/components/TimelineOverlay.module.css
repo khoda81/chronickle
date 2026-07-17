@@ -22,11 +22,9 @@
 }
 
 .timelineButton {
-  display: grid;
+  --icon-action-outline-offset: 2px;
   width: 1.75rem;
   height: 1.75rem;
-  place-items: center;
-  padding: 0;
   border: 2px solid var(--glass-border);
   border-radius: var(--radius-md);
   background:
@@ -34,7 +32,6 @@
   -webkit-backdrop-filter: var(--glass-blur);
   backdrop-filter: var(--glass-blur);
   color: #cbd5e1;
-  cursor: pointer;
   box-shadow:
     0 0.5rem 1.5rem rgba(0, 0, 0, 0.24),
     inset 0 1px 0 rgba(255, 255, 255, 0.12);
@@ -53,11 +50,6 @@
     linear-gradient(145deg, rgba(255, 255, 255, 0.18), rgba(124, 196, 255, 0.07)),
     rgba(12, 20, 34, 0.54);
   color: var(--color-fg-strong);
-}
-
-.timelineButton:focus-visible {
-  outline: 2px solid var(--color-focus);
-  outline-offset: 2px;
 }
 
 .hoverLine {
@@ -139,17 +131,11 @@
 }
 
 .removeRow {
-  display: grid;
   flex: 0 0 1.125rem;
   width: 1.125rem;
   height: 1.125rem;
-  place-items: center;
-  padding: 0;
-  border: 0;
   border-radius: var(--radius-xs);
-  background: transparent;
   color: var(--color-fg);
-  cursor: pointer;
   pointer-events: auto;
   transition: color var(--duration-fast) ease;
 }
@@ -165,11 +151,6 @@
 .removeRow:hover {
   background: var(--color-error-soft);
   color: var(--color-error);
-}
-
-.removeRow:focus-visible {
-  outline: 2px solid var(--color-focus);
-  outline-offset: 1px;
 }
 
 .removeRow svg {

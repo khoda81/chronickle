@@ -2,6 +2,7 @@ import { Popover } from "@kobalte/core/popover";
 import { Settings2 } from "lucide-solid";
 import type { WaveletMode } from "../../engine/wavelet.ts";
 import surfaceStyles from "../../styles/floatingSurface.module.css";
+import controlStyles from "./ui/Control.module.css";
 import styles from "./ChartSettings.module.css";
 
 interface ChartSettingsProps {
@@ -21,6 +22,7 @@ export function ChartSettings(props: ChartSettingsProps) {
     <Popover placement="bottom-end" gutter={6} flip slide overflowPadding={8} fitViewport>
       <Popover.Trigger
         class={styles.trigger}
+        classList={{ [controlStyles.iconAction!]: true }}
         title={`Settings`}
         aria-label={`Open ${props.label} settings`}>
         <Settings2 aria-hidden="true" />
@@ -28,14 +30,14 @@ export function ChartSettings(props: ChartSettingsProps) {
       <Popover.Portal>
         <Popover.Content class={styles.content} classList={{ [surfaceStyles.menu!]: true }}>
           <fieldset class={styles.fieldset}>
-            <legend class={styles.legend}>Kernel</legend>
+            <legend class={`${styles.legend} ${controlStyles.sectionLabel}`}>Kernel</legend>
             <div class={styles.kernelGrid}>
               {KERNELS.map(kernel => (
                 <label
                   class={styles.kernelOption}
                   classList={{ [styles.kernelSelected!]: props.waveletMode === kernel.value }}>
                   <input
-                    class={styles.radio}
+                    class={controlStyles.visuallyHidden}
                     type="radio"
                     name={`kernel-${props.id}`}
                     value={kernel.value}

@@ -5,33 +5,17 @@
 .trigger {
   display: inline-flex;
   min-width: 8.5rem;
-  min-height: var(--control-height-sm);
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
   padding-inline: var(--space-2-5);
-  border: 2px solid var(--color-border-control);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--color-fg);
-  font-size: var(--text-sm);
   cursor: pointer;
-  transition:
-    border-color var(--duration-fast) ease,
-    color var(--duration-fast) ease,
-    background-color var(--duration-fast) ease;
 }
 
 .trigger:hover,
 .trigger[data-expanded] {
   border-color: var(--color-accent);
   color: var(--color-accent);
-}
-
-.trigger:focus-visible {
-  border-color: var(--color-accent);
-  outline: 2px solid color-mix(in oklab, var(--color-focus) 52%, transparent);
-  outline-offset: 2px;
 }
 
 .value {
@@ -74,21 +58,8 @@
 
 .item {
   display: flex;
-  min-height: 1.875rem;
-  align-items: center;
   justify-content: space-between;
-  gap: var(--space-2);
-  padding-inline: var(--space-2);
-  border-radius: var(--radius-xs);
-  color: var(--color-fg);
   font-size: var(--text-sm);
-  cursor: default;
-  outline: none;
-}
-
-.item[data-highlighted],
-.item[data-selected] {
-  background: var(--color-accent-soft);
 }
 
 .item[data-highlighted] {

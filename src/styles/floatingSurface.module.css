@@ -26,3 +26,20 @@
   padding: var(--space-1);
   border-radius: var(--radius-md);
 }
+
+.listboxItem {
+  width: 100%;
+  min-height: 1.875rem;
+  align-items: center;
+  gap: var(--space-2);
+  padding-inline: var(--space-2);
+  border-radius: var(--radius-xs);
+  color: var(--color-fg);
+  cursor: default;
+  outline: none;
+}
+
+.listboxItem[data-highlighted],
+.listboxItem[data-selected] {
+  background: var(--color-accent-soft);
+}

@@ -38,19 +38,18 @@
   opacity: 0.45;
 }
 
-.toggle,
-.nameButton,
-.remove {
+.chip {
+  --icon-action-outline-offset: -2px;
+}
+
+.nameButton {
   border: 0;
   background: transparent;
   cursor: pointer;
 }
 
 .toggle {
-  display: grid;
   width: 1.5rem;
-  place-items: center;
-  padding: 0;
   color: var(--color-fg);
 }
 
@@ -77,9 +76,8 @@
   outline: none;
 }
 
-.toggle:focus-visible,
-.nameButton:focus-visible,
-.remove:focus-visible {
+.nameInput:focus-visible,
+.nameButton:focus-visible {
   outline: 2px solid color-mix(in oklab, var(--color-focus) 52%, transparent);
   outline-offset: -2px;
 }
@@ -109,10 +107,7 @@
 }
 
 .remove {
-  display: grid;
   width: 1.75rem;
-  place-items: center;
-  padding: 0;
   color: var(--color-muted);
 }
 

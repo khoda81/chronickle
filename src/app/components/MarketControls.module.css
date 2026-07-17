@@ -19,24 +19,13 @@
 .symbolControl {
   display: flex;
   width: 11.25rem;
-  min-height: var(--control-height-sm);
   align-items: stretch;
-  border: 2px solid var(--color-border-control);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  transition:
-    border-color var(--duration-fast) ease,
-    box-shadow var(--duration-fast) ease;
 }
 
 .symbolControl:hover,
 .symbolControl:focus-within,
 .symbolControl[data-expanded] {
   border-color: var(--color-accent);
-}
-
-.symbolControl:focus-within {
-  box-shadow: 0 0 0 2px color-mix(in oklab, var(--color-focus) 52%, transparent);
 }
 
 .symbolInput {
@@ -103,20 +92,8 @@
 .symbolItem {
   display: grid;
   grid-template-columns: minmax(6.25rem, 0.8fr) minmax(8.125rem, 1.2fr);
-  gap: var(--space-3);
-  width: 100%;
   min-height: 2rem;
-  align-items: center;
-  padding-inline: var(--space-2);
-  border-radius: var(--radius-xs);
-  color: var(--color-fg);
-  cursor: default;
-  outline: none;
-}
-
-.symbolItem[data-highlighted],
-.symbolItem[data-selected] {
-  background: var(--color-accent-soft);
+  column-gap: var(--space-3);
 }
 
 .symbolTicker {

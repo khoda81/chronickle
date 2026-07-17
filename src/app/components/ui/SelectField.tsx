@@ -2,6 +2,7 @@ import { Select } from "@kobalte/core/select";
 import { Check, ChevronDown } from "lucide-solid";
 import type { JSX } from "solid-js";
 import surfaceStyles from "../../../styles/floatingSurface.module.css";
+import controlStyles from "./Control.module.css";
 import styles from "./SelectField.module.css";
 
 export interface SelectOption<Value extends string> {
@@ -35,7 +36,10 @@ export function SelectField<Value extends string>(props: SelectFieldProps<Value>
         if (option !== null) props.onChange(option.value);
       }}
       itemComponent={itemProps => (
-        <Select.Item item={itemProps.item} class={styles.item}>
+        <Select.Item
+          item={itemProps.item}
+          class={styles.item}
+          classList={{ [surfaceStyles.listboxItem!]: true }}>
           <Select.ItemLabel class={styles.itemLabel}>
             {props.itemContent?.(itemProps.item.rawValue) ?? itemProps.item.rawValue.label}
           </Select.ItemLabel>
@@ -52,6 +56,7 @@ export function SelectField<Value extends string>(props: SelectFieldProps<Value>
       fitViewport>
       <Select.Trigger
         class={`${styles.trigger} ${props.triggerClass ?? ""}`}
+        classList={{ [controlStyles.frame!]: true }}
         aria-label={props.ariaLabel}>
         <Select.Value<SelectOption<Value>> class={styles.value}>
           {state => {
