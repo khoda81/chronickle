@@ -1,7 +1,12 @@
 import type { RequestSegment } from "../../data/signal/requests.ts";
 import type { Frame } from "./context.ts";
-import { COVERAGE_BAR_HEIGHT, DATA_HEIGHT, QUALITY_STEPS, REQUEST_HEIGHT, REQUEST_UNDERLINE_DEVICE_PX } from "./layout.ts";
-
+import {
+  COVERAGE_BAR_HEIGHT,
+  DATA_HEIGHT,
+  QUALITY_STEPS,
+  REQUEST_HEIGHT,
+  REQUEST_UNDERLINE_DEVICE_PX,
+} from "./layout.ts";
 
 interface LabelStyle {
   readonly text: string;

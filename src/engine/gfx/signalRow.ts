@@ -3,7 +3,12 @@ import type { BrokerDemand, ReadRequest, SignalView } from "../../data/index.ts"
 import { kernelContext, type WaveletMode } from "../wavelet.ts";
 import type { PaletteName } from "../ramp.ts";
 import type { Frame } from "./context.ts";
-import { COVERAGE_BAR_HEIGHT, heatmapScaleWindow, signalRowLayout, type SignalRowLayout } from "./layout.ts";
+import {
+  COVERAGE_BAR_HEIGHT,
+  heatmapScaleWindow,
+  signalRowLayout,
+  type SignalRowLayout,
+} from "./layout.ts";
 import { TIMELINE_OVERLAY_METRICS } from "../../ui/timelineOverlayMetrics.ts";
 
 export interface SignalRowDrawOptions {
@@ -59,7 +64,7 @@ class SignalRowStackImpl implements SignalRowStack {
   constructor(
     private readonly frame: Frame,
     private top: number,
-  ) { }
+  ) {}
 
   next(rowId: string, height: number): SignalRowLayer {
     const row = SignalRows.create(this.frame, rowId, this.top, height);
@@ -154,9 +159,9 @@ class SignalRowImpl implements SignalRowLayer {
     placement.x = fitsLeft
       ? anchorX - metrics.gapPx - placement.width
       : Math.max(
-        metrics.marginPx,
-        Math.min(frame.width - placement.width - metrics.marginPx, anchorX + metrics.gapPx),
-      );
+          metrics.marginPx,
+          Math.min(frame.width - placement.width - metrics.marginPx, anchorX + metrics.gapPx),
+        );
     placement.y = Math.max(
       metrics.marginPx,
       Math.min(

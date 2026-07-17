@@ -371,19 +371,19 @@ export class Timeline {
         this.interaction.activeBoundary,
       );
       this.overlay?.setRowCollapseProgress(row.id, collapseProgress);
-      hasVisibleRetry =
-        hasVisibleRetry ||
-        signalRow.draw({
-          verticalOffset: runtime.verticalOffset,
-          logGain: priceScale,
-          waveletMode,
-          palette: runtime.palette,
-          wallNow,
-          read: (demand, request) => {
-            this.syncPriceSubscription(index, demand);
-            return row.read(request);
-          },
-        });
+      const rowHasRetry = signalRow.draw({
+        verticalOffset: runtime.verticalOffset,
+        logGain: priceScale,
+        waveletMode,
+        palette: runtime.palette,
+        wallNow,
+        read: (demand, request) => {
+          this.syncPriceSubscription(index, demand);
+          return row.read(request);
+        },
+      });
+
+      hasVisibleRetry ||= rowHasRetry;
     }
     this.updateCrosshairOverlay();
     this.drawSignalHoverTooltips(frame);
@@ -423,7 +423,7 @@ export class Timeline {
     this.overlay?.hideSignalTooltips();
     if (!this.interaction.canShowHoverOverlay() || this.overlay === undefined) return;
 
-    const x = Math.max(0, Math.min(frame.width, this.interaction.pointer.x));
+    const x = this.interaction.pointer.x;
     const hoverTime =
       this.state.timeInterval.start +
       (x / frame.width) * (this.state.timeInterval.end - this.state.timeInterval.start);

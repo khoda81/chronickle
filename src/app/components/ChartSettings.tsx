@@ -95,7 +95,7 @@ const KERNEL_PREVIEW_PATHS: Record<WaveletMode, string> = {
 function kernelPreviewPath(mode: WaveletMode): string {
   const sampleCount = 61;
   const impulse = new Float64Array(sampleCount);
-  impulse[mode === "centered" ? Math.floor(sampleCount / 2) : 8] = 1;
+  impulse[Math.floor(sampleCount / 2)] = 1;
   const response = computeWaveletField(impulse, 1, new Float64Array([6]), mode).values;
   let peak = 0;
   for (const value of response) peak = Math.max(peak, value);
