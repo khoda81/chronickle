@@ -9,7 +9,6 @@ import { DEFAULT_NEWS_HEIGHT, DEFAULT_SIGNAL_ROW_HEIGHT } from "../engine/gfx/la
 import { Interval } from "../core/interval.ts";
 import {
   Timeline,
-  type HoverInfo,
   type SignalRow,
   type TimelineLayout,
   type TimelinePlayback,
@@ -359,8 +358,7 @@ export function App() {
             return;
           }
 
-          const snapshot: HoverInfo = { ...event };
-          setHover({ event: snapshot, feed: registry.get(snapshot.feedId) });
+          setHover({ event, feed: registry.get(event.feedId) });
         },
         onViewportChange: setViewport,
         onPlaybackChange: setPlayback,

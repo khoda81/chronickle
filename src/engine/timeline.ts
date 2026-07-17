@@ -1,7 +1,6 @@
 /** One shared, vertically-resizable news and market timeline. */
 
 import type { EventSet, NewsEvent } from "../domain.ts";
-import { TIMELINE_OVERLAY_METRICS } from "../ui/timelineOverlayMetrics.ts";
 import type { EventQueryResult } from "../data/events/broker.ts";
 import type { Subscription, ReadRequest, SignalView } from "../data/signal/broker.ts";
 import type { MutableSample } from "../data/signal/sample.ts";
@@ -70,8 +69,6 @@ export interface HoverInfo {
   readonly summary: string;
   readonly t: number;
 }
-
-type MutableHoverInfo = { -readonly [Key in keyof HoverInfo]: HoverInfo[Key] };
 
 export type TimelinePlayback =
   { readonly mode: "following"; readonly anchor: number } | { readonly mode: "paused" };
@@ -175,7 +172,7 @@ export class Timeline {
   private latestDpr = 1;
   private latestNumPx = 0;
   private pendingInitialNewsHeight: number | null;
-  private layoutDirty = false;
+  private layoutChangePending = false;
   private rafId: number | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private state: TimelineState;
@@ -183,20 +180,7 @@ export class Timeline {
   private crosshairPinned = false;
   private eventTooltipHovered = false;
   private hoverClearTimer: number | null = null;
-  private notifiedHoverIndex: number | null = null;
-  private notifiedHoverT = Number.NaN;
-  private notifiedHoverTitle = "";
-  private notifiedHoverLink = "";
-  private notifiedHoverFeedId = "";
-  private notifiedHoverSummary = "";
-  private readonly hoverInfo: MutableHoverInfo = {
-    index: -1,
-    title: "",
-    link: "",
-    feedId: "",
-    summary: "",
-    t: Number.NaN,
-  };
+  private notifiedHover: HoverInfo | null = null;
 
   constructor(opts: TimelineOptions) {
     opts.signal.throwIfAborted();
@@ -397,8 +381,8 @@ export class Timeline {
   }
 
   private flushLayoutChange(removeCollapsedRows = false): void {
-    if (!this.layoutDirty) return;
-    this.layoutDirty = false;
+    if (!this.layoutChangePending) return;
+    this.layoutChangePending = false;
     const collapsedRowIds = removeCollapsedRows
       ? this.rows
         .filter(runtime => runtime.height <= ROW_REMOVE_THRESHOLD)
@@ -488,12 +472,12 @@ export class Timeline {
     frame.text("NEWS", 8, 9, "10px ui-monospace, monospace", "#94a3b8", "left", "top");
     frame.events().drawRow(this.state.events, this.feedColorOf, this.state.hovered, eventY);
 
-    let rowY = this.state.newsHeight;
+    const signalRows = frame.signalRows(this.state.newsHeight);
     let hasVisibleRetry = false;
     for (let index = 0; index < this.rows.length; index++) {
       const runtime = this.rows[index]!;
       const { row, height: rowHeight, waveletMode } = runtime;
-      const signalRow = frame.signalRow(row.id, rowY, rowHeight);
+      const signalRow = signalRows.next(row.id, rowHeight);
       this.overlay?.setRowTop(row.id, signalRow.heatmapTop);
       const collapseProgress = signalRowCollapseProgress(
         index,
@@ -501,7 +485,7 @@ export class Timeline {
         this.gestures.activeBoundary,
       );
       this.overlay?.setRowCollapseProgress(row.id, collapseProgress);
-      hasVisibleRetry =
+      hasVisibleRetry = hasVisibleRetry ||
         signalRow.draw({
           verticalOffset: runtime.verticalOffset,
           logGain: priceScale,
@@ -512,9 +496,7 @@ export class Timeline {
             this.syncPriceSubscription(index, demand);
             return row.read(request);
           },
-        }) || hasVisibleRetry;
-
-      rowY += rowHeight;
+        });
     }
     this.updateCrosshairOverlay();
     this.drawSignalHoverTooltips(frame);
@@ -568,20 +550,24 @@ export class Timeline {
     const hoverTime =
       this.state.timeInterval.start +
       (x / frame.width) * (this.state.timeInterval.end - this.state.timeInterval.start);
-    let rowY = this.state.newsHeight;
+    const signalRows = frame.signalRows(this.state.newsHeight);
     for (const runtime of this.rows) {
       const { row, height: rowHeight } = runtime;
-      const signalRow = frame.signalRow(row.id, rowY, rowHeight);
-      if (!signalRow.drawable) {
-        rowY += rowHeight;
-        continue;
-      }
+      const signalRow = signalRows.next(row.id, rowHeight);
+      if (!signalRow.drawable) continue;
       const sample = runtime.hoverSample;
       const hasSample = row.readSampleAt(hoverTime, sample);
       const anchorX = hasSample ? frame.tx.timeToX(sample.t) : x;
       const text = !hasSample ? "loading…" : formatPrice(Math.exp(sample.value));
-      positionSignalTooltip(frame, this.overlay, row.id, anchorX, signalRow.heatmapCenter, x, text);
-      rowY += rowHeight;
+      const placement = signalRow.drawTooltip(anchorX, x, text);
+      this.overlay.setSignalTooltip(
+        row.id,
+        text,
+        placement.x,
+        placement.y,
+        placement.width,
+        placement.height,
+      );
     }
   }
 
@@ -605,7 +591,7 @@ export class Timeline {
 
   private moveBoundary(boundary: number, delta: number): void {
     if (this.rows.length === 0 || delta === 0) return;
-    this.layoutDirty = true;
+    this.layoutChangePending = true;
     if (boundary === 0) {
       const pair = this.state.newsHeight + this.rows[0]!.height;
       const minNews = Math.min(MIN_NEWS_HEIGHT, pair);
@@ -639,7 +625,7 @@ export class Timeline {
     const next = runtime.verticalOffset + delta;
     if (next === runtime.verticalOffset) return;
     runtime.verticalOffset = next;
-    this.layoutDirty = true;
+    this.layoutChangePending = true;
     this.reqDraw();
   }
 
@@ -937,28 +923,18 @@ export class Timeline {
     const anchorX = Math.max(0, Math.min(width, tx.timeToX(event.t)));
     this.overlay?.setEventTooltipAnchor(true, anchorX, eventY, width, height);
 
-    const contentChanged =
-      index !== this.notifiedHoverIndex ||
-      event.t !== this.notifiedHoverT ||
-      event.title !== this.notifiedHoverTitle ||
-      event.link !== this.notifiedHoverLink ||
-      event.feedId !== this.notifiedHoverFeedId ||
-      event.summary !== this.notifiedHoverSummary;
+    const contentChanged = !sameHover(this.notifiedHover, index, event);
     if (!contentChanged || this.callbacks.onHover === undefined) return previous !== index;
 
-    this.notifiedHoverIndex = index;
-    this.notifiedHoverT = event.t;
-    this.notifiedHoverTitle = event.title;
-    this.notifiedHoverLink = event.link;
-    this.notifiedHoverFeedId = event.feedId;
-    this.notifiedHoverSummary = event.summary;
-    const info = this.hoverInfo;
-    info.index = index;
-    info.title = event.title;
-    info.link = event.link;
-    info.feedId = event.feedId;
-    info.summary = event.summary;
-    info.t = event.t;
+    const info: HoverInfo = {
+      index,
+      title: event.title,
+      link: event.link,
+      feedId: event.feedId,
+      summary: event.summary,
+      t: event.t,
+    };
+    this.notifiedHover = info;
     this.callbacks.onHover(info);
     return previous !== index;
   }
@@ -967,16 +943,23 @@ export class Timeline {
     const visualChanged = this.state.hovered !== null;
     this.state.hovered = null;
     this.overlay?.setEventTooltipAnchor(false, 0, 0, 0, 0);
-    if (this.notifiedHoverIndex === null) return visualChanged;
-    this.notifiedHoverIndex = null;
-    this.notifiedHoverT = Number.NaN;
-    this.notifiedHoverTitle = "";
-    this.notifiedHoverLink = "";
-    this.notifiedHoverFeedId = "";
-    this.notifiedHoverSummary = "";
+    if (this.notifiedHover === null) return visualChanged;
+    this.notifiedHover = null;
     this.callbacks.onHover?.(null);
     return visualChanged;
   }
+}
+
+function sameHover(info: HoverInfo | null, index: number, event: NewsEvent): boolean {
+  return (
+    info !== null &&
+    info.index === index &&
+    info.t === event.t &&
+    info.title === event.title &&
+    info.link === event.link &&
+    info.feedId === event.feedId &&
+    info.summary === event.summary
+  );
 }
 
 function createSignalRowRuntime(
@@ -1019,44 +1002,4 @@ const PRICE_FORMAT = new Intl.NumberFormat(undefined, {
 function formatPrice(price: number): string {
   if (!(price > 0) || !Number.isFinite(price)) return "—";
   return PRICE_FORMAT.format(price);
-}
-
-function positionSignalTooltip(
-  frame: Frame,
-  overlay: TimelineOverlaySink,
-  id: string,
-  anchorX: number,
-  anchorY: number,
-  cursorX: number,
-  text: string,
-): void {
-  const ctx = frame.ctx;
-  const metrics = TIMELINE_OVERLAY_METRICS.signalTooltip;
-  ctx.save();
-  ctx.font = metrics.font;
-  const width =
-    Math.ceil(ctx.measureText(text).width) + metrics.paddingXPx * 2 + metrics.borderWidthPx * 2;
-  const height = metrics.heightPx;
-  const gap = metrics.gapPx;
-  const margin = metrics.marginPx;
-  const fitsLeft = anchorX - gap - width >= margin;
-  const x = fitsLeft
-    ? anchorX - gap - width
-    : Math.max(margin, Math.min(frame.width - width - margin, anchorX + gap));
-
-  const y = Math.max(margin, Math.min(frame.height - height - margin, anchorY - height / 2));
-
-  ctx.strokeStyle = "rgba(226, 232, 240, 0.58)";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(anchorX, anchorY);
-  ctx.lineTo(cursorX, anchorY);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.arc(anchorX, anchorY, 2.5, 0, Math.PI * 2);
-  ctx.fillStyle = "#f8fafc";
-  ctx.fill();
-  ctx.restore();
-
-  overlay.setSignalTooltip(id, text, x, y, width, height);
 }

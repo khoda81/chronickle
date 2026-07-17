@@ -4,6 +4,7 @@ import { kernelContext, type WaveletMode } from "../wavelet.ts";
 import type { PaletteName } from "../ramp.ts";
 import type { Frame } from "./context.ts";
 import { heatmapScaleWindow, signalRowLayout, type SignalRowLayout } from "./layout.ts";
+import { TIMELINE_OVERLAY_METRICS } from "../../ui/timelineOverlayMetrics.ts";
 
 export interface SignalRowDrawOptions {
   readonly verticalOffset: number;
@@ -17,11 +18,28 @@ export interface SignalRowDrawOptions {
 export interface SignalRowLayer extends SignalRowLayout {
   /** Draw the heatmap, status strip, and separator. True when a retry is visible. */
   draw(options: SignalRowDrawOptions): boolean;
+  /** Draw the canvas anchor/connector and resolve the matching DOM tooltip rectangle. */
+  drawTooltip(anchorX: number, cursorX: number, text: string): SignalTooltipPlacement;
+}
+
+export interface SignalRowStack {
+  /** Return the next row at the current stack position, then advance by its height. */
+  next(rowId: string, height: number): SignalRowLayer;
+}
+
+export interface SignalTooltipPlacement {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
 }
 
 interface SignalRowResources {
   evalTime: Float64Array;
+  readonly tooltip: MutableSignalTooltipPlacement;
 }
+
+type MutableSignalTooltipPlacement = { -readonly [K in keyof SignalTooltipPlacement]: number };
 
 const RESOURCE_BY_CONTEXT = new WeakMap<
   CanvasRenderingContext2D,
@@ -32,7 +50,23 @@ export const SignalRows = {
   create(frame: Frame, rowId: string, top: number, height: number): SignalRowLayer {
     return new SignalRowImpl(frame, rowId, top, height);
   },
+  stack(frame: Frame, top: number): SignalRowStack {
+    return new SignalRowStackImpl(frame, top);
+  },
 };
+
+class SignalRowStackImpl implements SignalRowStack {
+  constructor(
+    private readonly frame: Frame,
+    private top: number,
+  ) {}
+
+  next(rowId: string, height: number): SignalRowLayer {
+    const row = SignalRows.create(this.frame, rowId, this.top, height);
+    this.top += height;
+    return row;
+  }
+}
 
 class SignalRowImpl implements SignalRowLayer {
   readonly top: number;
@@ -105,6 +139,45 @@ class SignalRowImpl implements SignalRowLayer {
     frame.fillRectPx(0, this.top + this.height - 1, frame.width, 1, "rgba(255,255,255,0.18)");
     return hasVisibleRetry;
   }
+
+  drawTooltip(anchorX: number, cursorX: number, text: string): SignalTooltipPlacement {
+    const { frame } = this;
+    const ctx = frame.ctx;
+    const metrics = TIMELINE_OVERLAY_METRICS.signalTooltip;
+    const placement = signalRowResources(ctx, this.rowId).tooltip;
+    ctx.save();
+    ctx.font = metrics.font;
+    placement.width =
+      Math.ceil(ctx.measureText(text).width) + metrics.paddingXPx * 2 + metrics.borderWidthPx * 2;
+    placement.height = metrics.heightPx;
+    const fitsLeft = anchorX - metrics.gapPx - placement.width >= metrics.marginPx;
+    placement.x = fitsLeft
+      ? anchorX - metrics.gapPx - placement.width
+      : Math.max(
+          metrics.marginPx,
+          Math.min(frame.width - placement.width - metrics.marginPx, anchorX + metrics.gapPx),
+        );
+    placement.y = Math.max(
+      metrics.marginPx,
+      Math.min(
+        frame.height - placement.height - metrics.marginPx,
+        this.heatmapCenter - placement.height / 2,
+      ),
+    );
+
+    ctx.strokeStyle = "rgba(226, 232, 240, 0.58)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(anchorX, this.heatmapCenter);
+    ctx.lineTo(cursorX, this.heatmapCenter);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(anchorX, this.heatmapCenter, 2.5, 0, Math.PI * 2);
+    ctx.fillStyle = "#f8fafc";
+    ctx.fill();
+    ctx.restore();
+    return placement;
+  }
 }
 
 function signalRowResources(ctx: CanvasRenderingContext2D, rowId: string): SignalRowResources {
@@ -115,7 +188,7 @@ function signalRowResources(ctx: CanvasRenderingContext2D, rowId: string): Signa
   }
   let resources = rows.get(rowId);
   if (resources === undefined) {
-    resources = { evalTime: new Float64Array(0) };
+    resources = { evalTime: new Float64Array(0), tooltip: { x: 0, y: 0, width: 0, height: 0 } };
     rows.set(rowId, resources);
   }
   return resources;

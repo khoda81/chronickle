@@ -36,6 +36,8 @@ import {
   signalRowLayout,
 } from "../src/engine/gfx/layout.ts";
 import { formatResolution } from "../src/engine/gfx/resolution.ts";
+import type { Frame } from "../src/engine/gfx/context.ts";
+import { SignalRows } from "../src/engine/gfx/signalRow.ts";
 import { eventIndexAtOrBefore, eventIndexNearPoint } from "../src/engine/hittest.ts";
 import { DataTransform } from "../src/engine/transform.ts";
 import { GestureSession, transformTouchInterval } from "../src/engine/gesture.ts";
@@ -725,6 +727,14 @@ test("signal row layout owns status, heatmap, hit-test, and collapse geometry", 
     signalRowCollapseProgress(2, ROW_REMOVE_THRESHOLD, 1) === 0,
     "unrelated row received collapse progress",
   );
+});
+
+test("signal row stack advances row geometry without caller-owned y state", () => {
+  const rows = SignalRows.stack({} as Frame, 100);
+  const first = rows.next("first", 40);
+  const second = rows.next("second", 70);
+  assert(first.top === 100 && first.height === 40, "first stacked row was misplaced");
+  assert(second.top === 140 && second.height === 70, "row stack did not advance by row height");
 });
 
 test("vertical heatmap pan preserves a device-pixel time grid", () => {

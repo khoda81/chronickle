@@ -7,7 +7,7 @@
  *   - the `DataTransform` mapping time/screen/y domains for this frame,
  *   - a managed `save/restore` stack (depth-tracked for fail-fast balance
  *     checks on dispose),
- *   - access to L2 domain layers via `frame.signalRow()`, `frame.heatmap()`,
+ *   - access to L2 domain layers via `frame.signalRows()`, `frame.heatmap()`,
  *     `frame.events()`, and `frame.axis()` (constructed per call and bound to
  *     this frame).
  *
@@ -27,7 +27,7 @@ import type { HeatmapLayer } from "./heatmap.ts";
 import type { EventLayer } from "./events.ts";
 import type { AxisLayer } from "./axis.ts";
 import type { StatusBarLayer } from "./resolution.ts";
-import type { SignalRowLayer } from "./signalRow.ts";
+import type { SignalRowStack } from "./signalRow.ts";
 import { Heatmap } from "./heatmap.ts";
 import { Events } from "./events.ts";
 import { Axis } from "./axis.ts";
@@ -168,9 +168,9 @@ export class Frame implements Disposable {
     return StatusBar.create(this);
   }
 
-  /** High-level geometry and renderer for one stacked signal row. */
-  signalRow(rowId: string, top: number, height: number): SignalRowLayer {
-    return SignalRows.create(this, rowId, top, height);
+  /** Create a vertically advancing cursor for a contiguous stack of signal rows. */
+  signalRows(top: number): SignalRowStack {
+    return SignalRows.stack(this, top);
   }
 
   /** Draw the time axis with an explicit minimum tick spacing (CSS px). */
