@@ -66,6 +66,15 @@ export class Plot {
     return this.canvas.height / this.dpr;
   }
 
+  /** Build the current time transform for a CSS-pixel viewport. */
+  createTransform(width = this.cssWidth, height = this.cssHeight): DataTransform {
+    return new DataTransform(
+      this.timeInterval,
+      Interval.create(0, width),
+      Interval.create(0, height),
+    );
+  }
+
   /**
    * Begin a frame. Returns a disposable `Frame` whose transform maps the
    * current time range to the canvas's CSS-pixel size at device resolution.
@@ -77,12 +86,6 @@ export class Plot {
    * Throws if the canvas has a non-positive CSS size.
    */
   beginFrame(): Frame {
-    const tx = new DataTransform(
-      this.timeInterval,
-      Interval.create(0, this.cssWidth),
-      Interval.create(0, this.cssHeight),
-    );
-
-    return new Frame(this.ctx, tx, this.dpr);
+    return new Frame(this.ctx, this.createTransform(), this.dpr);
   }
 }

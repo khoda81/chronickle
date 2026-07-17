@@ -1,29 +1,28 @@
 /** One shared, vertically-resizable news and market timeline. */
 
-import type { EventSet, NewsEvent } from "../domain.ts";
+import type { EventSet } from "../domain.ts";
 import type { EventQueryResult } from "../data/events/broker.ts";
 import type { Subscription, ReadRequest, SignalView } from "../data/signal/broker.ts";
 import type { MutableSample } from "../data/signal/sample.ts";
 import { Interval } from "../core/interval.ts";
-import { DataTransform } from "./transform.ts";
-import { transformTouchInterval, type GestureInputKind } from "./gesture.ts";
-import { TimelineGestureController, type GestureTarget } from "./timelineGestureController.ts";
-import type { CanvasPoint, MutableCanvasSize } from "./coordinates.ts";
+import type { MutableCanvasSize } from "./coordinates.ts";
 import { Plot } from "./plot.ts";
-import { eventIndexAtOrBefore, eventIndexNearPoint } from "./hittest.ts";
 import type { PaletteName } from "./ramp.ts";
 import type { WaveletMode } from "./wavelet.ts";
 import { DEFAULT_MIN_TICK_PX } from "./gfx/axis.ts";
 import type { Frame } from "./gfx/context.ts";
-import {
-  fitStackLayout,
-  MIN_NEWS_HEIGHT,
-  RESIZE_HANDLE_RADIUS,
-  ROW_REMOVE_THRESHOLD,
-  signalRowCollapseProgress,
-  signalRowContainsHeatmap,
-} from "./gfx/layout.ts";
+import { fitStackLayout, signalRowCollapseProgress } from "./gfx/layout.ts";
 import { BrokerDemand } from "../data/index.ts";
+import {
+  TimelineInteractionModel,
+  normalizePlayback,
+  type HoverInfo,
+  type TimelineInteractionState,
+  type TimelineLayout,
+  type TimelinePlayback,
+} from "./timelineInteractionModel.ts";
+
+export type { HoverInfo, TimelineLayout, TimelinePlayback } from "./timelineInteractionModel.ts";
 
 export type DataReader = (request: ReadRequest) => SignalView;
 export type SampleAtReader = (time: number, out: MutableSample) => boolean;
@@ -59,27 +58,6 @@ interface SignalRowRuntime {
   verticalOffset: number;
   readonly hoverSample: MutableSample;
   subscription: ActiveSignalSubscription | null;
-}
-
-export interface HoverInfo {
-  readonly index: number;
-  readonly title: string;
-  readonly link: string;
-  readonly feedId: string;
-  readonly summary: string;
-  readonly t: number;
-}
-
-export type TimelinePlayback =
-  { readonly mode: "following"; readonly anchor: number } | { readonly mode: "paused" };
-
-export interface TimelineLayout {
-  readonly newsHeight: number;
-  readonly rows: readonly {
-    readonly id: string;
-    readonly height: number;
-    readonly verticalOffset: number;
-  }[];
 }
 
 export interface TimelineOverlaySink {
@@ -126,15 +104,6 @@ export interface TimelineOptions {
   readonly config?: Partial<TimelineConfig>;
 }
 
-interface TimelineState {
-  events: EventSet;
-  timeInterval: Interval;
-  logGain: number;
-  hovered: number | null;
-  newsHeight: number;
-  playback: TimelinePlayback;
-}
-
 export interface TimelineConfig {
   readonly wheelLineHeight: number;
   readonly wheelSensitivity: number;
@@ -154,7 +123,6 @@ const DEFAULT_TIMELINE_CONFIG: TimelineConfig = {
 };
 
 const EMPTY_EVENTS: EventSet = { events: [] };
-const DEFAULT_NOW_ANCHOR = 0.85;
 const RIGHT_EDGE_NOW_ANCHOR = 1;
 export class Timeline {
   private readonly canvas: HTMLCanvasElement;
@@ -166,21 +134,15 @@ export class Timeline {
   private readonly config: TimelineConfig;
   private readonly signal: AbortSignal;
   private readonly canvasSize: MutableCanvasSize = { width: 0, height: 0 };
-  private readonly gestures: TimelineGestureController;
+  private readonly interaction: TimelineInteractionModel;
   // App state owns persistence; Timeline owns the live mutable row runtime.
   private rows: SignalRowRuntime[];
   private latestDpr = 1;
-  private latestNumPx = 0;
   private pendingInitialNewsHeight: number | null;
-  private layoutChangePending = false;
   private rafId: number | null = null;
   private resizeObserver: ResizeObserver | null = null;
-  private state: TimelineState;
+  private state: TimelineInteractionState;
   private nowTimer: number | null = null;
-  private crosshairPinned = false;
-  private eventTooltipHovered = false;
-  private hoverClearTimer: number | null = null;
-  private notifiedHover: HoverInfo | null = null;
 
   constructor(opts: TimelineOptions) {
     opts.signal.throwIfAborted();
@@ -202,40 +164,19 @@ export class Timeline {
       newsHeight: opts.initialNewsHeight,
       playback: normalizePlayback(opts.initialPlayback),
     };
-    this.gestures = new TimelineGestureController({
+    this.interaction = new TimelineInteractionModel({
       canvas: this.canvas,
       viewport: this.canvasSize,
-      wheelLineHeight: this.config.wheelLineHeight,
       signal: this.signal,
-      host: {
-        targetAt: point => this.gestureTargetAt(point),
-        gestureStarted: () => this.onGestureStarted(),
-        gestureEnded: (input, cancelled, finished, pointerInside) =>
-          this.onGestureEnded(input, cancelled, finished, pointerInside),
-        panTimeByPixels: (deltaX, viewportWidth) => this.panTimeByPixels(deltaX, viewportWidth),
-        panRow: (row, deltaY) => this.panRowVertically(row, deltaY),
-        resizeBoundary: (index, deltaY) => this.resizeBoundaryBy(index, deltaY),
-        pinchTime: (
-          viewportWidth,
-          previousCenterX,
-          currentCenterX,
-          previousDistance,
-          currentDistance,
-        ) =>
-          this.pinchTime(
-            viewportWidth,
-            previousCenterX,
-            currentCenterX,
-            previousDistance,
-            currentDistance,
-          ),
-        wheel: (point, deltaX, deltaY, shiftKey) =>
-          this.onGestureWheel(point, deltaX, deltaY, shiftKey),
-        hoverMoved: (point, pointerInside) => this.onGestureHoverMove(point, pointerInside),
-        pointerLeft: () => this.onGesturePointerLeave(),
-        tap: point => this.onGestureTap(point),
-        doubleTap: point => this.onGestureDoubleTap(point),
-      },
+      plot: this.plot,
+      state: this.state,
+      rows: () => this.rows,
+      overlay: this.overlay,
+      callbacks: this.callbacks,
+      requestDraw: () => this.reqDraw(),
+      wheelLineHeight: this.config.wheelLineHeight,
+      wheelSensitivity: this.config.wheelSensitivity,
+      timeScrollSensitivity: this.config.timeScrollSensitivity,
     });
 
     if (typeof ResizeObserver !== "undefined") {
@@ -282,48 +223,19 @@ export class Timeline {
       }
     }
     this.fitLayout();
-    this.state.hovered = null;
+    this.interaction.clearHover();
     this.reqDraw();
   }
 
   refreshEvents(): void {
     const { events } = this.eventSource(this.state.timeInterval);
     this.state.events = { events };
-    this.state.hovered = null;
+    this.interaction.clearHover();
     this.reqDraw();
   }
 
   setTimeInterval(range: Interval): void {
-    this.applyTimeInterval(range, true);
-  }
-
-  private applyTimeInterval(range: Interval, notify: boolean): void {
-    this.state.timeInterval = range;
-    this.plot.setTimeInterval(range);
-    if (notify) this.notifyViewportChange();
-    this.reqDraw();
-  }
-
-  private setPlayback(playback: TimelinePlayback): void {
-    if (samePlayback(playback, this.state.playback)) return;
-    this.state.playback = playback;
-    this.callbacks.onPlaybackChange?.(playback);
-    this.reqDraw();
-  }
-
-  private captureNowAnchor(now: number): number {
-    const span = this.state.timeInterval.end - this.state.timeInterval.start;
-    if (!(span > 0)) return DEFAULT_NOW_ANCHOR;
-    return (now - this.state.timeInterval.start) / span;
-  }
-
-  private panTimeInterval(range: Interval, now = Date.now()): void {
-    this.state.timeInterval = range;
-    this.plot.setTimeInterval(range);
-    const playback = { mode: "paused", anchor: this.captureNowAnchor(now) } as const;
-    this.setPlayback(playback);
-    this.notifyViewportChange();
-    this.reqDraw();
+    this.interaction.setTimeInterval(range);
   }
 
   getTimeInterval(): Interval {
@@ -331,9 +243,7 @@ export class Timeline {
   }
 
   setPriceScale(scale: number): void {
-    this.state.logGain = scale;
-    this.notifyViewportChange();
-    this.reqDraw();
+    this.interaction.setPriceScale(scale);
   }
 
   getPriceScale(): number {
@@ -354,42 +264,19 @@ export class Timeline {
   }
 
   getLayout(): TimelineLayout {
-    return {
-      newsHeight: this.state.newsHeight,
-      rows: this.rows.map(runtime => ({
-        id: runtime.row.id,
-        height: runtime.height,
-        verticalOffset: runtime.verticalOffset,
-      })),
-    };
+    return this.interaction.getLayout();
   }
 
   private close = (): void => {
     if (this.rafId !== null) cancelAnimationFrame(this.rafId);
     if (this.nowTimer !== null) clearTimeout(this.nowTimer);
-    if (this.hoverClearTimer !== null) clearTimeout(this.hoverClearTimer);
     this.rafId = null;
     this.nowTimer = null;
-    this.hoverClearTimer = null;
+    this.interaction.close();
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.disposeSignalSubscriptions();
   };
-
-  private notifyViewportChange(): void {
-    this.callbacks.onViewportChange?.(this.state.timeInterval, this.state.logGain);
-  }
-
-  private flushLayoutChange(removeCollapsedRows = false): void {
-    if (!this.layoutChangePending) return;
-    this.layoutChangePending = false;
-    const collapsedRowIds = removeCollapsedRows
-      ? this.rows
-        .filter(runtime => runtime.height <= ROW_REMOVE_THRESHOLD)
-        .map(runtime => runtime.row.id)
-      : [];
-    this.callbacks.onLayoutChange?.(this.getLayout(), collapsedRowIds);
-  }
 
   private resize(): void {
     const dpr = window.devicePixelRatio;
@@ -463,12 +350,11 @@ export class Timeline {
 
     const timePerDevicePx = (timeInterval.end - timeInterval.start) / numDevicePx;
     this.latestDpr = frame.dpr;
-    this.latestNumPx = numDevicePx;
 
     const eventResult = this.eventSource(timeInterval);
     this.state.events = { events: eventResult.events };
     const eventY = this.state.newsHeight / 2;
-    this.updateHover(frame.tx, eventY, width, height);
+    this.interaction.updateHover(frame.tx, eventY, width, height);
     frame.text("NEWS", 8, 9, "10px ui-monospace, monospace", "#94a3b8", "left", "top");
     frame.events().drawRow(this.state.events, this.feedColorOf, this.state.hovered, eventY);
 
@@ -482,10 +368,11 @@ export class Timeline {
       const collapseProgress = signalRowCollapseProgress(
         index,
         rowHeight,
-        this.gestures.activeBoundary,
+        this.interaction.activeBoundary,
       );
       this.overlay?.setRowCollapseProgress(row.id, collapseProgress);
-      hasVisibleRetry = hasVisibleRetry ||
+      hasVisibleRetry =
+        hasVisibleRetry ||
         signalRow.draw({
           verticalOffset: runtime.verticalOffset,
           logGain: priceScale,
@@ -520,33 +407,23 @@ export class Timeline {
 
   private updateCrosshairOverlay(): void {
     const width = this.plot.cssWidth;
-    if (!this.canShowHoverOverlay() || !(width > 0)) {
+    if (!this.interaction.canShowHoverOverlay() || !(width > 0)) {
       this.overlay?.setCrosshair(false, 0, Number.NaN, width);
       return;
     }
 
-    const x = Math.max(0, Math.min(width, this.gestures.pointer.x));
+    const x = Math.max(0, Math.min(width, this.interaction.pointer.x));
     const time =
       this.state.timeInterval.start +
       (x / width) * (this.state.timeInterval.end - this.state.timeInterval.start);
     this.overlay?.setCrosshair(true, x, time, width);
   }
 
-  /** Shared visibility contract for the crosshair and all hover-owned labels. */
-  private canShowHoverOverlay(): boolean {
-    return (
-      (this.gestures.pointerInside || this.eventTooltipHovered || this.crosshairPinned) &&
-      !this.gestures.active &&
-      this.latestNumPx > 0 &&
-      this.boundaryAt(this.gestures.pointer.y) === null
-    );
-  }
-
   private drawSignalHoverTooltips(frame: Frame): void {
     this.overlay?.hideSignalTooltips();
-    if (!this.canShowHoverOverlay() || this.overlay === undefined) return;
+    if (!this.interaction.canShowHoverOverlay() || this.overlay === undefined) return;
 
-    const x = Math.max(0, Math.min(frame.width, this.gestures.pointer.x));
+    const x = Math.max(0, Math.min(frame.width, this.interaction.pointer.x));
     const hoverTime =
       this.state.timeInterval.start +
       (x / frame.width) * (this.state.timeInterval.end - this.state.timeInterval.start);
@@ -575,57 +452,6 @@ export class Timeline {
     const runtime = this.rows.find(runtime => runtime.row.id === id);
     if (runtime === undefined || runtime.palette === palette) return;
     runtime.palette = palette;
-    this.reqDraw();
-  }
-
-  private boundaryAt(y: number): number | null {
-    if (this.rows.length === 0) return null;
-    let boundaryY = this.state.newsHeight;
-    if (Math.abs(y - boundaryY) <= RESIZE_HANDLE_RADIUS) return 0;
-    for (let index = 0; index < this.rows.length - 1; index++) {
-      boundaryY += this.rows[index]!.height;
-      if (Math.abs(y - boundaryY) <= RESIZE_HANDLE_RADIUS) return index + 1;
-    }
-    return null;
-  }
-
-  private moveBoundary(boundary: number, delta: number): void {
-    if (this.rows.length === 0 || delta === 0) return;
-    this.layoutChangePending = true;
-    if (boundary === 0) {
-      const pair = this.state.newsHeight + this.rows[0]!.height;
-      const minNews = Math.min(MIN_NEWS_HEIGHT, pair);
-      const newsHeight = Math.max(minNews, Math.min(pair, this.state.newsHeight + delta));
-      this.rows[0]!.height = pair - newsHeight;
-      this.state.newsHeight = newsHeight;
-      return;
-    }
-    const left = boundary - 1;
-    const right = boundary;
-    const pair = this.rows[left]!.height + this.rows[right]!.height;
-    const leftHeight = Math.max(0, Math.min(pair, this.rows[left]!.height + delta));
-    this.rows[left]!.height = leftHeight;
-    this.rows[right]!.height = pair - leftHeight;
-  }
-
-  private rowAt(y: number): number | null {
-    let rowY = this.state.newsHeight;
-    for (let index = 0; index < this.rows.length; index++) {
-      const nextY = rowY + this.rows[index]!.height;
-      if (signalRowContainsHeatmap(rowY, this.rows[index]!.height, y)) return index;
-      rowY = nextY;
-    }
-    return null;
-  }
-
-  private panRowVertically(index: number | null, delta: number): void {
-    if (index === null || delta === 0) return;
-    const runtime = index === null ? undefined : this.rows[index];
-    if (runtime === undefined) return;
-    const next = runtime.verticalOffset + delta;
-    if (next === runtime.verticalOffset) return;
-    runtime.verticalOffset = next;
-    this.layoutChangePending = true;
     this.reqDraw();
   }
 
@@ -679,287 +505,13 @@ export class Timeline {
     );
   }
 
-  /**
-   * Retain the current hover while the pointer is over the event card.
-   *
-   * Canvas `pointerleave` fires before the tooltip receives `pointerenter`, so
-   * hover clearing is deferred by one task and cancelled when the card takes
-   * ownership. This keeps the crosshair fixed while links remain selectable.
-   */
   public setEventTooltipHovered(hovered: boolean): void {
-    this.eventTooltipHovered = hovered;
-    if (hovered) {
-      this.cancelScheduledHoverClear();
-      this.reqDraw();
-      return;
-    }
-    if (this.state.hovered === null) {
-      this.cancelScheduledHoverClear();
-      return;
-    }
-    this.scheduleHoverClear();
+    this.interaction.setEventTooltipHovered(hovered);
   }
 
   public togglePlayback(): void {
-    if (this.state.playback.mode === "following") {
-      this.setPlayback({ mode: "paused" });
-      return;
-    }
-
-    this.setPlayback({ mode: "following", anchor: this.captureNowAnchor(Date.now()) });
+    this.interaction.togglePlayback();
   }
-
-  private followNowAtRightEdge(): void {
-    const now = Date.now();
-    const span = this.state.timeInterval.end - this.state.timeInterval.start;
-    if (!(span > 0)) return;
-
-    this.state.playback = { mode: "following", anchor: RIGHT_EDGE_NOW_ANCHOR };
-    this.applyTimeInterval(Interval.create(now - span, now), true);
-    this.callbacks.onPlaybackChange?.(this.state.playback);
-  }
-
-  private gestureTargetAt(point: CanvasPoint): GestureTarget {
-    const boundary = this.boundaryAt(point.y);
-    return boundary === null
-      ? { kind: "viewport", row: this.rowAt(point.y) }
-      : { kind: "boundary", index: boundary };
-  }
-
-  private onGestureStarted(): void {
-    this.crosshairPinned = false;
-    this.clearHover();
-    this.reqDraw();
-  }
-
-  private onGestureEnded(
-    input: GestureInputKind,
-    cancelled: boolean,
-    finished: boolean,
-    pointerInside: boolean,
-  ): void {
-    this.flushLayoutChange(finished);
-    if (input === "touch" && finished) {
-      this.crosshairPinned = !cancelled && pointerInside;
-    }
-    if (cancelled) this.clearHover();
-    else if (input === "touch" && finished) this.updateHoverAtCurrentTransform();
-    if (finished && !pointerInside) this.scheduleHoverClear();
-    this.reqDraw();
-  }
-
-  private panTimeByPixels(deltaX: number, viewportWidth: number): void {
-    if (deltaX === 0 || !(viewportWidth > 0)) return;
-    const span = this.state.timeInterval.end - this.state.timeInterval.start;
-    this.panTimeInterval(Interval.pan(this.state.timeInterval, -(deltaX / viewportWidth) * span));
-  }
-
-  private resizeBoundaryBy(index: number, deltaY: number): void {
-    this.moveBoundary(index, deltaY);
-    this.reqDraw();
-  }
-
-  private pinchTime(
-    viewportWidth: number,
-    previousCenterX: number,
-    currentCenterX: number,
-    previousDistance: number,
-    currentDistance: number,
-  ): void {
-    const transformed = transformTouchInterval(
-      this.state.timeInterval,
-      viewportWidth,
-      previousCenterX,
-      currentCenterX,
-      previousDistance,
-      currentDistance,
-    );
-    if (Math.abs(currentCenterX - previousCenterX) >= 0.5) {
-      this.panTimeInterval(transformed);
-    } else {
-      this.setTimeInterval(transformed);
-    }
-  }
-
-  private onGestureWheel(
-    point: CanvasPoint,
-    deltaX: number,
-    deltaY: number,
-    shiftKey: boolean,
-  ): void {
-    const cssWidth = this.plot.cssWidth;
-    if (!(cssWidth > 0)) return;
-    const span = this.state.timeInterval.end - this.state.timeInterval.start;
-    const dt = (this.config.timeScrollSensitivity * span * deltaX) / cssWidth;
-    if (dt !== 0) {
-      this.panTimeInterval(Interval.pan(this.state.timeInterval, dt));
-    }
-    if (shiftKey) {
-      this.setPriceScale(this.state.logGain - deltaY * this.config.wheelSensitivity);
-      return;
-    }
-    if (deltaY === 0) return;
-    const anchorTime =
-      this.state.timeInterval.start +
-      (point.x / cssWidth) * (this.state.timeInterval.end - this.state.timeInterval.start);
-    const factor = Math.exp(-deltaY * this.config.wheelSensitivity);
-    this.panTimeInterval(Interval.zoom(this.state.timeInterval, anchorTime, factor));
-  }
-
-  private onGestureHoverMove(point: CanvasPoint, pointerInside: boolean): void {
-    if (pointerInside) this.cancelScheduledHoverClear();
-    const boundary = this.boundaryAt(point.y);
-    this.canvas.style.cursor =
-      boundary !== null
-        ? "ns-resize"
-        : this.clickableEventIndexAtCurrentTransform(point) !== null
-          ? "pointer"
-          : "";
-    this.updateHoverAtCurrentTransform();
-    this.reqDraw();
-  }
-
-  private onGesturePointerLeave(): void {
-    this.scheduleHoverClear();
-  }
-
-  private onGestureTap(point: CanvasPoint): void {
-    const clickedEventIndex = this.clickableEventIndexAtCurrentTransform(point);
-    if (this.updateHoverAtCurrentTransform()) this.reqDraw();
-    this.reqDraw();
-    if (clickedEventIndex !== null) {
-      const clicked = this.eventAt(clickedEventIndex);
-      window.open(clicked.link, "_blank", "noopener,noreferrer");
-    }
-  }
-
-  private onGestureDoubleTap(point: CanvasPoint): void {
-    // A marker activation wins over the chart-level navigation gesture.
-    if (this.clickableEventIndexAtCurrentTransform(point) !== null) return;
-    this.crosshairPinned = false;
-    this.followNowAtRightEdge();
-  }
-
-  private scheduleHoverClear(): void {
-    if (
-      this.gestures.pointerInside ||
-      this.eventTooltipHovered ||
-      this.crosshairPinned ||
-      this.gestures.active ||
-      this.hoverClearTimer !== null
-    ) {
-      return;
-    }
-
-    this.hoverClearTimer = window.setTimeout(() => {
-      this.hoverClearTimer = null;
-      if (
-        this.gestures.pointerInside ||
-        this.eventTooltipHovered ||
-        this.crosshairPinned ||
-        this.gestures.active
-      ) {
-        return;
-      }
-      this.clearHover();
-      this.reqDraw();
-    }, 0);
-  }
-
-  private cancelScheduledHoverClear(): void {
-    if (this.hoverClearTimer === null) return;
-    clearTimeout(this.hoverClearTimer);
-    this.hoverClearTimer = null;
-  }
-
-  private eventAt(index: number): NewsEvent {
-    const event = this.state.events.events[index];
-    if (event === undefined) throw new Error(`Event index out of range: ${index}`);
-    return event;
-  }
-
-  private updateHoverAtCurrentTransform(): boolean {
-    const width = this.plot.cssWidth;
-    const height = this.plot.cssHeight;
-    if (!(width > 0) || !(height > 0)) return this.clearHover();
-    const tx = new DataTransform(
-      this.state.timeInterval,
-      Interval.create(0, width),
-      Interval.create(0, height),
-    );
-    return this.updateHover(tx, this.state.newsHeight / 2, width, height);
-  }
-
-  private clickableEventIndexAtCurrentTransform(
-    point: CanvasPoint = this.gestures.pointer,
-  ): number | null {
-    const width = this.plot.cssWidth;
-    const height = this.plot.cssHeight;
-    if (!(width > 0) || !(height > 0) || !this.gestures.pointerInside) return null;
-    const tx = new DataTransform(
-      this.state.timeInterval,
-      Interval.create(0, width),
-      Interval.create(0, height),
-    );
-    return eventIndexNearPoint(this.state.events, tx, point, this.state.newsHeight / 2);
-  }
-
-  private updateHover(tx: DataTransform, eventY: number, width: number, height: number): boolean {
-    const previous = this.state.hovered;
-    const point = this.gestures.pointer;
-    const index =
-      (this.gestures.pointerInside || this.eventTooltipHovered || this.crosshairPinned) &&
-        !this.gestures.active &&
-        this.boundaryAt(point.y) === null
-        ? eventIndexAtOrBefore(this.state.events, tx, point.x)
-        : null;
-    this.state.hovered = index;
-    if (index === null) {
-      this.clearHover();
-      return previous !== null;
-    }
-
-    const event = this.eventAt(index);
-    const anchorX = Math.max(0, Math.min(width, tx.timeToX(event.t)));
-    this.overlay?.setEventTooltipAnchor(true, anchorX, eventY, width, height);
-
-    const contentChanged = !sameHover(this.notifiedHover, index, event);
-    if (!contentChanged || this.callbacks.onHover === undefined) return previous !== index;
-
-    const info: HoverInfo = {
-      index,
-      title: event.title,
-      link: event.link,
-      feedId: event.feedId,
-      summary: event.summary,
-      t: event.t,
-    };
-    this.notifiedHover = info;
-    this.callbacks.onHover(info);
-    return previous !== index;
-  }
-
-  private clearHover(): boolean {
-    const visualChanged = this.state.hovered !== null;
-    this.state.hovered = null;
-    this.overlay?.setEventTooltipAnchor(false, 0, 0, 0, 0);
-    if (this.notifiedHover === null) return visualChanged;
-    this.notifiedHover = null;
-    this.callbacks.onHover?.(null);
-    return visualChanged;
-  }
-}
-
-function sameHover(info: HoverInfo | null, index: number, event: NewsEvent): boolean {
-  return (
-    info !== null &&
-    info.index === index &&
-    info.t === event.t &&
-    info.title === event.title &&
-    info.link === event.link &&
-    info.feedId === event.feedId &&
-    info.summary === event.summary
-  );
 }
 
 function createSignalRowRuntime(
@@ -980,18 +532,6 @@ function createSignalRowRuntime(
 
 function restoredRowHeight(value: number | undefined, fallback: number): number {
   return value !== undefined && Number.isFinite(value) && value > 0 ? value : fallback;
-}
-
-function normalizePlayback(playback: TimelinePlayback): TimelinePlayback {
-  if (playback.mode !== "following") return playback;
-  const anchor = Number.isFinite(playback.anchor) ? playback.anchor : DEFAULT_NOW_ANCHOR;
-  return { mode: "following", anchor: Math.max(0, Math.min(1, anchor)) };
-}
-
-function samePlayback(a: TimelinePlayback, b: TimelinePlayback): boolean {
-  return (
-    a.mode === b.mode && (a.mode === "paused" || (b.mode === "following" && a.anchor === b.anchor))
-  );
 }
 
 const PRICE_FORMAT = new Intl.NumberFormat(undefined, {
