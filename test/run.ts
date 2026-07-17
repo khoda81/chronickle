@@ -57,6 +57,7 @@ test("persisted UI state migrates v3 range bounds to a branded interval", () => 
     version: 4 as const,
     viewport: Interval.create(0, 1),
     playback: { mode: "following" as const, anchor: 0.85 },
+    newsHeight: 110,
     charts: [],
   };
   const restored = deserializePersistedUiState(
@@ -76,7 +77,10 @@ test("persisted UI state migrates v3 range bounds to a branded interval", () => 
     "legacy viewport was not migrated",
   );
   assert(restored.playback.mode === "paused", "playback state was not restored");
+  assert(restored.newsHeight === 120, "news row height was not restored");
   assert(restored.charts[0]?.height === 80, "chart layout was not restored");
+  assert(restored.charts[0]?.verticalOffset === 0, "chart offset was not defaulted");
+  assert(restored.charts[0]?.waveletMode === "centered", "chart wavelet mode was not defaulted");
 });
 
 interface FetchIntervalResult {
@@ -627,6 +631,7 @@ test("persisted UI state rejects unsupported future schemas", () => {
     version: 4 as const,
     viewport: Interval.create(0, 1),
     playback: { mode: "following" as const, anchor: 0.85 },
+    newsHeight: 110,
     charts: [],
   };
   const restored = deserializePersistedUiState(

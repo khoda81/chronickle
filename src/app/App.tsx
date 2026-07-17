@@ -5,6 +5,7 @@ import { Broker } from "../data/signal/broker.ts";
 import { priceSignalSource } from "../data/signal/market/market.ts";
 import type { RssFeed } from "../domain.ts";
 import { DEFAULT_PALETTE, PALETTES, type PaletteName } from "../engine/ramp.ts";
+import { DEFAULT_NEWS_HEIGHT, DEFAULT_SIGNAL_ROW_HEIGHT } from "../engine/gfx/layout.ts";
 import { Interval } from "../core/interval.ts";
 import {
   Timeline,
@@ -39,6 +40,7 @@ export function App() {
     version: 4,
     viewport: Interval.create(now - DAY_MS, now),
     playback: { mode: "following", anchor: 0.85 },
+    newsHeight: DEFAULT_NEWS_HEIGHT,
     charts: [],
   });
   const saved = persistence.state();
@@ -195,11 +197,10 @@ export function App() {
       },
     });
     const paletteNames = Object.keys(PALETTES) as PaletteName[];
-    const requestedPalette = initial?.palette;
     const defaultPaletteIndex = Math.max(0, paletteNames.indexOf(DEFAULT_PALETTE));
     const palette =
-      requestedPalette !== undefined && requestedPalette in PALETTES
-        ? requestedPalette
+      initial !== undefined
+        ? initial.palette
         : (paletteNames[(defaultPaletteIndex + charts().length) % paletteNames.length] ??
           DEFAULT_PALETTE);
     const chart: ChartState = {
@@ -207,14 +208,8 @@ export function App() {
       symbol,
       palette,
       waveletMode: initial?.waveletMode ?? "centered",
-      verticalOffset:
-        initial?.verticalOffset !== undefined && Number.isFinite(initial.verticalOffset)
-          ? initial.verticalOffset
-          : 0,
-      height:
-        initial?.height !== undefined && Number.isFinite(initial.height) && initial.height > 0
-          ? initial.height
-          : undefined,
+      verticalOffset: initial?.verticalOffset ?? 0,
+      height: initial?.height ?? DEFAULT_SIGNAL_ROW_HEIGHT,
     };
     brokerRuntimes.set(key, { broker, controller });
     setCharts(current => [...current, chart]);
@@ -304,11 +299,8 @@ export function App() {
     }
   };
 
-  for (const chart of saved.charts.length > 0
-    ? saved.charts
-    : [{ sourceId: "nobitex", symbol: "USDTIRT" }]) {
-    addChart(chart.sourceId, chart.symbol, chart);
-  }
+  if (saved.charts.length === 0) addChart("nobitex", "USDTIRT");
+  else for (const chart of saved.charts) addChart(chart.sourceId, chart.symbol, chart);
   if (charts().length === 0) addChart("nobitex", "USDTIRT");
 
   createEffect(() => {

@@ -1,7 +1,8 @@
 import { makePersisted, type SyncStorage } from "@solid-primitives/storage";
 import { createSignal, type Accessor, type Setter, type Signal } from "solid-js";
 import { Interval, type Interval as IntervalValue } from "../core/interval.ts";
-import type { PaletteName } from "../engine/ramp.ts";
+import { DEFAULT_SIGNAL_ROW_HEIGHT } from "../engine/gfx/layout.ts";
+import { DEFAULT_PALETTE, PALETTES, type PaletteName } from "../engine/ramp.ts";
 import type { TimelinePlayback } from "../engine/timeline.ts";
 import type { WaveletMode } from "../engine/wavelet.ts";
 
@@ -12,17 +13,17 @@ const DEBOUNCE_MS = 300;
 export interface PersistedChart {
   readonly sourceId: string;
   readonly symbol: string;
-  readonly palette?: PaletteName;
-  readonly waveletMode?: WaveletMode;
-  readonly verticalOffset?: number;
-  readonly height?: number;
+  readonly palette: PaletteName;
+  readonly waveletMode: WaveletMode;
+  readonly verticalOffset: number;
+  readonly height: number;
 }
 
 export interface PersistedUiState {
   readonly version: 4;
   readonly viewport: IntervalValue;
   readonly playback: TimelinePlayback;
-  readonly newsHeight?: number;
+  readonly newsHeight: number;
   readonly charts: readonly PersistedChart[];
 }
 
@@ -86,7 +87,7 @@ function parseVersion4(
     version: STORAGE_VERSION,
     viewport: parseCurrentViewport(value.viewport, fallback.viewport),
     playback: parsePlayback(value.playback),
-    newsHeight: finitePositive(value.newsHeight),
+    newsHeight: finitePositive(value.newsHeight) ?? fallback.newsHeight,
     charts: parseCharts(value.charts, "centered"),
   };
 }
@@ -100,7 +101,7 @@ function migrateLegacyState(
     version: STORAGE_VERSION,
     viewport: parseLegacyViewport(value.viewport, fallback.viewport),
     playback: parsePlayback(value.playback),
-    newsHeight: finitePositive(value.newsHeight),
+    newsHeight: finitePositive(value.newsHeight) ?? fallback.newsHeight,
     charts: parseCharts(value.charts, globalWaveletMode),
   };
 }
@@ -143,13 +144,20 @@ function parseCharts(value: unknown, defaultWaveletMode: WaveletMode): readonly 
     charts.push({
       sourceId: entry.sourceId,
       symbol: entry.symbol,
-      palette: typeof entry.palette === "string" ? (entry.palette as PaletteName) : undefined,
+      palette: parsePalette(entry.palette, charts.length),
       waveletMode: parseWaveletMode(entry.waveletMode, defaultWaveletMode),
-      verticalOffset: finiteNumber(entry.verticalOffset),
-      height: finitePositive(entry.height),
+      verticalOffset: finiteNumber(entry.verticalOffset) ?? 0,
+      height: finitePositive(entry.height) ?? DEFAULT_SIGNAL_ROW_HEIGHT,
     });
   }
   return charts;
+}
+
+function parsePalette(value: unknown, chartIndex: number): PaletteName {
+  if (typeof value === "string" && Object.hasOwn(PALETTES, value)) return value as PaletteName;
+  const paletteNames = Object.keys(PALETTES) as PaletteName[];
+  const defaultIndex = Math.max(0, paletteNames.indexOf(DEFAULT_PALETTE));
+  return paletteNames[(defaultIndex + chartIndex) % paletteNames.length] ?? DEFAULT_PALETTE;
 }
 
 function parseWaveletMode(value: unknown, fallback: WaveletMode): WaveletMode {

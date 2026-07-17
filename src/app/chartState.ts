@@ -8,7 +8,7 @@ export interface ChartState {
   readonly palette: PaletteName;
   readonly waveletMode: WaveletMode;
   readonly verticalOffset: number;
-  readonly height?: number;
+  readonly height: number;
 }
 
 export function chartKey(sourceId: PriceSignalSourceId, symbol: string): string {
