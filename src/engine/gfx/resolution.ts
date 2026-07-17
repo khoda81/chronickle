@@ -3,16 +3,19 @@ import type { Frame } from "./context.ts";
 import { COVERAGE_BAR_HEIGHT } from "./layout.ts";
 
 const QUALITY_STEPS = 256;
-const FONT = "10px ui-monospace, monospace";
-const TEXT_Y_OFFSET = COVERAGE_BAR_HEIGHT / 2;
+const FONT = "9px ui-monospace, monospace";
+const DATA_HEIGHT = 15;
+const REQUEST_HEIGHT = COVERAGE_BAR_HEIGHT - DATA_HEIGHT;
 const LIGHT_TEXT = "#f3f8fc";
 const DARK_TEXT = "#071019";
 const QUALITY_PALETTE = buildQualityPalette();
 
-const REQUEST_STROKE = {
-  pending: "rgba(147, 197, 253, 0.68)",
-  watching: "rgba(103, 232, 249, 0.68)",
-  failed: "rgba(251, 113, 133, 0.72)",
+const DATA_FILL = { held: "rgb(39 52 65)", empty: "rgb(78 49 43)" } as const;
+
+const REQUEST_FILL = {
+  pending: "rgb(46 77 105)",
+  fetching: "rgb(31 112 127)",
+  retrying: "rgb(132 48 61)",
 } as const;
 
 export interface ResolutionLayer {
@@ -26,7 +29,7 @@ export const CoverageBar = {
 };
 
 class ResolutionImpl implements ResolutionLayer {
-  constructor(private readonly frame: Frame) {}
+  constructor(private readonly frame: Frame) { }
 
   draw(segments: readonly CoverageSegment[], targetResolutionMs: number, y: number): void {
     const { frame } = this;
@@ -35,10 +38,11 @@ class ResolutionImpl implements ResolutionLayer {
     const quality = frame.scratch;
     quality.fill(0, 0, width);
 
-    // Ready evidence composes by maximum quality. Missing/empty ranges stay at
-    // zero, so an empty search can never obscure overlapping usable data.
+    // The upper band is the selected reconstruction. Fresh observations use
+    // the quality ramp; stale held values and searched-empty ranges are
+    // deliberately distinct instead of both pretending to be "ready".
     for (const segment of segments) {
-      if (segment.state !== "ready") continue;
+      if (segment.kind !== "data" || segment.state !== "ready") continue;
       const x0 = Math.max(0, Math.floor(frame.tx.timeToX(segment.range.start)));
       const x1 = Math.min(width, Math.ceil(frame.tx.timeToX(segment.range.end)));
       if (!(x1 > x0)) continue;
@@ -51,37 +55,33 @@ class ResolutionImpl implements ResolutionLayer {
     for (let x = 1; x <= width; x++) {
       const nextIndex = x < width ? qualityIndex(quality[x]!) : -1;
       if (nextIndex === runIndex) continue;
-      frame.fillRectPx(
-        runStart,
-        y,
-        x - runStart,
-        COVERAGE_BAR_HEIGHT,
-        QUALITY_PALETTE.colors[runIndex]!,
-      );
+      frame.fillRectPx(runStart, y, x - runStart, DATA_HEIGHT, QUALITY_PALETTE.colors[runIndex]!);
       runStart = x;
       runIndex = nextIndex;
     }
 
-    // Request state is orthogonal to cached quality. A quiet glassy edge keeps
-    // activity legible without replacing the underlying resolution signal.
     for (const segment of segments) {
-      if (segment.state !== "pending" && segment.state !== "watching" && segment.state !== "failed")
-        continue;
+      if (segment.kind !== "data" || segment.state === "ready") continue;
       const x0 = Math.max(0, frame.tx.timeToX(segment.range.start));
       const x1 = Math.min(frame.width, frame.tx.timeToX(segment.range.end));
       if (!(x1 > x0)) continue;
-      const failed = segment.state === "failed";
-      frame.fillRectPx(
-        x0,
-        failed ? y : y + COVERAGE_BAR_HEIGHT - 2,
-        x1 - x0,
-        2,
-        REQUEST_STROKE[segment.state],
-      );
+      frame.fillRectPx(x0, y, x1 - x0, DATA_HEIGHT, DATA_FILL[segment.state]);
     }
 
-    this.drawLabels(segments, targetResolutionMs, quality, y);
+    // The lower band is acquisition only. Full-height fills make queued work
+    // and retry failures visible instead of reducing them to a two-pixel edge.
+    frame.fillRectPx(0, y + DATA_HEIGHT, frame.width, REQUEST_HEIGHT, "rgb(11 17 27)");
+    for (const segment of segments) {
+      if (segment.kind !== "request") continue;
+      const x0 = Math.max(0, frame.tx.timeToX(segment.range.start));
+      const x1 = Math.min(frame.width, frame.tx.timeToX(segment.range.end));
+      if (!(x1 > x0)) continue;
+      frame.fillRectPx(x0, y + DATA_HEIGHT, x1 - x0, REQUEST_HEIGHT, REQUEST_FILL[segment.state]);
+    }
+
+    this.drawLabels(segments, targetResolutionMs, quality, y, Date.now());
     frame.fillRectPx(0, y, frame.width, 1, "rgba(255, 255, 255, 0.16)");
+    frame.fillRectPx(0, y + DATA_HEIGHT, frame.width, 1, "rgba(255, 255, 255, 0.18)");
     frame.fillRectPx(0, y + COVERAGE_BAR_HEIGHT - 1, frame.width, 1, "rgba(2, 6, 12, 0.38)");
   }
 
@@ -90,6 +90,7 @@ class ResolutionImpl implements ResolutionLayer {
     targetResolutionMs: number,
     quality: Float64Array,
     y: number,
+    wallNow: number,
   ): void {
     const { frame } = this;
     const ctx = frame.ctx;
@@ -98,45 +99,87 @@ class ResolutionImpl implements ResolutionLayer {
     const targetText = `target ${formatResolution(targetResolutionMs)}`;
     const targetWidth = Math.ceil(ctx.measureText(targetText).width);
     const targetLeft = Math.max(4, frame.width - targetWidth - 8);
-    drawLabel(frame, targetText, targetLeft, y, textColorAt(quality, targetLeft + targetWidth / 2));
+    const labelColor = textColorAt(quality, targetLeft + targetWidth / 2)
+    drawLabel(frame, targetText, targetLeft, y + DATA_HEIGHT / 2, labelColor);
 
-    let nextLabelX = 5;
     const labelLimit = targetLeft - 7;
+    this.drawSegmentLabels(segments, "data", 5, labelLimit, y + DATA_HEIGHT / 2, quality, wallNow);
+    this.drawSegmentLabels(
+      segments,
+      "request",
+      5,
+      frame.width - 5,
+      y + DATA_HEIGHT + REQUEST_HEIGHT / 2,
+      quality,
+      wallNow,
+    );
+  }
+
+  private drawSegmentLabels(
+    segments: readonly CoverageSegment[],
+    kind: CoverageSegment["kind"],
+    startX: number,
+    limitX: number,
+    centerY: number,
+    quality: Float64Array,
+    wallNow: number,
+  ): void {
+    const { frame } = this;
+    const ctx = frame.ctx;
+    let nextLabelX = startX;
     for (const segment of segments) {
+      if (segment.kind !== kind) continue;
       const x0 = Math.max(0, frame.tx.timeToX(segment.range.start));
-      const x1 = Math.min(labelLimit, frame.tx.timeToX(segment.range.end));
+      const x1 = Math.min(limitX, frame.tx.timeToX(segment.range.end));
       if (!(x1 > x0)) continue;
-      const text = segmentLabel(segment);
-      const textWidth = Math.ceil(ctx.measureText(text).width);
+      let text = segmentLabel(segment, wallNow, false);
+      let textWidth = Math.ceil(ctx.measureText(text).width);
       const labelX = Math.max(x0 + 4, nextLabelX);
+      if (labelX + textWidth + 4 > x1) {
+        text = segmentLabel(segment, wallNow, true);
+        textWidth = Math.ceil(ctx.measureText(text).width);
+      }
       if (labelX + textWidth + 4 > x1) continue;
-      drawLabel(frame, text, labelX, y, textColorAt(quality, labelX + textWidth / 2));
+      const color =
+        segment.kind === "data" && segment.state === "ready"
+          ? textColorAt(quality, labelX + textWidth / 2)
+          : LIGHT_TEXT;
+      drawLabel(frame, text, labelX, centerY, color);
       nextLabelX = labelX + textWidth + 10;
     }
   }
 }
 
-function drawLabel(frame: Frame, text: string, x: number, y: number, color: string): void {
+function drawLabel(frame: Frame, text: string, x: number, centerY: number, color: string): void {
   const ctx = frame.ctx;
   ctx.save();
   ctx.shadowColor = color === LIGHT_TEXT ? "rgba(0, 0, 0, 0.68)" : "rgba(255, 255, 255, 0.34)";
   ctx.shadowBlur = 2;
-  frame.text(text, x, y + TEXT_Y_OFFSET, FONT, color, "left", "middle");
+  frame.text(text, x, centerY, FONT, color, "left", "middle");
   ctx.restore();
 }
 
-function segmentLabel(segment: CoverageSegment): string {
+function segmentLabel(segment: CoverageSegment, wallNow: number, compact: boolean): string {
+  const resolution = formatResolution(segment.samplePeriodMs);
   switch (segment.state) {
     case "ready":
-      return `ready ${formatResolution(segment.samplePeriodMs)}`;
+      return compact ? resolution : `ready ${resolution}`;
+    case "held":
+      return compact ? "held" : `held ${resolution}`;
     case "empty":
-      return "no data";
+      return compact ? "empty" : "no samples";
     case "pending":
-      return `loading ${formatResolution(segment.samplePeriodMs)}`;
-    case "watching":
-      return `live ${formatResolution(segment.samplePeriodMs)}`;
-    case "failed":
-      return `error · ${segment.message}`;
+      return compact ? "pending" : `pending ${resolution}`;
+    case "fetching":
+      return compact
+        ? "fetching"
+        : `fetching ${resolution}${segment.attempt > 0 ? ` #${segment.attempt + 1}` : ""}`;
+    case "retrying": {
+      const delay = formatResolution(Math.max(0, segment.retryAtMs - wallNow));
+      return compact
+        ? `retry ${delay}`
+        : `retry ${resolution} in ${delay} #${segment.attempt} · ${segment.message}`;
+    }
   }
 }
 

@@ -5,7 +5,7 @@ export const MIN_NEWS_HEIGHT = 64;
 export const DEFAULT_SIGNAL_ROW_HEIGHT = 130;
 
 /** Coverage/resolution diagnostics at the bottom of every signal row. */
-export const COVERAGE_BAR_HEIGHT = 18;
+export const COVERAGE_BAR_HEIGHT = 26;
 /** Reference height that defines the logarithmic vertical scale spacing. */
 const HEATMAP_FIELD_HEIGHT = 640;
 /** Maximum horizontal supersampling used when viewing sub-pixel scales. */

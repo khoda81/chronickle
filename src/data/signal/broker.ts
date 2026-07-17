@@ -119,7 +119,7 @@ export class Broker {
       this.store.addReadyBlockers(readyCoverage, maxDeltaTMs, historicalInterval);
     }
     const coverage = [
-      ...this.readySegments(evalTime, wallNow),
+      ...this.dataSegments(queryInterval, wallNow),
       ...(Interval.isEmpty(historicalInterval)
         ? []
         : this.fetchedCoverage.emptySegments(historicalInterval, maxDeltaTMs, readyCoverage)),
@@ -128,7 +128,7 @@ export class Broker {
     ].sort(
       (a, b) =>
         a.range.start - b.range.start ||
-        coverageLabelRank(b.state) - coverageLabelRank(a.state) ||
+        coverageLabelRank(b) - coverageLabelRank(a) ||
         a.range.end - b.range.end,
     );
 
@@ -232,13 +232,14 @@ export class Broker {
     return this.store.insertBatch(segments);
   }
 
-  private readySegments(evalTime: Float64Array, wallNow: number): CoverageSegment[] {
+  private dataSegments(range: Interval, wallNow: number): CoverageSegment[] {
     return this.store
-      .segments(evalTime, wallNow)
+      .coverage(range, wallNow)
       .map(span => ({
+        kind: "data" as const,
         range: span.range,
         samplePeriodMs: span.resolutionMs,
-        state: "ready" as const,
+        state: span.state,
       }));
   }
 
@@ -247,41 +248,53 @@ export class Broker {
     for (const activity of this.adapterActivities) {
       const overlap = Interval.intersection(activity.range, range);
       if (Interval.isEmpty(overlap)) continue;
-      if (activity.state === "failed") {
+      if (activity.state === "retrying") {
         out.push({
+          kind: "request",
           range: overlap,
           samplePeriodMs: activity.resolutionMs,
-          state: "failed",
+          state: "retrying",
+          attempt: activity.attempt,
           message: activity.message,
           retryAtMs: activity.retryAtMs,
         });
-      } else {
+      } else if (activity.state === "fetching") {
         out.push({
+          kind: "request",
           range: overlap,
           samplePeriodMs: activity.resolutionMs,
-          state: activity.state === "watching" ? "watching" : "pending",
+          state: "fetching",
+          attempt: activity.attempt,
+        });
+      } else {
+        out.push({
+          kind: "request",
+          range: overlap,
+          samplePeriodMs: activity.resolutionMs,
+          state: "pending",
         });
       }
     }
     return out;
   }
 
+  /** Future values are unavailable by definition; a live lease is not a data state. */
   private futureSegments(
     range: Interval,
     wallNow: number,
-    maxSampleGapMs: number,
+    samplePeriodMs: number,
   ): CoverageSegment[] {
-    const min = Math.max(range.start, wallNow);
-    if (!(min < range.end)) return [];
-    return [
-      {
-        range: Interval.create(min, range.end),
-        samplePeriodMs: maxSampleGapMs,
-        state: this.adapterActivities.some(activity => activity.state === "watching")
-          ? "watching"
-          : "pending",
-      },
-    ];
+    const start = Math.max(range.start, wallNow);
+    return start < range.end
+      ? [
+          {
+            kind: "request",
+            range: Interval.create(start, range.end),
+            samplePeriodMs,
+            state: "pending",
+          },
+        ]
+      : [];
   }
 
   private notify(): void {
@@ -311,12 +324,15 @@ function clampToNow(range: Interval, now: number): Interval {
   return Interval.clampEnd(range, now);
 }
 
-function coverageLabelRank(state: CoverageSegment["state"]): number {
-  if (state === "failed") return 3;
-  if (state === "pending") return 2;
-  if (state === "watching") return 2;
-  if (state === "ready") return 1;
-  return 0;
+function coverageLabelRank(segment: CoverageSegment): number {
+  if (segment.kind === "request") {
+    if (segment.state === "retrying") return 6;
+    if (segment.state === "fetching") return 5;
+    return 4;
+  }
+  if (segment.state === "ready") return 3;
+  if (segment.state === "held") return 2;
+  return 1;
 }
 
 interface ClippedPoints {

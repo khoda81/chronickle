@@ -28,9 +28,11 @@ interface AcquisitionActivityBase {
 }
 
 export type AcquisitionActivity =
-  | (AcquisitionActivityBase & { readonly state: "fetching" | "watching" })
+  | (AcquisitionActivityBase & { readonly state: "pending" })
+  | (AcquisitionActivityBase & { readonly state: "fetching"; readonly attempt: number })
   | (AcquisitionActivityBase & {
-      readonly state: "failed";
+      readonly state: "retrying";
+      readonly attempt: number;
       readonly message: string;
       readonly retryAtMs: number;
     });
@@ -38,7 +40,10 @@ export type AcquisitionActivity =
 export interface SignalSink {
   next(batch: AdapterDelivery): void;
   status(activities: readonly AcquisitionActivity[]): void;
-  error(error: unknown, activity: Extract<AcquisitionActivity, { readonly state: "failed" }>): void;
+  error(
+    error: unknown,
+    activity: Extract<AcquisitionActivity, { readonly state: "retrying" }>,
+  ): void;
 }
 
 /** One long-lived acquisition session per broker/source. */
@@ -261,23 +266,22 @@ class PollingSession implements AdapterSession {
 
   private emitStatus(): void {
     if (this.signal.aborted) return;
-    const activities: AcquisitionActivity[] = [];
-    if (this.live !== null) {
-      activities.push({
-        state: "watching",
-        range: this.live.activityRange,
-        resolutionMs: this.live.plan.resolutionMs,
-      });
-    }
+    const activities = this.pendingActivities(this.now());
     if (this.active !== null) {
       const { plan } = this.active.work;
       if (this.active.state === "fetching") {
-        activities.push({ state: "fetching", range: plan.range, resolutionMs: plan.resolutionMs });
-      } else {
         activities.push({
-          state: "failed",
+          state: "fetching",
           range: plan.range,
           resolutionMs: plan.resolutionMs,
+          attempt: this.active.work.attempt,
+        });
+      } else {
+        activities.push({
+          state: "retrying",
+          range: plan.range,
+          resolutionMs: plan.resolutionMs,
+          attempt: this.active.work.attempt,
           message: this.active.message,
           retryAtMs: this.active.retryAtMs,
         });
@@ -286,6 +290,31 @@ class PollingSession implements AdapterSession {
     if (sameActivities(activities, this.lastActivities)) return;
     this.lastActivities = activities;
     this.sink.status(activities);
+  }
+
+  /** All demanded native-resolution gaps, excluding work already in the active lane. */
+  private pendingActivities(wallNow: number): AcquisitionActivity[] {
+    const pending = new Map<number, IntervalSet>();
+    for (const plan of this.plans) {
+      let ranges = pending.get(plan.resolutionMs);
+      if (ranges === undefined) {
+        ranges = new IntervalSet();
+        pending.set(plan.resolutionMs, ranges);
+      }
+
+      const historical = Interval.clampEnd(plan.range, wallNow);
+      const blockers = this.blockers(plan.resolutionMs, historical, wallNow);
+      if (this.active !== null && this.active.work.plan.resolutionMs <= plan.resolutionMs) {
+        blockers.add(Interval.intersection(this.active.work.plan.range, historical));
+      }
+      for (const gap of blockers.gaps(historical)) ranges.add(gap);
+    }
+
+    const out: AcquisitionActivity[] = [];
+    for (const [resolutionMs, ranges] of pending) {
+      for (const range of ranges.view()) out.push({ state: "pending", range, resolutionMs });
+    }
+    return out;
   }
 
   private coverageFor(resolutionMs: number): IntervalSet {
@@ -425,7 +454,10 @@ class PollingSession implements AdapterSession {
       if (this.signal.aborted || this.active !== running) return;
       validateBatch(running.work.requiredInterval, batch);
     } catch (error) {
-      if (this.signal.aborted || this.active !== running || isAbort(error)) return;
+      // A coordinator cancellation first detaches `running`, so identity is
+      // sufficient. An AbortError from a still-current loader is a real source
+      // failure; ignoring it would leave `active` stuck forever.
+      if (this.signal.aborted || this.active !== running) return;
       this.failWork(running.work, error);
       return;
     }
@@ -474,10 +506,11 @@ class PollingSession implements AdapterSession {
     if (this.loader.sourceWideBackoff === true) {
       this.sourceBackoffUntilMs = Math.max(this.sourceBackoffUntilMs ?? -Infinity, retryAtMs);
     }
-    const activity: Extract<AcquisitionActivity, { readonly state: "failed" }> = {
-      state: "failed",
+    const activity: Extract<AcquisitionActivity, { readonly state: "retrying" }> = {
+      state: "retrying",
       range: work.plan.range,
       resolutionMs: work.plan.resolutionMs,
+      attempt,
       message,
       retryAtMs,
     };
@@ -600,9 +633,11 @@ function sameActivity(a: AcquisitionActivity, b: AcquisitionActivity): boolean {
   ) {
     return false;
   }
+  if (a.state === "pending") return true;
+  if (b.state === "pending" || a.attempt !== b.attempt) return false;
   return (
-    a.state !== "failed" ||
-    (b.state === "failed" && a.message === b.message && a.retryAtMs === b.retryAtMs)
+    a.state !== "retrying" ||
+    (b.state === "retrying" && a.message === b.message && a.retryAtMs === b.retryAtMs)
   );
 }
 
@@ -612,10 +647,6 @@ function defaultPollDelay(resolutionMs: number): number {
 
 function validDelay(value: number): boolean {
   return value >= 0 && Number.isFinite(value);
-}
-
-function isAbort(error: unknown): boolean {
-  return error instanceof Error && error.name === "AbortError";
 }
 
 function positiveFinite(value: number, name: string): number {

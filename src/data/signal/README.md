@@ -42,12 +42,20 @@ prices and converts them to log-price samples before crossing this boundary.
    Partial API responses report only the part searched so the remaining gap can
    be scheduled later.
 8. Reads are side-effect-free. Only subscriptions change acquisition demand.
-9. Visible future time has no samples and is presented as `pending` or
-   `watching`. A demand containing the adapter's current clock is live demand.
-10. `sampleRevision` changes only when cached values can change (ingestion or
-    clear). Pending/watching/failure changes notify subscribers but do not
+9. Coverage diagnostics have two explicit layers. Data coverage is `ready`
+   inside an observation's expected native lifetime, `held` where the selected
+   zero-order reconstruction carries an older value, and `empty` where a
+   completed search left no reconstructable value. Request coverage is
+   `pending`, `fetching`, or `retrying`; serialized gaps waiting behind the
+   active request remain visible. These layers may overlap because cached data
+   can remain usable while a finer request is in flight.
+10. Visible future time has no samples and is presented as `pending`. A demand
+    containing the adapter's current clock creates an internal live lease, not
+    a separate broker-level data state.
+11. `sampleRevision` changes only when cached values can change (ingestion or
+    clear). Pending/fetching/retry changes notify subscribers but do not
     invalidate the heatmap's numerical cache.
-11. Clearing or disposing a session aborts in-flight work. Results from stale
+12. Clearing or disposing a session aborts in-flight work. Results from stale
     work must never be delivered after the generation/session is gone.
 
 ## Market boundary

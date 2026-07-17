@@ -6,9 +6,21 @@ interface CoverageSegmentBase {
 }
 
 export type CoverageSegment =
-  | (CoverageSegmentBase & { readonly state: "ready" | "empty" | "pending" | "watching" })
   | (CoverageSegmentBase & {
-      readonly state: "failed";
+      readonly kind: "data";
+      /** `held` carries an older observation beyond its expected native lifetime. */
+      readonly state: "ready" | "held" | "empty";
+    })
+  | (CoverageSegmentBase & { readonly kind: "request"; readonly state: "pending" })
+  | (CoverageSegmentBase & {
+      readonly kind: "request";
+      readonly state: "fetching";
+      readonly attempt: number;
+    })
+  | (CoverageSegmentBase & {
+      readonly kind: "request";
+      readonly state: "retrying";
+      readonly attempt: number;
       readonly message: string;
       readonly retryAtMs: number;
     });
@@ -47,7 +59,7 @@ export class SettledCoverageIndex {
     const out: CoverageSegment[] = [];
     for (const searched of fetched.intersections(range)) {
       for (const gap of ready.gaps(searched)) {
-        out.push({ range: gap, samplePeriodMs: requestResolutionMs, state: "empty" });
+        out.push({ kind: "data", range: gap, samplePeriodMs: requestResolutionMs, state: "empty" });
       }
     }
     return out;

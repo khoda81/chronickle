@@ -802,6 +802,25 @@ test("signal segment store returns NaN outside coverage and holds ZOH values", (
   assertPoint(selected, 15, 2, "held value lost its observation timestamp");
 });
 
+test("coverage distinguishes fresh samples from carried values exactly", () => {
+  const store = new SignalSegmentStore();
+  store.insertBatch([heldSegment(0, 10_000, 0, 1, 1_000)]);
+  const coverage = store.coverage(Interval.create(0, 10_000), 10_000);
+  assert(coverage.length === 2, "fresh and held coverage were not split");
+  assert(
+    coverage[0]?.state === "ready" &&
+      coverage[0].range.start === 0 &&
+      coverage[0].range.end === 1_000,
+    "fresh observation lifetime was not exact",
+  );
+  assert(
+    coverage[1]?.state === "held" &&
+      coverage[1].range.start === 1_000 &&
+      coverage[1].range.end === 10_000,
+    "market-closure hold was still presented as fresh data",
+  );
+});
+
 test("segment coverage is half-open while predecessor lookup keeps the observation", () => {
   const store = new SignalSegmentStore();
   store.insertBatch([heldSegment(5, 15, 5, 1, 10)]);
@@ -960,7 +979,7 @@ test("aborting a broker subscription removes its adapter demand", () => {
   brokerLifetime.abort();
 });
 
-test("future coverage is pending or watching without invalidating cached samples", () => {
+test("future coverage remains pending while request status does not invalidate samples", () => {
   let sink: Parameters<SignalAdapter["connect"]>[0] | null = null;
   const adapter: SignalAdapter = {
     connect(nextSink) {
@@ -977,12 +996,14 @@ test("future coverage is pending or watching without invalidating cached samples
   );
   const initialRevision = pending.sampleRevision;
   const connectedSink = sink as unknown as Parameters<SignalAdapter["connect"]>[0];
-  connectedSink.status([{ state: "watching", range: Interval.create(90, 100), resolutionMs: 10 }]);
-  const watching = broker.read(request);
-  assert(watching.sampleRevision === initialRevision, "status-only update invalidated samples");
+  connectedSink.status([
+    { state: "fetching", range: Interval.create(90, 100), resolutionMs: 10, attempt: 0 },
+  ]);
+  const fetching = broker.read(request);
+  assert(fetching.sampleRevision === initialRevision, "status-only update invalidated samples");
   assert(
-    watching.coverage.some(segment => segment.state === "watching" && segment.range.start === 100),
-    "live future was not marked watching",
+    fetching.coverage.some(segment => segment.state === "pending" && segment.range.start === 100),
+    "visible future stopped being pending during a fetch",
   );
   const delivery = {
     samples: [
@@ -1261,8 +1282,8 @@ test("follow-now demand updates keep one live lease and do not feed notification
   );
   const status = broker.read({ evalTime: new Float64Array([0, now]), maxSampleGapMs: 1_000 });
   assert(
-    status.coverage.some(segment => segment.state === "watching"),
-    "live lease was missing from acquisition diagnostics",
+    status.coverage.every(segment => segment.state !== "fetching"),
+    "settled live lease was still presented as an active fetch",
   );
   broker.close();
 });
@@ -1356,42 +1377,41 @@ test("a demand ending at wall now remains historical", () => {
   );
 
   session.setDemands([{ range: Interval.create(0, 10_000), maxDeltaTMs: 1_000 }]);
-  assert(!states.includes("watching"), "half-open demand end was treated as live");
+  assert(!states.includes("pending"), "half-open demand end invented future pending work");
   lifetime.abort();
 });
 
 test("adapter keeps a live lease warm for its configured grace period", async () => {
   let now = 10_000;
-  let latestStates: readonly string[] = [];
+  let calls = 0;
   const lifetime = new AbortController();
   const adapter = createPollingSignalSource({
     now: () => now,
     liveRetentionMs: 20,
-    livePollDelayMs: 60_000,
+    livePollDelayMs: 5,
     minFetchPoints: 2,
     resolve: () => 1_000,
     async fetchInterval(plan) {
+      calls++;
       return { samples: [], searchedInterval: plan.range };
     },
   });
   const session = adapter.connect(
-    {
-      next: () => undefined,
-      status: activities => {
-        latestStates = activities.map(activity => activity.state);
-      },
-      error: () => undefined,
-    },
+    { next: () => undefined, status: () => undefined, error: () => undefined },
     lifetime.signal,
   );
-  session.setDemands([{ range: Interval.create(0, 20_000), maxDeltaTMs: 1_000 }]);
+  session.setDemands([{ range: Interval.create(8_000, 20_000), maxDeltaTMs: 1_000 }]);
   await new Promise(resolve => setTimeout(resolve, 0));
   session.setDemands([]);
-  assert(latestStates.includes("watching"), "live lease closed without its grace period");
+  now += 6;
+  session.setDemands([]);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert(calls === 2, `live lease grace period produced ${calls} total fetches`);
 
   now += 21;
   session.setDemands([]);
-  assert(!latestStates.includes("watching"), "expired live lease stayed open");
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert(calls === 2, "expired live lease kept polling");
   lifetime.abort();
 });
 
@@ -1603,13 +1623,41 @@ test("finer pending work suppresses only coarser duplicate requests", () => {
   const evalTime = new Float64Array([0, 5_000, 10_000]);
   const first = broker.query({ evalTime, maxSampleGapMs: 1_000 });
   assert(
-    first.coverage.some(segment => segment.state === "pending"),
-    "pending hidden",
+    first.coverage.some(segment => segment.state === "fetching"),
+    "active request hidden",
   );
   broker.query({ evalTime, maxSampleGapMs: 5_000 });
   assert(count(requests) === 1, "fine pending request did not suppress coarse duplicate");
   broker.query({ evalTime, maxSampleGapMs: 500 });
   assert(count(requests) === 2, "coarse pending request suppressed a finer request");
+});
+
+test("serialized acquisition exposes demanded work waiting behind the active request", () => {
+  let latest: readonly string[] = [];
+  const lifetime = new AbortController();
+  const adapter = createPollingSignalSource({
+    now: () => 10_000,
+    minFetchPoints: 1,
+    resolve: demand => demand.maxDeltaTMs,
+    fetchInterval: () => new Promise<AdapterBatch>(() => undefined),
+  });
+  const session = adapter.connect(
+    {
+      next: () => undefined,
+      status: activities => {
+        latest = activities.map(activity => activity.state);
+      },
+      error: () => undefined,
+    },
+    lifetime.signal,
+  );
+  session.setDemands([
+    { range: Interval.create(0, 1_000), maxDeltaTMs: 1_000 },
+    { range: Interval.create(5_000, 6_000), maxDeltaTMs: 1_000 },
+  ]);
+  assert(latest.includes("fetching"), "active request was not reported");
+  assert(latest.includes("pending"), "queued demand was hidden");
+  lifetime.abort();
 });
 
 test("moving demand aborts stale serialized work before starting the latest range", async () => {
@@ -1685,7 +1733,7 @@ test("subscriber failures are not reclassified as fetch failures", async () => {
   await new Promise(resolve => setTimeout(resolve, 0));
   const result = broker.query(query);
   assert(
-    result.coverage.every(segment => segment.state !== "failed"),
+    result.coverage.every(segment => segment.state !== "retrying"),
     "subscriber exception became a failed exchange range",
   );
   assert(errors.includes("[Broker] subscriber failed"), "subscriber exception was hidden");
@@ -1948,14 +1996,40 @@ test("broker exposes failures and uses the fetcher's retry policy", async () => 
   broker.query({ evalTime, maxSampleGapMs: 1_000 });
   await new Promise(resolve => setTimeout(resolve, 0));
   const result = broker.query({ evalTime, maxSampleGapMs: 1_000 });
-  const failed = result.coverage.find(segment => segment.state === "failed");
-  assert(failed !== undefined, "failed request was still presented as pending");
-  assert(failed.message === "upstream unavailable", "failure detail was lost");
+  const retrying = result.coverage.find(segment => segment.state === "retrying");
+  assert(retrying !== undefined, "failed request was still presented as pending");
+  assert(retrying.message === "upstream unavailable", "failure detail was lost");
   broker.query({ evalTime, maxSampleGapMs: 1_000 });
   assert(Number(calls) === 1, "failure backoff did not suppress a retry");
   await new Promise(resolve => setTimeout(resolve, 120));
   broker.query({ evalTime, maxSampleGapMs: 1_000 });
   assert(Number(calls) === 2, "request did not retry after adapter backoff elapsed");
+  broker.close();
+});
+
+test("an unexpected AbortError fails visibly instead of deadlocking acquisition", async () => {
+  let calls = 0;
+  const errors: string[] = [];
+  const fetcher: Fetcher = {
+    retryDelayMs: () => 100,
+    async fetchInterval() {
+      calls++;
+      throw new DOMException("upstream aborted", "AbortError");
+    },
+  };
+  const broker = new Broker(fetcher, {
+    onError: (_message, error) => errors.push(String((error as Error).message)),
+  });
+  const evalTime = new Float64Array([0, 1_000]);
+  broker.query({ evalTime, maxSampleGapMs: 1_000 });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const result = broker.query({ evalTime, maxSampleGapMs: 1_000 });
+  assert(
+    result.coverage.some(segment => segment.state === "retrying"),
+    "current AbortError remained silently stuck as fetching",
+  );
+  assert(errors.includes("upstream aborted"), "current AbortError was not surfaced");
+  assert(calls === 1, "current AbortError bypassed retry backoff");
   broker.close();
 });
 

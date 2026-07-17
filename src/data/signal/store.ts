@@ -20,6 +20,7 @@ export interface HeldSignalSegment {
 export interface ResolutionSpan {
   readonly range: Interval;
   readonly resolutionMs: number;
+  readonly state: "ready" | "held";
 }
 
 /**
@@ -175,25 +176,41 @@ export class SignalSegmentStore {
     if (run !== null) out.add(run);
   }
 
-  /** Resolution at cell midpoints, coalesced to at most one span per cell. */
-  segments(evalTime: Float64Array, wallNow: number): ResolutionSpan[] {
+  /** Exact reconstruction coverage, split where an observation becomes stale. */
+  coverage(range: Interval, wallNow: number): ResolutionSpan[] {
     const out: ResolutionSpan[] = [];
-    if (evalTime.length < 2) return out;
-    for (let index = 0; index + 1 < evalTime.length; index++) {
-      const range = Interval.create(evalTime[index]!, Math.min(evalTime[index + 1]!, wallNow));
-      if (Interval.isEmpty(range)) continue;
-      const location = this.findContainingSegment(range.start + Interval.span(range) / 2);
-      if (location === null) continue;
-      const resolutionMs = this.blocks[location.blockIndex]!.resolutionMs[location.segmentIndex]!;
+    const clippedRange = Interval.clampEnd(range, wallNow);
+    const overlapping = this.overlappingBlocks(clippedRange);
+    if (Interval.isEmpty(overlapping)) return out;
+
+    const append = (span: ResolutionSpan): void => {
+      if (Interval.isEmpty(span.range)) return;
       const previous = out[out.length - 1];
       if (
         previous !== undefined &&
-        Interval.touches(previous.range, range) &&
-        previous.resolutionMs === resolutionMs
+        previous.state === span.state &&
+        previous.resolutionMs === span.resolutionMs &&
+        Interval.touches(previous.range, span.range)
       ) {
-        out[out.length - 1] = { range: Interval.hull(previous.range, range), resolutionMs };
-      } else {
-        out.push({ range, resolutionMs });
+        out[out.length - 1] = { ...span, range: Interval.hull(previous.range, span.range) };
+      } else out.push(span);
+    };
+
+    for (let blockIndex = overlapping.start; blockIndex < overlapping.end; blockIndex++) {
+      const block = this.blocks[blockIndex]!;
+      for (let segmentIndex = 0; segmentIndex < blockLength(block); segmentIndex++) {
+        const segment = Interval.intersection(clippedRange, segmentRange(block, segmentIndex));
+        if (Interval.isEmpty(segment)) continue;
+        const resolutionMs = block.resolutionMs[segmentIndex]!;
+        const freshEnd = block.sampleTime[segmentIndex]! + resolutionMs;
+        append({ range: Interval.clampEnd(segment, freshEnd), resolutionMs, state: "ready" });
+        if (freshEnd < segment.end) {
+          append({
+            range: Interval.create(Math.max(segment.start, freshEnd), segment.end),
+            resolutionMs,
+            state: "held",
+          });
+        }
       }
     }
     return out;
