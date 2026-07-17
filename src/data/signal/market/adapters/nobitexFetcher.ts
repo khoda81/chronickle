@@ -20,6 +20,7 @@ import { fetchOhlc, ohlcToLogPriceSamples } from "./nobitex.ts";
 
 const MS = 1000;
 
+// TODO: Can this be a record or a map instead of list?
 /** Nobitex native sample periods in ms, finest→coarsest, with their TradingView strings. */
 const NOBITEX_LADDER: readonly { periodMs: number; resolution: string }[] = [
   { periodMs: 60 * MS, resolution: "1" },
@@ -75,13 +76,13 @@ export function createNobitexAdapter(opts: NobitexAdapterOptions = {}): SignalAd
       // evidence. The coordinator still settles the attempted fine search,
       // while `sampleResolutionMs` preserves the fallback's actual quality.
       for (let index = requestedIndex; index < NOBITEX_LADDER.length; index++) {
-        const entry = NOBITEX_LADDER[index]!;
+        const { resolution, periodMs } = NOBITEX_LADDER[index]!;
         const res = await fetchOhlc({
           symbol,
-          resolution: entry.resolution,
+          resolution,
           // Include one predecessor candle so zero-order hold is defined at
           // the left boundary when it falls between candle opens.
-          fromMs: req.range.start - entry.periodMs,
+          fromMs: req.range.start - periodMs,
           toMs: req.range.end,
           timeoutMs,
           signal,
@@ -92,7 +93,7 @@ export function createNobitexAdapter(opts: NobitexAdapterOptions = {}): SignalAd
         // Nobitex caps responses at 500 candles anchored at `to`. A later first
         // candle means the prefix was truncated and remains schedulable.
         const searchedInterval = Interval.clampStart(req.range, samples[0]!.t);
-        return { samples, searchedInterval, sampleResolutionMs: entry.periodMs };
+        return { samples, searchedInterval, sampleResolutionMs: periodMs };
       }
 
       // Every available native level agreed that the range is empty.
