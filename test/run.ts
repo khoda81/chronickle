@@ -896,6 +896,45 @@ test("numeric series store remains ordered across many leaves and middle writes"
   assert(value[4] === -1 && value[6] === -2 && value[7] === 4_095, "values were misplaced");
 });
 
+test("numeric series store matches a map oracle across mixed batch writes", () => {
+  const store = new NumericSeriesStore();
+  const oracle = new Map<number, number>();
+  let randomState = 0x9e3779b9;
+  const random = (): number => {
+    randomState = (Math.imul(randomState, 1_664_525) + 1_013_904_223) >>> 0;
+    return randomState;
+  };
+
+  for (let batchIndex = 0; batchIndex < 200; batchIndex++) {
+    const batch = Array.from({ length: 100 }, () => ({
+      t: random() % 20_000,
+      value: random(),
+    })).sort((left, right) => left.t - right.t);
+    store.upsertBatch(batch);
+    for (const sample of batch) oracle.set(sample.t, sample.value);
+  }
+
+  const expected = [...oracle].sort((left, right) => left[0] - right[0]);
+  const query = Float64Array.from({ length: 20_002 }, (_, index) => index - 1);
+  const sampleTime = new Float64Array(query.length);
+  const value = store.findBatchAtOrBefore(query, undefined, sampleTime);
+  let expectedIndex = -1;
+  for (let index = 0; index < query.length; index++) {
+    while (
+      expectedIndex + 1 < expected.length &&
+      expected[expectedIndex + 1]![0] <= query[index]!
+    ) {
+      expectedIndex++;
+    }
+    const entry = expected[expectedIndex];
+    assert(
+      sampleTime[index] === (entry?.[0] ?? Number.NEGATIVE_INFINITY) &&
+        (entry === undefined ? Number.isNaN(value[index]!) : value[index] === entry[1]),
+      `map oracle diverged at query ${query[index]}`,
+    );
+  }
+});
+
 test("broker read is side-effect-free and viewport subscriptions drive fetching", async () => {
   let calls = 0;
   let notifications = 0;

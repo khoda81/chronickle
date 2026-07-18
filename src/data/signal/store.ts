@@ -42,6 +42,7 @@ const leafLastKey = (leaf: Leaf): number => leaf.key[leaf.key.length - 1]!;
  */
 export class NumericSeriesStore {
   private readonly leaves: Leaf[] = [];
+  private leafStart = new Float64Array(0);
   private entryCount = 0;
 
   get size(): number {
@@ -50,6 +51,7 @@ export class NumericSeriesStore {
 
   clear(): void {
     this.leaves.length = 0;
+    this.leafStart = new Float64Array(0);
     this.entryCount = 0;
   }
 
@@ -60,7 +62,7 @@ export class NumericSeriesStore {
     const firstKey = samples[0]!.t;
     const lastKey = samples[samples.length - 1]!.t;
     const firstAffected = lowerBoundBy(this.leaves, firstKey, leafLastKey);
-    const afterLastAffected = upperBoundBy(this.leaves, lastKey, leafFirstKey);
+    const afterLastAffected = upperBoundBy(this.leafStart, lastKey, numberValue);
 
     // Repack one neighbor on either side. This prevents tiny boundary leaves
     // without rebuilding unrelated history.
@@ -72,13 +74,14 @@ export class NumericSeriesStore {
 
     const replacement = chunkEntries(merged.key, merged.value, merged.length);
     this.leaves.splice(spliceStart, spliceEnd - spliceStart, ...replacement);
+    this.leafStart = Float64Array.from(this.leaves, leafFirstKey);
     this.entryCount += merged.length - existing.key.length;
     return true;
   }
 
   /** Write the greatest stored timestamp `<= time` into `out`. */
   findAtOrBefore(time: number, out: MutableSample): boolean {
-    const leafIndex = upperBoundBy(this.leaves, time, leafFirstKey) - 1;
+    const leafIndex = upperBoundBy(this.leafStart, time, numberValue) - 1;
     if (leafIndex < 0) return false;
     const leaf = this.leaves[leafIndex]!;
     const entryIndex = upperBoundBy(leaf.key, time, numberValue) - 1;
@@ -114,7 +117,7 @@ export class NumericSeriesStore {
       return value;
     }
 
-    let leafIndex = upperBoundBy(this.leaves, evalTime[0] ?? -Infinity, leafFirstKey) - 1;
+    let leafIndex = upperBoundBy(this.leafStart, evalTime[0] ?? -Infinity, numberValue) - 1;
     let entryIndex = -1;
 
     for (let index = 0; index < evalTime.length; index++) {
@@ -122,12 +125,12 @@ export class NumericSeriesStore {
 
       if (leafIndex < 0) {
         if (query >= leafFirstKey(this.leaves[0]!)) {
-          leafIndex = upperBoundBy(this.leaves, query, leafFirstKey) - 1;
+          leafIndex = upperBoundBy(this.leafStart, query, numberValue) - 1;
         }
       } else {
         const nextLeaf = this.leaves[leafIndex + 1];
         if (nextLeaf !== undefined && query >= leafFirstKey(nextLeaf)) {
-          leafIndex = upperBoundBy(this.leaves, query, leafFirstKey, leafIndex + 1) - 1;
+          leafIndex = upperBoundBy(this.leafStart, query, numberValue, leafIndex + 1) - 1;
           entryIndex = -1;
         }
       }

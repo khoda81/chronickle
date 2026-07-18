@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "bench:store": "bun run test/storeBenchmark.ts",
     "preview": "vite preview",
     "test": "bun run test/run.ts",
     "typecheck": "tsc --noEmit",
