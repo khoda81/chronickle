@@ -480,7 +480,7 @@ test("timeline gesture controller owns native drag events and canvas projection"
 
     assert(targetX === 100 && targetY === 20, "client point was not projected into canvas space");
     assert(panX === 10 && panWidth === 100, "horizontal drag was not normalized");
-    assert(panRow === 4 && panY === 10, "vertical drag was not normalized to canvas pixels");
+    assert(panRow === 4 && panY === -10, "vertical drag was not normalized to canvas pixels");
     assert(starts === 1 && ends === 1 && !controller.active, "drag lifecycle was not closed");
     assert(taps === 0, "drag-generated click reached the timeline host");
     assert(canvasTarget.capturedPointers.size === 0, "pointer capture was not released");
@@ -567,7 +567,7 @@ test("timeline gesture controller combines two touch pointers into one pinch upd
     assert(previousCenterX === 40 && currentCenterX === 50, "pinch centroid was incorrect");
     assert(previousDistance === 40, "previous pinch distance was incorrect");
     approx(currentDistance, Math.hypot(60, 10));
-    assert(row === 6 && verticalDelta === 10, "pinch vertical pan used the wrong row or scale");
+    assert(row === 6 && verticalDelta === -10, "pinch vertical pan used the wrong row or scale");
     assert(move.defaultPrevented, "touch move default action was not prevented");
 
     windowTarget.dispatchEvent(
@@ -575,7 +575,16 @@ test("timeline gesture controller combines two touch pointers into one pinch upd
     );
     assert(controller.active, "ending one pinch pointer ended the complete gesture");
     windowTarget.dispatchEvent(
-      syntheticInput("pointerup", { clientX: 90, clientY: 40, pointerId: 2, pointerType: "touch" }),
+      syntheticInput("pointermove", {
+        clientX: 90,
+        clientY: 45,
+        pointerId: 2,
+        pointerType: "touch",
+      }),
+    );
+    assert(verticalDelta === -10, "touch drag did not preserve the vertical pan convention");
+    windowTarget.dispatchEvent(
+      syntheticInput("pointerup", { clientX: 90, clientY: 45, pointerId: 2, pointerType: "touch" }),
     );
     assert(!controller.active, "remaining touch did not finish the gesture");
     assert(
@@ -703,11 +712,12 @@ test("stack layout fills the canvas and preserves every resizable row", () => {
 
 test("signal row layout owns status, heatmap, hit-test, and collapse geometry", () => {
   const row = signalRowLayout(100, 130);
-  assert(row.heatmapTop === 116, "status-strip height leaked into the caller");
-  assert(row.heatmapHeight === 114 && row.tooltipPosition === 173, "bad heatmap geometry");
+  assert(row.heatmapTop === 100, "bottom status strip shifted the heatmap top");
+  assert(row.heatmapHeight === 114 && row.tooltipPosition === 215, "bad heatmap geometry");
   assert(row.drawable, "normal row was not drawable");
-  assert(!signalRowContainsHeatmap(100, 130, 115), "status strip entered heatmap hit testing");
-  assert(signalRowContainsHeatmap(100, 130, 116), "heatmap top was excluded from hit testing");
+  assert(signalRowContainsHeatmap(100, 130, 100), "heatmap top was excluded from hit testing");
+  assert(signalRowContainsHeatmap(100, 130, 213), "heatmap bottom pixel was excluded");
+  assert(!signalRowContainsHeatmap(100, 130, 214), "status strip entered heatmap hit testing");
   assert(!signalRowLayout(100, 18).drawable, "collapsed row retained drawable heatmap space");
   assert(
     signalRowCollapseProgress(1, ROW_REMOVE_THRESHOLD, 1) === 1,

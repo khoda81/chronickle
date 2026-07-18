@@ -49,7 +49,7 @@ export function signalRowLayout(top: number, height: number): SignalRowLayout {
 /** True when a canvas y-coordinate belongs to the row's heatmap, not its status strip. */
 export function signalRowContainsHeatmap(top: number, height: number, y: number): boolean {
   const layout = signalRowLayout(top, height);
-  return layout.drawable && y >= layout.heatmapTop && y < top + height;
+  return layout.drawable && y >= layout.heatmapTop && y < layout.heatmapTop + layout.heatmapHeight;
 }
 
 /** Remove-affordance progress for the row touched by the active boundary. */

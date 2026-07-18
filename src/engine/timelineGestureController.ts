@@ -142,10 +142,7 @@ export class TimelineGestureController {
       this.host.panTimeByPixels(event.clientX - previousX, rect.width);
     }
     if (rect.height > 0) {
-      this.host.panRow(
-        state.row,
-        (previousY - event.clientY) * (this.viewport.height / rect.height),
-      );
+      this.host.panRow(state.row, this.verticalPanDelta(previousY, event.clientY, rect.height));
     }
   };
 
@@ -258,7 +255,7 @@ export class TimelineGestureController {
         if (rect.height > 0) {
           this.host.panRow(
             state.row,
-            (currentCenterY - previousCenterY) * (this.viewport.height / rect.height),
+            this.verticalPanDelta(previousCenterY, currentCenterY, rect.height),
           );
         }
       }
@@ -292,10 +289,7 @@ export class TimelineGestureController {
       this.host.panTimeByPixels(event.clientX - previousX, rect.width);
     }
     if (rect.height > 0) {
-      this.host.panRow(
-        state.row,
-        (event.clientY - previousY) * (this.viewport.height / rect.height),
-      );
+      this.host.panRow(state.row, this.verticalPanDelta(previousY, event.clientY, rect.height));
     }
     event.preventDefault();
   }
@@ -322,6 +316,14 @@ export class TimelineGestureController {
       source.clientY <= rect.bottom;
     this.canvasPoint.x = (source.clientX - rect.left) * (this.viewport.width / rect.width);
     this.canvasPoint.y = (source.clientY - rect.top) * (this.viewport.height / rect.height);
+  }
+
+  /**
+   * Convert client-space vertical motion to the flipped heatmap's canvas-space pan.
+   * Every input path shares this sign: dragging down decreases the row offset.
+   */
+  private verticalPanDelta(previousY: number, currentY: number, rectHeight: number): number {
+    return (previousY - currentY) * (this.viewport.height / rectHeight);
   }
 
   private releasePointer(pointerId: number): void {
