@@ -19,7 +19,9 @@ import { pickResolution } from "../../resolution.ts";
 import type { Sample } from "../../sample.ts";
 import { fetchOhlc, ohlcToLogPriceSamples } from "./nobitex.ts";
 
-const MS = 1_000;
+const SECONDE = 1_000;
+const MINUTE = 60 * SECONDE;
+const HOUR = 60 * MINUTE;
 const RESPONSE_LIMIT = 500;
 const MIN_FETCH_POINTS = 256;
 const LIVE_POLL_DELAY_MS = 1_000;
@@ -27,19 +29,22 @@ const PUBLICATION_GRACE_MS = 250;
 /** A fine `no_data` response is ambiguous, so it is negative-cached only briefly. */
 const FALLBACK_RETRY_MS = 60_000;
 
-const NOBITEX_LADDER: readonly { readonly periodMs: number; readonly resolution: string }[] = [
-  { periodMs: 60 * MS, resolution: "1" },
-  { periodMs: 5 * 60 * MS, resolution: "5" },
-  { periodMs: 15 * 60 * MS, resolution: "15" },
-  { periodMs: 30 * 60 * MS, resolution: "30" },
-  { periodMs: 60 * 60 * MS, resolution: "60" },
-  { periodMs: 3 * 60 * 60 * MS, resolution: "180" },
-  { periodMs: 4 * 60 * 60 * MS, resolution: "240" },
-  { periodMs: 6 * 60 * 60 * MS, resolution: "360" },
-  { periodMs: 12 * 60 * 60 * MS, resolution: "720" },
-  { periodMs: 24 * 60 * 60 * MS, resolution: "D" },
-  { periodMs: 2 * 24 * 60 * 60 * MS, resolution: "2D" },
-  { periodMs: 3 * 24 * 60 * 60 * MS, resolution: "3D" },
+type NobitexResolution = "1" | "5" | "15" | "30" | "60" | "180" | "240" | "360" | "720" | "D" | "2D" | "3D";
+
+const DAY = HOUR * 24;
+const NOBITEX_LADDER: readonly { readonly periodMs: number; readonly resolution: NobitexResolution }[] = [
+  { periodMs: MINUTE, resolution: "1" },
+  { periodMs: MINUTE * 5, resolution: "5" },
+  { periodMs: MINUTE * 15, resolution: "15" },
+  { periodMs: MINUTE * 30, resolution: "30" },
+  { periodMs: HOUR, resolution: "60" },
+  { periodMs: HOUR * 3, resolution: "180" },
+  { periodMs: HOUR * 4, resolution: "240" },
+  { periodMs: HOUR * 6, resolution: "360" },
+  { periodMs: HOUR * 12, resolution: "720" },
+  { periodMs: DAY, resolution: "D" },
+  { periodMs: DAY * 2, resolution: "2D" },
+  { periodMs: DAY * 3, resolution: "3D" },
 ];
 
 const PERIODS = NOBITEX_LADDER.map(entry => entry.periodMs);
