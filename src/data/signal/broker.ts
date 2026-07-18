@@ -9,11 +9,11 @@ import type {
   SignalAdapter,
 } from "./fetcher.ts";
 import { normalizeSamples, type MutableSample, type Sample } from "./sample.ts";
-import { SignalSegmentStore, type HeldSignalSegment } from "./store.ts";
+import { NumericSeriesStore } from "./store.ts";
 
 export interface SignalView {
   readonly value: Float64Array;
-  /** Observation identity selected for each reconstructed value; NaN where unavailable. */
+  /** Observation identity selected for each value; `-Infinity` where unavailable. */
   readonly sampleTime: Float64Array;
   readonly requests: readonly RequestSegment[];
   /** Changes only when the selected reconstruction changes, never for status-only updates. */
@@ -48,7 +48,7 @@ interface DemandSubscription {
 }
 
 export class Broker {
-  private readonly store = new SignalSegmentStore();
+  private readonly store = new NumericSeriesStore();
   private readonly demandSubscriptions = new Set<DemandSubscription>();
   private readonly adapterSession: AdapterSession;
   private readonly signal: AbortSignal;
@@ -103,25 +103,18 @@ export class Broker {
       this.sampleTimeBuffer = new Float64Array(evalTime.length);
     }
 
-    if (evalTime.length < 2) {
-      this.valueBuffer.fill(NaN);
-      this.sampleTimeBuffer.fill(NaN);
-      return {
-        value: this.valueBuffer,
-        sampleTime: this.sampleTimeBuffer,
-        requests: [],
-        sampleRevision: this.sampleRevision,
-      };
-    }
-
-    const queryInterval = Interval.create(evalTime[0]!, evalTime[evalTime.length - 1]!);
-    this.store.sample(evalTime, this.valueBuffer, this.sampleTimeBuffer);
-    const requests = this.transientSegments(queryInterval).sort(
-      (a, b) =>
-        a.range.start - b.range.start ||
-        requestLabelRank(b) - requestLabelRank(a) ||
-        a.range.end - b.range.end,
-    );
+    this.store.findBatchAtOrBefore(evalTime, this.valueBuffer, this.sampleTimeBuffer);
+    const requests =
+      evalTime.length < 2
+        ? []
+        : this.transientSegments(
+            Interval.create(evalTime[0]!, evalTime[evalTime.length - 1]!),
+          ).sort(
+            (a, b) =>
+              a.range.start - b.range.start ||
+              requestLabelRank(b) - requestLabelRank(a) ||
+              a.range.end - b.range.end,
+          );
 
     return {
       value: this.valueBuffer,
@@ -167,13 +160,9 @@ export class Broker {
     this.notify();
   }
 
-  cachedInterval(): Interval | null {
-    return this.store.timeInterval();
-  }
-
   /** Write the latest selected observation at or before `time`. */
   readPointAtOrBefore(time: number, out: MutableSample): boolean {
-    return this.store.readPointAtOrBefore(time, out);
+    return this.store.findAtOrBefore(time, out);
   }
 
   private syncAdapterDemands(): void {
@@ -197,39 +186,7 @@ export class Broker {
           `latest returned timestamp was ${clipped.latestAfterRangeT}`,
       );
     }
-    let changed = false;
-    if (samples.length > 0) {
-      // A sample represents its zero-order-held value for one native sample
-      // period. In particular, an OHLC candle open is already known at the
-      // candle boundary and remains the displayed value until the next open.
-      // Extending that final step to its expected lifetime prevents moving
-      // demand boundaries from manufacturing millisecond-sized uncovered tails.
-      changed = this.ingestObserved(samples, result.resolutionMs);
-    }
-    return changed;
-  }
-
-  private ingestObserved(samples: readonly Sample[], nominalResolutionMs: number): boolean {
-    const segments: HeldSignalSegment[] = [];
-    for (let index = 0; index < samples.length; index++) {
-      const sample = samples[index]!;
-      const next = samples[index + 1];
-      const rangeEnd = next?.t ?? sample.t + nominalResolutionMs;
-      if (!(sample.t < rangeEnd)) continue;
-
-      segments.push({
-        range: Interval.create(sample.t, rangeEnd),
-        sampleTime: sample.t,
-        value: sample.value,
-        // Quality describes the cadence that was searched, not the wall-clock
-        // distance to the next returned candle. Otherwise every overnight or
-        // weekend closure becomes a fake coarse interval and an intermediate
-        // zoom produces thousands of alternating ready/missing fragments.
-        resolutionMs: nominalResolutionMs,
-      });
-    }
-
-    return this.store.insertBatch(segments);
+    return this.store.upsertBatch(samples);
   }
 
   private transientSegments(range: Interval): RequestSegment[] {

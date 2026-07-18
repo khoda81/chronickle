@@ -24,7 +24,7 @@ import {
 } from "../src/data/signal/fetcher.ts";
 import { priceSignalSource } from "../src/data/signal/market/market.ts";
 import { filterMarketSymbols, parseNobitexMarketKey } from "../src/data/signal/market/symbols.ts";
-import { SignalSegmentStore } from "../src/data/signal/store.ts";
+import { NumericSeriesStore } from "../src/data/signal/store.ts";
 import { Interval, IntervalSet } from "../src/core/interval.ts";
 import { deserializePersistedUiState } from "../src/app/persistence.ts";
 import {
@@ -252,16 +252,6 @@ function approx(actual: number, expected: number, tolerance = 1e-12): void {
   if (!(Math.abs(actual - expected) <= tolerance)) {
     throw new Error(`expected ${expected} ± ${tolerance}, got ${actual}`);
   }
-}
-
-function heldSegment(
-  rangeStart: number,
-  rangeEnd: number,
-  sampleTime: number,
-  value: number,
-  resolutionMs: number,
-) {
-  return { range: Interval.create(rangeStart, rangeEnd), sampleTime, value, resolutionMs } as const;
 }
 
 function assertPoint(
@@ -825,81 +815,85 @@ test("event hover selects the last visible event at or before the pointer", () =
   );
 });
 
-test("signal segment store returns NaN outside coverage and holds ZOH values", () => {
+test("numeric series store performs batched predecessor reads", () => {
   const evalTime = new Float64Array([0, 10, 15, 20]);
-  const store = new SignalSegmentStore();
-  const empty = store.sample(evalTime);
+  const store = new NumericSeriesStore();
+  const emptyTime = new Float64Array(evalTime.length);
+  const empty = store.findBatchAtOrBefore(evalTime, undefined, emptyTime);
   assert(empty.every(Number.isNaN), "empty store did not return NaN");
+  assert(
+    emptyTime.every(time => time === Number.NEGATIVE_INFINITY),
+    "empty store did not return the missing-time sentinel",
+  );
 
-  store.insertBatch([heldSegment(5, 15, 5, 1, 10), heldSegment(15, 25, 15, 2, 10)]);
+  store.upsertBatch([
+    { t: 5, value: 1 },
+    { t: 15, value: 2 },
+  ]);
   const sampleTime = new Float64Array(evalTime.length);
-  const sampled = store.sample(evalTime, undefined, sampleTime);
+  const sampled = store.findBatchAtOrBefore(evalTime, undefined, sampleTime);
   assert(Number.isNaN(sampled[0]!), "value before first observation was defined");
   assert(sampled[1] === 1 && sampled[2] === 2 && sampled[3] === 2, "ZOH evaluation is incorrect");
-  assert(Number.isNaN(sampleTime[0]!), "missing value received an observation identity");
+  assert(sampleTime[0] === Number.NEGATIVE_INFINITY, "missing value received a finite timestamp");
   assert(
     sampleTime[1] === 5 && sampleTime[2] === 15 && sampleTime[3] === 15,
     "sample grid lost selected observation identity",
   );
 
   const selected = { t: Number.NaN, value: Number.NaN };
-  assert(!store.readPointAtOrBefore(4, selected), "predecessor lookup invented a leading value");
-  assert(store.readPointAtOrBefore(10, selected), "predecessor lookup missed an interior value");
+  assert(!store.findAtOrBefore(4, selected), "predecessor lookup invented a leading value");
+  assert(store.findAtOrBefore(10, selected), "predecessor lookup missed an interior value");
   assertPoint(selected, 5, 1, "interior point lost its observation");
-  assert(store.readPointAtOrBefore(15, selected), "predecessor lookup missed a boundary value");
+  assert(store.findAtOrBefore(15, selected), "predecessor lookup missed a boundary value");
   assertPoint(selected, 15, 2, "boundary point selected the prior segment");
-  assert(store.readPointAtOrBefore(30, selected), "held point lookup failed");
+  assert(store.findAtOrBefore(30, selected), "held point lookup failed");
   assertPoint(selected, 15, 2, "held value lost its observation timestamp");
 });
 
-test("wavelet density measures selected observations rather than reconstructed holds", () => {
-  const store = new SignalSegmentStore();
-  store.insertBatch([
-    heldSegment(0, 2_000, 0, 1, 1_000),
-    heldSegment(2_000, 10_000, 2_000, 2, 1_000),
-  ]);
-  const evalTime = new Float64Array([0, 1_000, 2_000, 3_000, 4_000]);
-  const sampleTime = new Float64Array(evalTime.length);
-  store.sample(evalTime, undefined, sampleTime);
-  const density = usedSampleDensity(sampleTime, 1, 4);
-  assert(density[0] === 0 && density[1] === 1, "selected observation was misplaced");
-  assert(density[2] === 0 && density[3] === 0, "reconstructed hold invented observations");
-});
-
-test("segment coverage is half-open while predecessor lookup keeps the observation", () => {
-  const store = new SignalSegmentStore();
-  store.insertBatch([heldSegment(5, 15, 5, 1, 10)]);
+test("numeric series store uses last write for duplicate timestamps", () => {
+  const store = new NumericSeriesStore();
   assert(
-    Number.isNaN(store.sample(new Float64Array([15]))[0]!),
-    "segment end leaked into coverage",
+    store.upsertBatch([
+      { t: 0, value: 1 },
+      { t: 10, value: 2 },
+      { t: 10, value: 3 },
+      { t: 20, value: 4 },
+    ]),
+    "initial batch did not change the store",
   );
+  assert(store.size === 3, "duplicate timestamp created another entry");
+  assert(!store.upsertBatch([{ t: 10, value: 3 }]), "identical upsert changed the store");
+  assert(store.upsertBatch([{ t: 10, value: 5 }]), "replacement upsert was ignored");
 
   const selected = { t: Number.NaN, value: Number.NaN };
-  assert(store.readPointAtOrBefore(15, selected), "predecessor lookup lost the final observation");
-  assertPoint(selected, 5, 1, "predecessor lookup changed the final observation");
+  assert(store.findAtOrBefore(10, selected), "exact replacement was not found");
+  assertPoint(selected, 10, 5, "last write did not win");
 });
 
-test("signal predecessor lookup holds across uncovered gaps", () => {
-  const store = new SignalSegmentStore();
-  store.insertBatch([
-    heldSegment(10, 20, 10, 1, 10),
-    heldSegment(20, 30, 20, 2, 10),
-    heldSegment(40, 50, 40, 3, 10),
-    heldSegment(50, 60, 50, 4, 10),
+test("numeric series store remains ordered across many leaves and middle writes", () => {
+  const store = new NumericSeriesStore();
+  const samples = Array.from({ length: 4_096 }, (_, index) => ({ t: index * 2, value: index }));
+  store.upsertBatch(samples);
+  store.upsertBatch([
+    { t: 1_999, value: -1 },
+    { t: 2_001, value: -2 },
   ]);
-  const selected = { t: Number.NaN, value: Number.NaN };
-  assert(store.readPointAtOrBefore(35, selected), "gap lookup failed");
-  assertPoint(selected, 20, 2, "gap lookup did not use the preceding observation");
-  assert(store.readPointAtOrBefore(40, selected), "new observation lookup failed");
-  assertPoint(selected, 40, 3, "new observation did not take effect at its timestamp");
-});
 
-test("equal-valued observations retain their distinct timestamps", () => {
-  const store = new SignalSegmentStore();
-  store.insertBatch([heldSegment(0, 10, 0, 1, 10), heldSegment(10, 20, 10, 1, 10)]);
-  const selected = { t: Number.NaN, value: Number.NaN };
-  assert(store.readPointAtOrBefore(15, selected), "equal-value point lookup failed");
-  assert(selected.t === 10, "equal values erased the newer observation time");
+  const evalTime = new Float64Array([-1, 0, 1, 1_998, 1_999, 2_000, 2_001, 8_500]);
+  const sampleTime = new Float64Array(evalTime.length);
+  const value = store.findBatchAtOrBefore(evalTime, undefined, sampleTime);
+  assert(
+    sampleTime[0] === Number.NEGATIVE_INFINITY && Number.isNaN(value[0]!),
+    "leading miss did not use the sentinel pair",
+  );
+  assert(
+    sampleTime[3] === 1_998 &&
+      sampleTime[4] === 1_999 &&
+      sampleTime[5] === 2_000 &&
+      sampleTime[6] === 2_001,
+    "middle insertion broke predecessor order",
+  );
+  assert(value[4] === -1 && value[6] === -2 && value[7] === 4_095, "values were misplaced");
 });
 
 test("broker read is side-effect-free and viewport subscriptions drive fetching", async () => {
@@ -1087,23 +1081,6 @@ test("broker can select an observation beyond wall time when the adapter deliver
   assert(view.value[0] === 3 && view.value[1] === 3, "future-dated reconstruction was hidden");
   assert(view.sampleTime[0] === 150 && view.sampleTime[1] === 150, "observation identity was lost");
   lifetime.abort();
-});
-
-test("an empty signal segment store has no invalid cached range", () => {
-  const store = new SignalSegmentStore();
-  assert(store.timeInterval() === null, "empty store exposed a cached range");
-});
-
-test("finer signal segments replace coarse history and reject late coarse overwrites", () => {
-  const store = new SignalSegmentStore();
-  store.insertBatch([heldSegment(0, 20, 0, 1, 20)]);
-  store.insertBatch([heldSegment(5, 15, 5, 10, 10), heldSegment(15, 25, 15, 11, 10)]);
-  store.insertBatch([heldSegment(0, 20, 0, -1, 30)]);
-  const sampled = store.sample(new Float64Array([2, 7, 15, 18, 24]));
-  assert(sampled[0] === 1, "late coarse response overwrote leading history");
-  assert(sampled[1] === 10, "fine history was not selected");
-  assert(sampled[2] === 11, "new fine observation did not own its boundary");
-  assert(sampled[3] === 11 && sampled[4] === 11, "fine final observation was not held");
 });
 
 test("centered Gaussian is symmetric and crop invariant away from boundaries", () => {
@@ -1370,7 +1347,10 @@ test("a completed empty search leaves no selected observations", async () => {
   subscription.update({ range: Interval.create(0, 5_000), maxDeltaTMs: 1_500 });
   const view = broker.read({ evalTime: new Float64Array([0, 2_500, 5_000]) });
   assert(calls === 1, "native fine coverage was refetched for a nearby zoom level");
-  assert(view.sampleTime.every(Number.isNaN), "empty search invented data availability");
+  assert(
+    view.sampleTime.every(time => time === Number.NEGATIVE_INFINITY),
+    "empty search invented data availability",
+  );
   broker.close();
 });
 
@@ -1507,7 +1487,7 @@ test("adapter keeps a live lease warm for its configured grace period", async ()
   lifetime.abort();
 });
 
-test("points after the adapter's searched range are discarded with a warning", async () => {
+test("points after the searched range are discarded while the predecessor remains readable", async () => {
   const warnings: string[] = [];
   const fetcher: Fetcher = {
     async fetchInterval({ range }) {
@@ -1529,8 +1509,11 @@ test("points after the adapter's searched range are discarded with a warning", a
   broker.query({ evalTime, maxSampleGapMs: 5_000 });
   await new Promise(resolve => setTimeout(resolve, 0));
   const result = broker.query({ evalTime, maxSampleGapMs: 5_000 });
-  assert(Number.isNaN(result.sampleTime[2]!), "out-of-range observation entered the render grid");
-  assert(Number.isNaN(result.value[2]!), "out-of-range value was rendered");
+  assert(
+    result.sampleTime[2] === 5_000,
+    "predecessor identity was not held after the final sample",
+  );
+  approx(Math.exp(result.value[2]!), 11, 1e-12);
   const latest = { t: Number.NaN, value: Number.NaN };
   assert(broker.readPointAtOrBefore(10_000, latest), "latest cached observation was missing");
   assert(latest.t === 5_000, "range clipping selected the wrong timestamp");
@@ -1541,21 +1524,27 @@ test("points after the adapter's searched range are discarded with a warning", a
   );
 });
 
-test("wavelet density ignores cached observations not selected for rendering", () => {
-  const store = new SignalSegmentStore();
-  store.insertBatch([heldSegment(0, 100, 0, 1, 100)]);
-  store.insertBatch([heldSegment(20, 40, 20, 2, 20), heldSegment(40, 60, 40, 3, 20)]);
+test("wavelet density counts selected observations rather than held values", () => {
+  const store = new NumericSeriesStore();
+  store.upsertBatch([
+    { t: 0, value: 1 },
+    { t: 20, value: 2 },
+    { t: 40, value: 3 },
+  ]);
   const evalTime = new Float64Array([0, 20, 40, 60, 80]);
   const sampleTime = new Float64Array(evalTime.length);
-  store.sample(evalTime, undefined, sampleTime);
+  store.findBatchAtOrBefore(evalTime, undefined, sampleTime);
   const density = usedSampleDensity(sampleTime, 1, 4);
-  assert(density[0] === 1 && density[1] === 1, "selected fine observations were missing");
-  assert(density[2] === 0, "resumed older coarse evidence became a new observation");
-  assert(density[3] === 0, "unused cached evidence leaked into density");
+  assert(density[0] === 1 && density[1] === 1, "selected observations were missing");
+  assert(density[2] === 0 && density[3] === 0, "held values became new observations");
 });
 
 test("wavelet density exposes holds, gaps, and resumed observations", () => {
-  const density = usedSampleDensity(new Float64Array([NaN, 0, 0, NaN, 4, 4]), 1, 5);
+  const density = usedSampleDensity(
+    new Float64Array([Number.NEGATIVE_INFINITY, 0, 0, Number.NEGATIVE_INFINITY, 4, 4]),
+    1,
+    5,
+  );
   assert(density[0] === 1, "first available observation was missing");
   assert(density[1] === 0, "held observation was counted twice");
   assert(density[2] === 0, "unavailable edge invented an observation");
@@ -1796,53 +1785,47 @@ test("subscriber failures are not reclassified as fetch failures", async () => {
   );
   assert(errors.includes("[Broker] subscriber failed"), "subscriber exception was hidden");
   assert(!errors.some(message => message.includes("fetch failed")), "fetch was blamed for UI");
-  const cached = broker.cachedInterval();
-  assert(
-    cached !== null && cached.start === 500 && cached.end === 1_500,
-    "singleton hold range was lost",
-  );
   broker.close();
 });
 
-test("a late coarse response cannot overwrite an earlier fine response", async () => {
-  let resolveCoarse!: (result: FetchIntervalResult) => void;
-  let resolveFine!: (result: FetchIntervalResult) => void;
-  const fetcher: Fetcher = {
-    fetchInterval({ maxDeltaTMs }) {
-      return new Promise(resolve => {
-        if (maxDeltaTMs === 5_000) resolveCoarse = resolve;
-        else resolveFine = resolve;
-      });
+test("a late batch replaces matching timestamps and retains unmatched observations", () => {
+  let sink: Parameters<SignalAdapter["connect"]>[0] | null = null;
+  const adapter: SignalAdapter = {
+    connect(nextSink) {
+      sink = nextSink;
+      return { setDemands: () => undefined, clearCache: () => undefined };
     },
   };
-  const broker = new Broker(fetcher, { now: () => 5_000 });
+  const lifetime = new AbortController();
+  const broker = new PriceBroker(adapter, { signal: lifetime.signal });
   const evalTime = new Float64Array([0, 1_000, 2_000, 3_000, 4_000, 5_000]);
-  broker.query({ evalTime, maxSampleGapMs: 5_000 });
-  broker.query({ evalTime, maxSampleGapMs: 1_000 });
-
-  resolveFine({
-    points: [
-      { t: 0, price: 100 },
-      { t: 1_000, price: 101 },
-      { t: 2_000, price: 102 },
-      { t: 3_000, price: 103 },
-      { t: 4_000, price: 104 },
-      { t: 5_000, price: 105 },
+  const connectedSink = sink as unknown as Parameters<SignalAdapter["connect"]>[0];
+  connectedSink.next({
+    samples: [
+      { t: 0, value: 100 },
+      { t: 1_000, value: 101 },
+      { t: 2_000, value: 102 },
+      { t: 3_000, value: 103 },
+      { t: 4_000, value: 104 },
+      { t: 5_000, value: 105 },
     ],
     searchedInterval: Interval.create(0, 5_000),
+    resolutionMs: 1_000,
   });
-  await new Promise(resolve => setTimeout(resolve, 0));
-  resolveCoarse({
-    points: [
-      { t: 0, price: 10 },
-      { t: 5_000, price: 15 },
+  connectedSink.next({
+    samples: [
+      { t: 0, value: 10 },
+      { t: 5_000, value: 15 },
     ],
     searchedInterval: Interval.create(0, 5_000),
+    resolutionMs: 5_000,
   });
-  await new Promise(resolve => setTimeout(resolve, 0));
 
-  const result = broker.query({ evalTime, maxSampleGapMs: 1_000 });
-  approx(Math.exp(result.value[1]!), 101, 1e-10);
+  const result = broker.read({ evalTime });
+  assert(result.value[0] === 10, "late value did not replace an exact timestamp");
+  assert(result.value[1] === 101, "late batch removed an unmatched observation");
+  assert(result.value[5] === 15, "late tail value did not replace an exact timestamp");
+  lifetime.abort();
 });
 
 test("clearing the price cache ignores stale in-flight responses", async () => {
