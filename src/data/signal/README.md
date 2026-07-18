@@ -37,10 +37,11 @@ and duplicate sample deliveries cause no redraw unless the report snapshot also
 changed. Acquisition errors are additionally sent to the application's error
 handler.
 
-Reports have `info`, `warn`, or `error` severity. Where their intervals overlap,
-the chart displays the higher severity; the later item wins at equal severity.
-This produces a deterministic non-overlapping reporting frontier without
-turning a report into evidence that an interval was searched or satisfied.
+Reports have `info`, `warn`, or `error` presentation kinds. Where their
+intervals overlap, later entries in the adapter's snapshot paint over earlier
+ones. This lets each adapter choose its own priority while producing a
+deterministic non-overlapping reporting frontier. A report never becomes
+evidence that an interval was searched or satisfied.
 
 This boundary deliberately cannot distinguish among an unsearched range, a
 market closure, an unavailable native resolution, pending computation, or a

@@ -1100,13 +1100,14 @@ test("adapter reports invalidate views without changing sample revision", () => 
   broker.close();
 });
 
-test("overlapping adapter reports form a severity-ordered frontier", () => {
+test("overlapping adapter reports use adapter-defined list order", () => {
   const frontier = signalReportFrontier(
     [
       { range: Interval.create(0, 10), kind: "info", message: "info" },
       { range: Interval.create(2, 8), kind: "warn", message: "warn" },
       { range: Interval.create(4, 6), kind: "error", message: "error" },
       { range: Interval.create(7, 9), kind: "warn", message: "new warn" },
+      { range: Interval.create(5, 7), kind: "info", message: "last info" },
     ],
     Interval.create(0, 10),
   );
@@ -1120,8 +1121,8 @@ test("overlapping adapter reports form a severity-ordered frontier", () => {
       JSON.stringify([
         [0, 2, "info"],
         [2, 4, "warn"],
-        [4, 6, "error"],
-        [6, 7, "warn"],
+        [4, 5, "error"],
+        [5, 7, "last info"],
         [7, 9, "new warn"],
         [9, 10, "info"],
       ]),

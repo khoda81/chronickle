@@ -14,11 +14,9 @@ export interface SignalReportFragment {
   readonly report: SignalReport;
 }
 
-const REPORT_PRIORITY: Readonly<Record<SignalReportKind, number>> = { info: 0, warn: 1, error: 2 };
-
 /**
- * Resolve reports into a non-overlapping visible frontier. Higher severity wins;
- * for equal severity, the later report in the snapshot wins.
+ * Resolve reports into a non-overlapping visible frontier. Reports are painted
+ * in snapshot order, so a later entry wins wherever intervals overlap.
  */
 export function signalReportFrontier(
   reports: readonly SignalReport[],
@@ -40,11 +38,7 @@ export function signalReportFrontier(
     let winner: (typeof candidates)[number] | undefined;
     for (const candidate of candidates) {
       if (!Interval.overlaps(candidate.range, range)) continue;
-      if (
-        winner === undefined ||
-        REPORT_PRIORITY[candidate.report.kind] > REPORT_PRIORITY[winner.report.kind] ||
-        (candidate.report.kind === winner.report.kind && candidate.index > winner.index)
-      ) {
+      if (winner === undefined || candidate.index > winner.index) {
         winner = candidate;
       }
     }
