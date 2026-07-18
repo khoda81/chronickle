@@ -1,41 +1,38 @@
 /**
- * Resolution selection for the `maxDeltaTMs` fetcher contract.
+ * Native resolution selection used inside polling adapters.
  *
- * Each fetcher advertises its native sample periods (in ms), finest→coarsest.
- * Given a requested `maxDeltaTMs` ("give me points spaced at most this far
- * apart"), `pickResolution` returns the **finest** native period that is
- * `<= maxDeltaTMs` — i.e. the coarsest one that satisfies the constraint while
- * minimizing over-fetching. If even the finest native period exceeds
- * `maxDeltaTMs`, that finest period is returned (the request cannot be met
- * exactly; the fetcher does the best it can and the staircase evaluator
- * handles the resulting sparsity).
+ * Each source advertises its sample periods (in ms), finest→coarsest. Given
+ * the regular demand grid's spacing, `pickResolution` returns the coarsest
+ * native period that is no wider than the grid. If the source cannot satisfy
+ * the spacing, it returns the finest available period as its best effort.
  *
  * Example (Nobitex, periods in ms):
- *   maxDeltaT = 1min..4.999min  -> 60s    ("1")
- *   maxDeltaT = 5min..14.999min -> 300s   ("5")
- *   maxDeltaT = 15min..29.999min -> 900s  ("15")
- *   maxDeltaT = 30min..59.999min -> 1800s ("30")
+ *   spacing = 1min..4.999min   -> 60s    ("1")
+ *   spacing = 5min..14.999min  -> 300s   ("5")
+ *   spacing = 15min..29.999min -> 900s   ("15")
+ *   spacing = 30min..59.999min -> 1800s  ("30")
  *   ...
  *
- * The broker never sees native resolution strings; it only reasons about
- * sample periods in ms.
+ * The broker never sees native resolutions or this selection process.
  */
 
 /**
- * Pick the coarsest native period `<= maxDeltaTMs`, or the finest available
+ * Pick the coarsest native period `<= targetSpacingMs`, or the finest available
  * if none satisfy the constraint.
  *
  * @param nativePeriodsMs  Ascending (finest→coarsest) sample periods in ms.
  *                         Must be non-empty, positive, ascending.
- * @param maxDeltaTMs      Requested maximum spacing between samples, in ms.
- *                         Must be positive.
+ * @param targetSpacingMs  Spacing of the adapter demand grid, in ms.
  */
-export function pickResolution(nativePeriodsMs: readonly number[], maxDeltaTMs: number): number {
+export function pickResolution(
+  nativePeriodsMs: readonly number[],
+  targetSpacingMs: number,
+): number {
   if (nativePeriodsMs.length === 0) {
     throw new Error("pickResolution: nativePeriodsMs must be non-empty");
   }
-  if (!(maxDeltaTMs > 0)) {
-    throw new Error(`pickResolution: maxDeltaTMs must be positive, got ${maxDeltaTMs}`);
+  if (!(targetSpacingMs > 0)) {
+    throw new Error(`pickResolution: targetSpacingMs must be positive, got ${targetSpacingMs}`);
   }
 
   // Validate ascending + positive once, at the boundary.
@@ -49,12 +46,11 @@ export function pickResolution(nativePeriodsMs: readonly number[], maxDeltaTMs: 
     prev = p;
   }
 
-  // TODO: Can't this be a binary search?
-  // Find the largest period that is <= maxDeltaTMs (coarsest satisfying).
+  // Find the largest period that is <= targetSpacingMs (coarsest satisfying).
   // nativePeriodsMs is ascending, so walk from the end.
   for (let i = nativePeriodsMs.length - 1; i >= 0; i--) {
     const p = nativePeriodsMs[i]!;
-    if (p <= maxDeltaTMs) return p;
+    if (p <= targetSpacingMs) return p;
   }
 
   // None satisfy; return the finest available.

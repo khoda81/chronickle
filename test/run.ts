@@ -1,13 +1,7 @@
 import type { NewsEvent, RssFeed } from "../src/domain.ts";
 import { EventBroker } from "../src/data/events/broker.ts";
 import { Broker as PriceBroker } from "../src/data/signal/broker.ts";
-import type {
-  BrokerOptions,
-  Subscription,
-  ReadRequest,
-  SignalView,
-  BrokerDemand,
-} from "../src/data/signal/broker.ts";
+import type { BrokerOptions, Subscription, SignalView } from "../src/data/signal/broker.ts";
 import { createBinanceAdapter } from "../src/data/signal/market/adapters/binanceFetcher.ts";
 import { createNobitexAdapter } from "../src/data/signal/market/adapters/nobitexFetcher.ts";
 import {
@@ -17,14 +11,15 @@ import {
 import { logPriceSamples } from "../src/data/signal/market/price.ts";
 import {
   createPollingSignalSource,
-  type AcquisitionActivity,
+  demandSampleSpacingMs,
   type AdapterBatch,
-  type AdapterDelivery,
   type SignalAdapter,
+  type SignalDemand,
 } from "../src/data/signal/fetcher.ts";
 import { priceSignalSource } from "../src/data/signal/market/market.ts";
 import { filterMarketSymbols, parseNobitexMarketKey } from "../src/data/signal/market/symbols.ts";
 import { NumericSeriesStore } from "../src/data/signal/store.ts";
+import type { Sample } from "../src/data/signal/sample.ts";
 import { Interval, IntervalSet } from "../src/core/interval.ts";
 import { deserializePersistedUiState } from "../src/app/persistence.ts";
 import {
@@ -121,9 +116,8 @@ interface TestBrokerOptions extends Omit<BrokerOptions, "signal"> {
   readonly now?: () => number;
 }
 
-interface QueryRequest extends ReadRequest {
-  /** Compatibility helper turns this into subscription demand before reading. */
-  readonly maxSampleGapMs: number;
+interface QueryRequest {
+  readonly evalTime: Float64Array;
 }
 
 class Broker extends PriceBroker {
@@ -141,27 +135,17 @@ class Broker extends PriceBroker {
     brokers.add(this);
   }
 
-  override subscribe(
-    demand: BrokerDemand,
-    fn: () => void,
-    signal: AbortSignal = this.lifetime.signal,
-  ): Subscription {
-    return super.subscribe(demand, fn, signal);
+  override subscribe(fn: () => void, signal: AbortSignal = this.lifetime.signal): Subscription {
+    return super.subscribe(fn, signal);
   }
 
   query(opts: QueryRequest): SignalView {
-    if (opts.evalTime.length >= 2) {
-      const demand = {
-        range: Interval.create(opts.evalTime[0]!, opts.evalTime[opts.evalTime.length - 1]!),
-        maxDeltaTMs: opts.maxSampleGapMs,
-      };
-      if (this.compatibilitySubscription === null) {
-        this.compatibilitySubscription = this.subscribe(demand, () => undefined);
-      } else {
-        this.compatibilitySubscription.update(demand);
-      }
-    }
-    return this.read({ evalTime: opts.evalTime });
+    this.compatibilitySubscription ??= this.subscribe(() => undefined);
+    return this.compatibilitySubscription.read(opts.evalTime);
+  }
+
+  read(opts: { readonly evalTime: Float64Array }): SignalView {
+    return this.query(opts);
   }
 
   close(): void {
@@ -181,7 +165,7 @@ function adaptFetcher(fetcher: Fetcher, now: () => number): SignalAdapter {
     livePollDelayMs: fetcher.liveRetryDelayMs,
     publicationGraceMs: fetcher.publicationGraceMs,
     now,
-    resolve: demand => demand.maxDeltaTMs,
+    resolve: demandSampleSpacingMs,
     retryDelayMs: fetcher.retryDelayMs?.bind(fetcher),
     clearCache: fetcher.clearCache?.bind(fetcher),
     async fetchInterval(plan, signal) {
@@ -198,16 +182,15 @@ function adaptFetcher(fetcher: Fetcher, now: () => number): SignalAdapter {
   });
 }
 
-function fetchOnce(adapter: SignalAdapter, demand: BrokerDemand): Promise<AdapterDelivery> {
+function fetchOnce(adapter: SignalAdapter, nextDemand: SignalDemand): Promise<readonly Sample[]> {
   return new Promise((resolve, reject) => {
     const lifetime = new AbortController();
     const session = adapter.connect(
       {
-        next: batch => {
+        next: samples => {
           lifetime.abort();
-          resolve(batch);
+          resolve(samples);
         },
-        status: () => undefined,
         error: error => {
           lifetime.abort();
           reject(error);
@@ -215,29 +198,29 @@ function fetchOnce(adapter: SignalAdapter, demand: BrokerDemand): Promise<Adapte
       },
       lifetime.signal,
     );
-    session.setDemands([demand]);
+    session.setDemands([nextDemand]);
   });
 }
 
-function retryOnce(
-  adapter: SignalAdapter,
-  demand: BrokerDemand,
-): Promise<{ readonly error: unknown; readonly retryAtMs: number }> {
+function failOnce(adapter: SignalAdapter, nextDemand: SignalDemand): Promise<unknown> {
   return new Promise(resolve => {
     const lifetime = new AbortController();
     const session = adapter.connect(
       {
         next: () => undefined,
-        status: () => undefined,
-        error: (error, activity) => {
+        error: error => {
           lifetime.abort();
-          resolve({ error, retryAtMs: activity.retryAtMs! });
+          resolve(error);
         },
       },
       lifetime.signal,
     );
-    session.setDemands([demand]);
+    session.setDemands([nextDemand]);
   });
+}
+
+function demand(range: Interval, sampleSpacingMs: number): SignalDemand {
+  return { range, sampleCount: Math.max(2, Math.ceil(Interval.span(range) / sampleSpacingMs) + 1) };
 }
 
 function test(name: string, run: Test["run"]): void {
@@ -386,10 +369,10 @@ test("gesture session transitions touch drag through pinch without parallel flag
   const remaining = gesture.state;
   assert(
     remaining.kind === "drag" &&
-    remaining.input === "touch" &&
-    remaining.pointerId === 5 &&
-    remaining.row === 7 &&
-    remaining.moved,
+      remaining.input === "touch" &&
+      remaining.pointerId === 5 &&
+      remaining.row === 7 &&
+      remaining.moved,
     "pinch did not become a moved drag for the remaining touch",
   );
   assert(gesture.end(5), "remaining touch did not end");
@@ -439,15 +422,15 @@ test("timeline gesture controller owns native drag events and canvas projection"
         panRow = row ?? Number.NaN;
         panY = deltaY;
       },
-      resizeBoundary() { },
-      pinchTime() { },
-      wheel() { },
-      hoverMoved() { },
-      pointerLeft() { },
+      resizeBoundary() {},
+      pinchTime() {},
+      wheel() {},
+      hoverMoved() {},
+      pointerLeft() {},
       tap() {
         taps++;
       },
-      doubleTap() { },
+      doubleTap() {},
     };
     const controller = new TimelineGestureController({
       canvas,
@@ -511,27 +494,27 @@ test("timeline gesture controller combines two touch pointers into one pinch upd
     const finishedStates: boolean[] = [];
     const host: TimelineGestureHost = {
       targetAt: () => ({ kind: "viewport", row: 6 }),
-      gestureStarted() { },
+      gestureStarted() {},
       gestureEnded(_input, _cancelled, finished) {
         finishedStates.push(finished);
       },
-      panTimeByPixels() { },
+      panTimeByPixels() {},
       panRow(nextRow, deltaY) {
         row = nextRow ?? Number.NaN;
         verticalDelta = deltaY;
       },
-      resizeBoundary() { },
+      resizeBoundary() {},
       pinchTime(_viewportWidth, previousCenter, currentCenter, previousSpan, currentSpan) {
         previousCenterX = previousCenter;
         currentCenterX = currentCenter;
         previousDistance = previousSpan;
         currentDistance = currentSpan;
       },
-      wheel() { },
-      hoverMoved() { },
-      pointerLeft() { },
-      tap() { },
-      doubleTap() { },
+      wheel() {},
+      hoverMoved() {},
+      pointerLeft() {},
+      tap() {},
+      doubleTap() {},
     };
     const controller = new TimelineGestureController({
       canvas: canvasTarget as unknown as HTMLCanvasElement,
@@ -606,12 +589,12 @@ test("timeline gesture controller normalizes wheel units without allocating a po
     let shifted = false;
     const host: TimelineGestureHost = {
       targetAt: () => ({ kind: "viewport", row: null }),
-      gestureStarted() { },
-      gestureEnded() { },
-      panTimeByPixels() { },
-      panRow() { },
-      resizeBoundary() { },
-      pinchTime() { },
+      gestureStarted() {},
+      gestureEnded() {},
+      panTimeByPixels() {},
+      panRow() {},
+      resizeBoundary() {},
+      pinchTime() {},
       wheel(point, deltaX, deltaY, shiftKey) {
         pointX = point.x;
         pointY = point.y;
@@ -619,10 +602,10 @@ test("timeline gesture controller normalizes wheel units without allocating a po
         wheelY = deltaY;
         shifted = shiftKey;
       },
-      hoverMoved() { },
-      pointerLeft() { },
-      tap() { },
-      doubleTap() { },
+      hoverMoved() {},
+      pointerLeft() {},
+      tap() {},
+      doubleTap() {},
     };
     new TimelineGestureController({
       canvas: canvasTarget as unknown as HTMLCanvasElement,
@@ -713,12 +696,12 @@ test("stack layout fills the canvas and preserves every resizable row", () => {
 test("signal row layout owns status, heatmap, hit-test, and collapse geometry", () => {
   const row = signalRowLayout(100, 130);
   assert(row.heatmapTop === 100, "bottom status strip shifted the heatmap top");
-  assert(row.heatmapHeight === 114 && row.tooltipPosition === 215, "bad heatmap geometry");
+  assert(row.heatmapHeight === 128 && row.tooltipPosition === 229, "bad heatmap geometry");
   assert(row.drawable, "normal row was not drawable");
   assert(signalRowContainsHeatmap(100, 130, 100), "heatmap top was excluded from hit testing");
-  assert(signalRowContainsHeatmap(100, 130, 213), "heatmap bottom pixel was excluded");
-  assert(!signalRowContainsHeatmap(100, 130, 214), "status strip entered heatmap hit testing");
-  assert(!signalRowLayout(100, 18).drawable, "collapsed row retained drawable heatmap space");
+  assert(signalRowContainsHeatmap(100, 130, 227), "heatmap bottom pixel was excluded");
+  assert(!signalRowContainsHeatmap(100, 130, 228), "status strip entered heatmap hit testing");
+  assert(!signalRowLayout(100, 4).drawable, "collapsed row retained drawable heatmap space");
   assert(
     signalRowCollapseProgress(1, ROW_REMOVE_THRESHOLD, 1) === 1,
     "active boundary did not fully expose the remove affordance",
@@ -945,7 +928,7 @@ test("numeric series store matches a map oracle across mixed batch writes", () =
   }
 });
 
-test("broker read is side-effect-free and viewport subscriptions drive fetching", async () => {
+test("broker query forwards grid demand and serves the cache synchronously", async () => {
   let calls = 0;
   let notifications = 0;
   const fetcher: Fetcher = {
@@ -961,23 +944,19 @@ test("broker read is side-effect-free and viewport subscriptions drive fetching"
     },
   };
   const broker = new Broker(fetcher, { now: () => 10_000 });
-  const request = { evalTime: new Float64Array([0, 1_000, 2_000]), maxSampleGapMs: 1_000 };
+  const request = { evalTime: new Float64Array([0, 1_000, 2_000]) };
 
-  const empty = broker.read(request);
-  assert(calls === 0, "read unexpectedly started a network request");
+  const subscription = broker.subscribe(() => notifications++);
+  const empty = subscription.read(request.evalTime);
+  assert(calls === 1, "query grid did not reach the adapter");
   assert(empty.value.every(Number.isNaN), "empty cache read returned data");
 
-  const subscription = broker.subscribe(
-    { range: Interval.create(0, 2_000), maxDeltaTMs: 1_000 },
-    () => notifications++,
-  );
-  assert(Number(calls) === 1, "subscription did not ensure its requested range");
   await new Promise(resolve => setTimeout(resolve, 0));
   assert(notifications >= 1, "subscription was not notified when its read changed");
-  const loaded = broker.read(request);
+  const loaded = subscription.read(request.evalTime);
   approx(Math.exp(loaded.value[0]!), 100, 1e-10);
 
-  subscription.update({ range: Interval.create(0, 2_000), maxDeltaTMs: 1_000 });
+  subscription.read(request.evalTime);
   assert(Number(calls) === 1, "unchanged viewport demand restarted fetching");
   broker.close();
 });
@@ -997,10 +976,11 @@ test("broker render grid exposes irregular selected observation spacing", async 
     },
   });
   const broker = new Broker(adapter, { now: () => 20_000 });
-  broker.subscribe({ range: Interval.create(0, 10_000), maxDeltaTMs: 5_000 }, () => undefined);
+  const query = broker.subscribe(() => undefined);
+  query.read(new Float64Array([0, 5_000, 10_000]));
   await new Promise(resolve => setTimeout(resolve, 0));
 
-  const result = broker.read({ evalTime: new Float64Array([0, 5_000, 10_000]) });
+  const result = query.read(new Float64Array([0, 5_000, 10_000]));
   const density = usedSampleDensity(result.sampleTime, 1, 2);
   assert(
     density[0] === 0 && density[1] === 1,
@@ -1028,11 +1008,9 @@ test("leaving now updates the adapter session instead of creating another subscr
     },
   };
   const broker = new Broker(adapter, { now: () => 10_000 });
-  const subscription = broker.subscribe(
-    { range: Interval.create(0, 10_000), maxDeltaTMs: 1_000 },
-    () => undefined,
-  );
-  subscription.update({ range: Interval.create(0, 5_000), maxDeltaTMs: 1_000 });
+  const subscription = broker.subscribe(() => undefined);
+  subscription.read(new Float64Array([0, 5_000, 10_000]));
+  subscription.read(new Float64Array([0, 2_500, 5_000]));
   assert(connected === 1, "broker opened more than one adapter session");
   assert(liveDisposed === 1, "adapter session did not observe the historical viewport");
 });
@@ -1040,7 +1018,7 @@ test("leaving now updates the adapter session instead of creating another subscr
 test("aborting a broker subscription removes its adapter demand", () => {
   const brokerLifetime = new AbortController();
   const subscriptionLifetime = new AbortController();
-  let latestDemands: readonly BrokerDemand[] = [];
+  let latestDemands: readonly SignalDemand[] = [];
   const adapter: SignalAdapter = {
     connect() {
       return {
@@ -1052,18 +1030,15 @@ test("aborting a broker subscription removes its adapter demand", () => {
     },
   };
   const broker = new PriceBroker(adapter, { signal: brokerLifetime.signal });
-  broker.subscribe(
-    { range: Interval.create(0, 10_000), maxDeltaTMs: 1_000 },
-    () => undefined,
-    subscriptionLifetime.signal,
-  );
+  const subscription = broker.subscribe(() => undefined, subscriptionLifetime.signal);
+  subscription.read(new Float64Array([0, 5_000, 10_000]));
   assert(latestDemands.length === 1, "subscription demand was not registered");
   subscriptionLifetime.abort();
   assert(Number(latestDemands.length) === 0, "aborted subscription demand remained registered");
   brokerLifetime.abort();
 });
 
-test("broker forwards adapter status without interpreting future time", () => {
+test("broker invalidates only when delivered samples change the cache", () => {
   let sink: Parameters<SignalAdapter["connect"]>[0] | null = null;
   const adapter: SignalAdapter = {
     connect(nextSink) {
@@ -1073,34 +1048,22 @@ test("broker forwards adapter status without interpreting future time", () => {
   };
   const broker = new Broker(adapter);
   const evalTime = new Float64Array([50, 100, 150]);
-  const initial = broker.read({ evalTime });
-  assert(initial.requests.length === 0, "broker invented request status without adapter evidence");
+  let notifications = 0;
+  const query = broker.subscribe(() => notifications++);
+  const initial = query.read(evalTime);
   const initialRevision = initial.sampleRevision;
   const connectedSink = sink as unknown as Parameters<SignalAdapter["connect"]>[0];
-  connectedSink.status([{ state: "pending", range: Interval.create(100, 150), resolutionMs: 10 }]);
-  const pending = broker.read({ evalTime });
-  assert(pending.sampleRevision === initialRevision, "status-only update invalidated samples");
-  assert(
-    pending.requests.some(
-      segment =>
-        segment.state === "pending" && segment.range.start === 100 && segment.range.end === 150,
-    ),
-    "broker did not forward the adapter's future status",
-  );
-  const delivery = {
-    samples: [
-      { t: 50, value: 1 },
-      { t: 90, value: 2 },
-    ],
-    searchedInterval: Interval.create(50, 100),
-    resolutionMs: 10,
-  };
-  connectedSink.next(delivery);
-  const loadedRevision = broker.read({ evalTime }).sampleRevision;
+  const samples = [
+    { t: 50, value: 1 },
+    { t: 90, value: 2 },
+  ];
+  connectedSink.next(samples);
+  const loadedRevision = query.read(evalTime).sampleRevision;
   assert(loadedRevision === initialRevision + 1, "sample delivery did not advance revision");
-  connectedSink.next(delivery);
+  assert(notifications === 1, "changed samples did not invalidate the query");
+  connectedSink.next(samples);
   assert(
-    broker.read({ evalTime }).sampleRevision === loadedRevision,
+    query.read(evalTime).sampleRevision === loadedRevision && notifications === 1,
     "identical redelivery invalidated cached samples",
   );
   broker.close();
@@ -1117,16 +1080,14 @@ test("broker can select an observation beyond wall time when the adapter deliver
   const lifetime = new AbortController();
   const broker = new PriceBroker(adapter, { signal: lifetime.signal });
   const connectedSink = sink as unknown as Parameters<SignalAdapter["connect"]>[0];
-  connectedSink.next({
-    samples: [{ t: 150, value: 3 }],
-    searchedInterval: Interval.create(100, 200),
-    resolutionMs: 25,
-  });
+  connectedSink.next([{ t: 150, value: 3 }]);
 
   const point = { t: Number.NaN, value: Number.NaN };
   assert(broker.readPointAtOrBefore(175, point), "delivered observation was not selectable");
   assertPoint(point, 150, 3, "broker applied an implicit evaluation horizon");
-  const view = broker.read({ evalTime: new Float64Array([150, 174]) });
+  const view = broker
+    .subscribe(() => undefined, lifetime.signal)
+    .read(new Float64Array([150, 174]));
   assert(view.value[0] === 3 && view.value[1] === 3, "future-dated reconstruction was hidden");
   assert(view.sampleTime[0] === 150 && view.sampleTime[1] === 150, "observation identity was lost");
   lifetime.abort();
@@ -1222,10 +1183,9 @@ test("broker fetches finer data after coarse observations are cached", async () 
     },
   };
   const broker = new Broker(fetcher);
-  const evalTime = new Float64Array([0, 5_000, 10_000]);
-  broker.query({ evalTime, maxSampleGapMs: 5_000 });
+  broker.query({ evalTime: new Float64Array([0, 5_000, 10_000]) });
   await new Promise(resolve => setTimeout(resolve, 0));
-  broker.query({ evalTime, maxSampleGapMs: 1_000 });
+  broker.query({ evalTime: Float64Array.from({ length: 11 }, (_, index) => index * 1_000) });
   await new Promise(resolve => setTimeout(resolve, 0));
   assert(requests.includes(5_000), "coarse level was not fetched");
   assert(requests.includes(1_000), "fine level was suppressed by coarse coverage");
@@ -1242,7 +1202,7 @@ test("live adapter subscriptions fetch elapsed wall-clock time without UI reload
     },
   };
   const broker = new Broker(fetcher, { now: () => now });
-  broker.query({ evalTime: new Float64Array([0, 10_000, 20_000]), maxSampleGapMs: 1_000 });
+  broker.query({ evalTime: Float64Array.from({ length: 21 }, (_, index) => index * 1_000) });
   assert(requests[0]!.end === 10_000, "future time leaked into the fetch range");
   await new Promise(resolve => setTimeout(resolve, 0));
 
@@ -1274,14 +1234,14 @@ test("last-point expected lifetime suppresses moving-now micro-requests", async 
   };
   const broker = new Broker(fetcher, { now: () => now });
   const evalTime = new Float64Array([0, 5, 10, 15]);
-  broker.query({ evalTime, maxSampleGapMs: 5 });
+  broker.query({ evalTime });
   await new Promise(resolve => setTimeout(resolve, 0));
   assert(count(requests) === 1, "initial live request was not issued");
 
   now = 8;
-  broker.query({ evalTime, maxSampleGapMs: 5 });
+  broker.query({ evalTime });
   now = 9.999;
-  broker.query({ evalTime, maxSampleGapMs: 5 });
+  broker.query({ evalTime });
   assert(count(requests) === 1, "wall-clock movement refetched the same candle");
 
   now = 11.001;
@@ -1313,24 +1273,21 @@ test("a lagging live endpoint is polled on its refresh cadence, not every redraw
   };
   const broker = new Broker(fetcher, { now: () => now });
   const evalTime = new Float64Array([0, 5_000, 10_000, 15_000]);
-  broker.subscribe(
-    { range: Interval.create(0, 15_000), maxDeltaTMs: 5_000 },
-    () => notifications++,
-  );
-  broker.query({ evalTime, maxSampleGapMs: 5_000 });
+  const subscription = broker.subscribe(() => notifications++);
+  subscription.read(evalTime);
   await new Promise(resolve => setTimeout(resolve, 0));
 
   now = 10_003;
-  broker.query({ evalTime, maxSampleGapMs: 5_000 });
+  subscription.read(evalTime);
   assert(count(requests) === 1, "redraw bypassed the live refresh lease");
 
   now = 10_007;
   await new Promise(resolve => setTimeout(resolve, 10));
-  assert(notifications >= 2, "live refresh timer did not invalidate the subscriber");
   const polled = count(requests);
   assert(polled >= 2, "adapter did not poll the lagging live endpoint");
+  assert(notifications === 1, "unchanged live samples caused another redraw");
   now = 10_020;
-  broker.query({ evalTime, maxSampleGapMs: 5_000 });
+  subscription.read(evalTime);
   assert(count(requests) === polled, "UI redraw started a live request");
   broker.close();
 });
@@ -1350,20 +1307,15 @@ test("follow-now demand updates keep one live lease and do not feed notification
     },
   });
   const broker = new Broker(adapter, { now: () => now });
-  const subscription = broker.subscribe(
-    { range: Interval.create(2_000, 20_000), maxDeltaTMs: 1_000 },
-    () => notifications++,
-  );
+  const subscription = broker.subscribe(() => notifications++);
+  subscription.read(new Float64Array([2_000, 20_000]));
   await new Promise(resolve => setTimeout(resolve, 0));
   assert(calls === 1, "initial live lease did not fetch");
   const settledNotifications = notifications;
 
   for (let frame = 0; frame < 500; frame++) {
     now += 1;
-    subscription.update({
-      range: Interval.create(2_000 + frame, now + 10_000),
-      maxDeltaTMs: 1_000,
-    });
+    subscription.read(new Float64Array([2_000 + frame, now + 10_000]));
   }
 
   assert(calls === 1, `follow updates multiplied live work to ${calls} requests`);
@@ -1371,8 +1323,6 @@ test("follow-now demand updates keep one live lease and do not feed notification
     notifications === settledNotifications,
     `follow updates fed ${notifications - settledNotifications} status notifications back`,
   );
-  const status = broker.read({ evalTime: new Float64Array([0, now]) });
-  assert(status.requests.length === 0, "settled live lease was still presented as pending");
   broker.close();
 });
 
@@ -1387,14 +1337,11 @@ test("a completed empty search leaves no selected observations", async () => {
     },
   });
   const broker = new Broker(adapter, { now: () => 10_000 });
-  const subscription = broker.subscribe(
-    { range: Interval.create(0, 5_000), maxDeltaTMs: 5_000 },
-    () => undefined,
-  );
+  const subscription = broker.subscribe(() => undefined);
+  subscription.read(new Float64Array([0, 5_000]));
   await new Promise(resolve => setTimeout(resolve, 0));
 
-  subscription.update({ range: Interval.create(0, 5_000), maxDeltaTMs: 1_500 });
-  const view = broker.read({ evalTime: new Float64Array([0, 2_500, 5_000]) });
+  const view = subscription.read(new Float64Array([0, 2_500, 5_000]));
   assert(calls === 1, "native fine coverage was refetched for a nearby zoom level");
   assert(
     view.sampleTime.every(time => time === Number.NEGATIVE_INFINITY),
@@ -1423,10 +1370,8 @@ test("adapter expands tiny demands and broker caches the complete delivery", asy
     },
   });
   const broker = new Broker(adapter, { now: () => 100_000 });
-  const subscription = broker.subscribe(
-    { range: Interval.create(50_000, 50_001), maxDeltaTMs: 1_000 },
-    () => undefined,
-  );
+  const subscription = broker.subscribe(() => undefined);
+  subscription.read(new Float64Array([50_000, 50_001]));
   await new Promise(resolve => setTimeout(resolve, 0));
   const expanded = fetched as Interval | null;
   assert(
@@ -1434,71 +1379,54 @@ test("adapter expands tiny demands and broker caches the complete delivery", asy
     "tiny demand was not expanded",
   );
 
-  subscription.update({
-    range: Interval.create(expanded.start + 1_000, expanded.end - 1_000),
-    maxDeltaTMs: 1_000,
-  });
+  subscription.read(new Float64Array([expanded.start + 1_000, expanded.end - 1_000]));
   assert(calls === 1, "broker discarded useful data outside the original demand");
   broker.close();
 });
 
 test("a demand ending at wall now remains historical", () => {
-  const states: string[] = [];
-  let activityEnds: readonly number[] = [];
+  let requested: Interval | null = null;
   const lifetime = new AbortController();
   const adapter = createPollingSignalSource({
     now: () => 10_000,
     resolve: () => 1_000,
-    fetchInterval: () => new Promise<AdapterBatch>(() => undefined),
+    fetchInterval: plan => {
+      requested = plan.range;
+      return new Promise<AdapterBatch>(() => undefined);
+    },
   });
   const session = adapter.connect(
-    {
-      next: () => undefined,
-      status: activities => {
-        states.splice(0, states.length, ...activities.map(activity => activity.state));
-        activityEnds = activities.map(activity => activity.range.end);
-      },
-      error: () => undefined,
-    },
+    { next: () => undefined, error: () => undefined },
     lifetime.signal,
   );
 
-  session.setDemands([{ range: Interval.create(0, 10_000), maxDeltaTMs: 1_000 }]);
-  assert(states.includes("pending"), "historical request was not reported as pending");
+  session.setDemands([demand(Interval.create(0, 10_000), 1_000)]);
+  const requestedRange = requested as Interval | null;
   assert(
-    activityEnds.every(end => end <= 10_000),
+    requestedRange !== null && requestedRange.end <= 10_000,
     "half-open demand end invented future work",
   );
   lifetime.abort();
 });
 
-test("adapter presents future-only demand as pending", () => {
-  const activities: AcquisitionActivity[] = [];
+test("adapter defers future-only demand until it becomes actionable", () => {
+  let calls = 0;
   const lifetime = new AbortController();
   const adapter = createPollingSignalSource({
     now: () => 10_000,
     resolve: () => 1_000,
-    fetchInterval: () => Promise.resolve({ samples: [], searchedInterval: Interval.empty(0) }),
+    fetchInterval: () => {
+      calls++;
+      return Promise.resolve({ samples: [], searchedInterval: Interval.empty(0) });
+    },
   });
   const session = adapter.connect(
-    {
-      next: () => undefined,
-      status: next => activities.splice(0, activities.length, ...next),
-      error: () => undefined,
-    },
+    { next: () => undefined, error: () => undefined },
     lifetime.signal,
   );
 
-  session.setDemands([{ range: Interval.create(15_000, 20_000), maxDeltaTMs: 1_000 }]);
-  assert(
-    activities.some(
-      activity =>
-        activity.state === "pending" &&
-        activity.range.start === 15_000 &&
-        activity.range.end === 20_000,
-    ),
-    "adapter did not translate future demand into pending status",
-  );
+  session.setDemands([demand(Interval.create(15_000, 20_000), 1_000)]);
+  assert(calls === 0, "future demand started a source request early");
   lifetime.abort();
 });
 
@@ -1518,10 +1446,10 @@ test("adapter keeps a live lease warm for its configured grace period", async ()
     },
   });
   const session = adapter.connect(
-    { next: () => undefined, status: () => undefined, error: () => undefined },
+    { next: () => undefined, error: () => undefined },
     lifetime.signal,
   );
-  session.setDemands([{ range: Interval.create(8_000, 20_000), maxDeltaTMs: 1_000 }]);
+  session.setDemands([demand(Interval.create(8_000, 20_000), 1_000)]);
   await new Promise(resolve => setTimeout(resolve, 0));
   session.setDemands([]);
   now += 6;
@@ -1536,41 +1464,30 @@ test("adapter keeps a live lease warm for its configured grace period", async ()
   lifetime.abort();
 });
 
-test("points after the searched range are discarded while the predecessor remains readable", async () => {
-  const warnings: string[] = [];
+test("broker caches every valid sample emitted by the adapter", async () => {
   const fetcher: Fetcher = {
     async fetchInterval({ range }) {
       return {
         points: [
           { t: 0, price: 10 },
           { t: 5_000, price: 11 },
-          { t: 10_000, price: 12 }, // outside this delivery's declared searched range
+          { t: 10_000, price: 12 },
         ],
         searchedInterval: range,
       };
     },
   };
-  const broker = new Broker(fetcher, {
-    now: () => 7_500,
-    onWarning: message => warnings.push(message),
-  });
+  const broker = new Broker(fetcher, { now: () => 7_500 });
   const evalTime = new Float64Array([0, 5_000, 10_000]);
-  broker.query({ evalTime, maxSampleGapMs: 5_000 });
+  broker.query({ evalTime });
   await new Promise(resolve => setTimeout(resolve, 0));
-  const result = broker.query({ evalTime, maxSampleGapMs: 5_000 });
-  assert(
-    result.sampleTime[2] === 5_000,
-    "predecessor identity was not held after the final sample",
-  );
-  approx(Math.exp(result.value[2]!), 11, 1e-12);
+  const result = broker.query({ evalTime });
+  assert(result.sampleTime[2] === 10_000, "adapter sample was filtered by acquisition metadata");
+  approx(Math.exp(result.value[2]!), 12, 1e-12);
   const latest = { t: Number.NaN, value: Number.NaN };
   assert(broker.readPointAtOrBefore(10_000, latest), "latest cached observation was missing");
-  assert(latest.t === 5_000, "range clipping selected the wrong timestamp");
-  approx(Math.exp(latest.value), 11, 1e-12);
-  assert(
-    warnings.some(message => message.includes("10000")),
-    "out-of-range API point was silent",
-  );
+  assert(latest.t === 10_000, "latest emitted sample was not cached");
+  approx(Math.exp(latest.value), 12, 1e-12);
 });
 
 test("wavelet density counts selected observations rather than held values", () => {
@@ -1634,10 +1551,10 @@ test("searched market closures do not create an intermediate-zoom fetch storm", 
   };
   const broker = new Broker(fetcher, { now: () => 11_000 });
   const evalTime = Float64Array.from({ length: 12 }, (_, index) => index * 1_000);
-  broker.query({ evalTime, maxSampleGapMs: 1_001.25 });
+  broker.query({ evalTime });
   await new Promise(resolve => setTimeout(resolve, 0));
 
-  const intermediate = broker.query({ evalTime, maxSampleGapMs: 5_432.1 });
+  const intermediate = broker.query({ evalTime });
   assert(calls === 1, `market closure triggered ${calls - 1} redundant request(s)`);
   const density = usedSampleDensity(intermediate.sampleTime, 1, 11);
   assert(
@@ -1666,9 +1583,9 @@ test("broker trusts the returned searched range, not the requested range", async
   };
   const broker = new Broker(fetcher, { now: () => 20_000 });
   const evalTime = new Float64Array([0, 5_000, 10_000]);
-  broker.query({ evalTime, maxSampleGapMs: 1_000 });
+  broker.query({ evalTime });
   await new Promise(resolve => setTimeout(resolve, 0));
-  broker.query({ evalTime, maxSampleGapMs: 1_000 });
+  broker.query({ evalTime });
   assert(requests.length === 2, `bounded scheduler started ${requests.length} calls`);
   assert(
     requests[1]!.start <= 0 && requests[1]!.end >= 5_000,
@@ -1694,13 +1611,13 @@ test("empty and coarse evidence never suppress a finer request", async () => {
     },
   };
   const broker = new Broker(fetcher, { now: () => 10_000 });
-  const evalTime = new Float64Array([0, 5_000, 10_000]);
-  broker.query({ evalTime, maxSampleGapMs: 1_000 });
+  const oneSecondGrid = Float64Array.from({ length: 11 }, (_, index) => index * 1_000);
+  broker.query({ evalTime: oneSecondGrid });
   await new Promise(resolve => setTimeout(resolve, 0));
 
-  broker.query({ evalTime, maxSampleGapMs: 5_000 });
+  broker.query({ evalTime: new Float64Array([0, 5_000, 10_000]) });
   assert(count(requests) === 1, "observed finer/equal data did not satisfy coarse query");
-  broker.query({ evalTime, maxSampleGapMs: 500 });
+  broker.query({ evalTime: Float64Array.from({ length: 21 }, (_, index) => index * 500) });
   assert(count(requests) === 2 && requests[1] === 500, "finer request was suppressed");
 });
 
@@ -1713,47 +1630,11 @@ test("finer pending work suppresses only coarser duplicate requests", () => {
     },
   };
   const broker = new Broker(fetcher, { now: () => 10_000 });
-  const evalTime = new Float64Array([0, 5_000, 10_000]);
-  const first = broker.query({ evalTime, maxSampleGapMs: 1_000 });
-  assert(
-    first.requests.some(segment => segment.state === "pending"),
-    "active request was not exposed as pending",
-  );
-  broker.query({ evalTime, maxSampleGapMs: 5_000 });
+  broker.query({ evalTime: Float64Array.from({ length: 11 }, (_, index) => index * 1_000) });
+  broker.query({ evalTime: new Float64Array([0, 5_000, 10_000]) });
   assert(count(requests) === 1, "fine pending request did not suppress coarse duplicate");
-  broker.query({ evalTime, maxSampleGapMs: 500 });
+  broker.query({ evalTime: Float64Array.from({ length: 21 }, (_, index) => index * 500) });
   assert(count(requests) === 2, "coarse pending request suppressed a finer request");
-});
-
-test("serialized acquisition exposes demanded work waiting behind the active request", () => {
-  let latest: readonly string[] = [];
-  const lifetime = new AbortController();
-  const adapter = createPollingSignalSource({
-    now: () => 10_000,
-    minFetchPoints: 1,
-    resolve: demand => demand.maxDeltaTMs,
-    fetchInterval: () => new Promise<AdapterBatch>(() => undefined),
-  });
-  const session = adapter.connect(
-    {
-      next: () => undefined,
-      status: activities => {
-        latest = activities.map(activity => activity.state);
-      },
-      error: () => undefined,
-    },
-    lifetime.signal,
-  );
-  session.setDemands([
-    { range: Interval.create(0, 1_000), maxDeltaTMs: 1_000 },
-    { range: Interval.create(5_000, 6_000), maxDeltaTMs: 1_000 },
-  ]);
-  assert(latest.length >= 2, "active or queued demand was hidden");
-  assert(
-    latest.every(state => state === "pending"),
-    "broker-visible pending states diverged",
-  );
-  lifetime.abort();
 });
 
 test("moving demand aborts stale serialized work before starting the latest range", async () => {
@@ -1783,8 +1664,8 @@ test("moving demand aborts stale serialized work before starting the latest rang
     },
   };
   const broker = new Broker(fetcher, { now: () => 3_000 });
-  broker.query({ evalTime: new Float64Array([0, 1_000]), maxSampleGapMs: 1_000 });
-  broker.query({ evalTime: new Float64Array([2_000, 3_000]), maxSampleGapMs: 1_000 });
+  broker.query({ evalTime: new Float64Array([0, 1_000]) });
+  broker.query({ evalTime: new Float64Array([2_000, 3_000]) });
   assert(calls === 2, "latest viewport did not replace stale serialized work");
   assert(aborted === 1 && maxActiveCalls === 1, "stale and current requests overlapped");
   finish({ points: [], searchedInterval: Interval.create(2_000, 3_000) });
@@ -1803,9 +1684,9 @@ test("source-wide backoff suppresses new moving-tail ranges", async () => {
     },
   };
   const broker = new Broker(fetcher, { now: () => 3_000, onError: () => undefined });
-  broker.query({ evalTime: new Float64Array([0, 1_000]), maxSampleGapMs: 1_000 });
+  broker.query({ evalTime: new Float64Array([0, 1_000]) });
   await new Promise(resolve => setTimeout(resolve, 0));
-  broker.query({ evalTime: new Float64Array([2_000, 3_000]), maxSampleGapMs: 1_000 });
+  broker.query({ evalTime: new Float64Array([2_000, 3_000]) });
   assert(calls === 1, "a disjoint moving-tail range bypassed source-wide backoff");
   broker.close();
 });
@@ -1821,19 +1702,13 @@ test("subscriber failures are not reclassified as fetch failures", async () => {
     now: () => 1_000,
     onError: message => errors.push(message),
   });
-  const query = { evalTime: new Float64Array([0, 1_000]), maxSampleGapMs: 1_000 };
-  broker.subscribe({ range: Interval.create(0, 1_000), maxDeltaTMs: 1_000 }, () => {
+  const subscription = broker.subscribe(() => {
     throw new Error("UI failed");
   });
-  broker.query(query);
+  subscription.read(new Float64Array([0, 1_000]));
   await new Promise(resolve => setTimeout(resolve, 0));
-  const result = broker.query(query);
-  assert(
-    result.requests.every(segment => segment.state !== "retrying"),
-    "subscriber exception became a failed exchange range",
-  );
   assert(errors.includes("[Broker] subscriber failed"), "subscriber exception was hidden");
-  assert(!errors.some(message => message.includes("fetch failed")), "fetch was blamed for UI");
+  assert(!errors.includes("[Broker] adapter failed"), "adapter was blamed for subscriber failure");
   broker.close();
 });
 
@@ -1848,29 +1723,22 @@ test("a late batch replaces matching timestamps and retains unmatched observatio
   const lifetime = new AbortController();
   const broker = new PriceBroker(adapter, { signal: lifetime.signal });
   const evalTime = new Float64Array([0, 1_000, 2_000, 3_000, 4_000, 5_000]);
+  const subscription = broker.subscribe(() => undefined, lifetime.signal);
   const connectedSink = sink as unknown as Parameters<SignalAdapter["connect"]>[0];
-  connectedSink.next({
-    samples: [
-      { t: 0, value: 100 },
-      { t: 1_000, value: 101 },
-      { t: 2_000, value: 102 },
-      { t: 3_000, value: 103 },
-      { t: 4_000, value: 104 },
-      { t: 5_000, value: 105 },
-    ],
-    searchedInterval: Interval.create(0, 5_000),
-    resolutionMs: 1_000,
-  });
-  connectedSink.next({
-    samples: [
-      { t: 0, value: 10 },
-      { t: 5_000, value: 15 },
-    ],
-    searchedInterval: Interval.create(0, 5_000),
-    resolutionMs: 5_000,
-  });
+  connectedSink.next([
+    { t: 0, value: 100 },
+    { t: 1_000, value: 101 },
+    { t: 2_000, value: 102 },
+    { t: 3_000, value: 103 },
+    { t: 4_000, value: 104 },
+    { t: 5_000, value: 105 },
+  ]);
+  connectedSink.next([
+    { t: 0, value: 10 },
+    { t: 5_000, value: 15 },
+  ]);
 
-  const result = broker.read({ evalTime });
+  const result = subscription.read(evalTime);
   assert(result.value[0] === 10, "late value did not replace an exact timestamp");
   assert(result.value[1] === 101, "late batch removed an unmatched observation");
   assert(result.value[5] === 15, "late tail value did not replace an exact timestamp");
@@ -1886,9 +1754,9 @@ test("clearing the price cache ignores stale in-flight responses", async () => {
   };
   const broker = new Broker(fetcher, { now: () => 1_000 });
   const evalTime = new Float64Array([0, 1_000]);
-  broker.query({ evalTime, maxSampleGapMs: 1_000 });
+  broker.query({ evalTime });
   broker.clearCache();
-  broker.query({ evalTime, maxSampleGapMs: 1_000 });
+  broker.query({ evalTime });
   assert(resolvers.length === 2, "reload did not start a fresh request generation");
 
   resolvers[0]!({
@@ -1899,7 +1767,7 @@ test("clearing the price cache ignores stale in-flight responses", async () => {
     searchedInterval: Interval.create(0, 1_000),
   });
   await new Promise(resolve => setTimeout(resolve, 0));
-  const beforeFresh = broker.query({ evalTime, maxSampleGapMs: 1_000 });
+  const beforeFresh = broker.query({ evalTime });
   assert(beforeFresh.value.every(Number.isNaN), "stale response repopulated the cleared cache");
 
   resolvers[1]!({
@@ -1910,7 +1778,7 @@ test("clearing the price cache ignores stale in-flight responses", async () => {
     searchedInterval: Interval.create(0, 1_000),
   });
   await new Promise(resolve => setTimeout(resolve, 0));
-  const fresh = broker.query({ evalTime, maxSampleGapMs: 1_000 });
+  const fresh = broker.query({ evalTime });
   approx(Math.exp(fresh.value[0]!), 100, 1e-10);
 });
 
@@ -1976,12 +1844,11 @@ test("Binance adapter maps arbitrary symbols and range resolution", async () => 
   }) as typeof fetch;
   try {
     const adapter = createBinanceAdapter({ symbol: "ethusdt" });
-    const demand = { range: Interval.create(0, 7_200_000), maxDeltaTMs: 3_600_000 };
-    const result = await fetchOnce(adapter, demand);
+    const result = await fetchOnce(adapter, demand(Interval.create(0, 7_200_000), 3_600_000));
     const url = new URL(requestedUrl);
     assert(url.searchParams.get("symbol") === "ETHUSDT", "symbol was not normalized");
     assert(url.searchParams.get("interval") === "1h", "wrong Binance interval");
-    assert(result.samples.length === 2, "Binance rows were not converted");
+    assert(result.length === 2, "Binance rows were not converted");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1998,14 +1865,14 @@ test("Nobitex empty fine history falls back without inventing no-data evidence",
       resolution === "1"
         ? { s: "no_data", t: [], o: [], h: [], l: [], c: [], v: [] }
         : {
-          s: "ok",
-          t: [0, 300],
-          o: [100, 101],
-          h: [100, 101],
-          l: [100, 101],
-          c: [100, 101],
-          v: [1, 1],
-        };
+            s: "ok",
+            t: [0, 300],
+            o: [100, 101],
+            h: [100, 101],
+            l: [100, 101],
+            c: [100, 101],
+            v: [1, 1],
+          };
     return new Response(JSON.stringify(payload), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -2013,16 +1880,16 @@ test("Nobitex empty fine history falls back without inventing no-data evidence",
   }) as typeof fetch;
 
   try {
-    const result = await fetchOnce(createNobitexAdapter({ symbol: "USDTIRT" }), {
-      range: Interval.create(0, 600_000),
-      maxDeltaTMs: 60_000,
-    });
+    const result = await fetchOnce(
+      createNobitexAdapter({ symbol: "USDTIRT" }),
+      demand(Interval.create(0, 600_000), 60_000),
+    );
     assert(
       requestedResolutions[0] === "1" && requestedResolutions[1] === "5",
       "Nobitex did not probe the next retained resolution",
     );
-    assert(result.samples.length === 2, "coarser retained candles were discarded");
-    assert(result.resolutionMs === 300_000, "fallback samples were mislabeled as fine data");
+    assert(result.length === 2, "coarser retained candles were discarded");
+    assert(result[1]!.t - result[0]!.t === 300_000, "fallback candle cadence was lost");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -2047,30 +1914,25 @@ test("Yahoo adapter supports WTI and Brent futures with range-aware intervals", 
   }) as typeof fetch;
   try {
     const adapter = createYahooAdapter({ symbol: "bz=f", now: () => 7_200_000 });
-    const demand = { range: Interval.create(0, 7_200_000), maxDeltaTMs: 3_600_000 };
-    const result = await fetchOnce(adapter, demand);
+    const result = await fetchOnce(adapter, demand(Interval.create(0, 7_200_000), 3_600_000));
     const target = new URL(requestedUrl).searchParams.get("url") ?? "";
     assert(target.includes("/BZ%3DF?"), "Brent symbol was not encoded in Yahoo request");
     assert(target.includes("interval=60m"), "wrong Yahoo interval");
-    assert(result.samples.length === 2 && result.samples[1]!.t === 3_600_000, "bad Yahoo rows");
+    assert(result.length === 2 && result[1]!.t === 3_600_000, "bad Yahoo rows");
 
     const secondInterval = Interval.create(1_000, 7_200_000);
-    const cached = await fetchOnce(adapter, { range: secondInterval, maxDeltaTMs: 3_600_000 });
+    const cached = await fetchOnce(adapter, { range: secondInterval, sampleCount: 2 });
     assert(calls === 1, "same Yahoo candle window caused another HTTP request");
-    assert(
-      cached.searchedInterval.start <= secondInterval.start &&
-      cached.searchedInterval.end >= secondInterval.end,
-      "cached expanded response did not cover the requested range",
-    );
+    assert(cached.length === 2, "cached response did not preserve samples");
 
     const cacheLifetime = new AbortController();
     const cacheSession = adapter.connect(
-      { next: () => undefined, status: () => undefined, error: () => undefined },
+      { next: () => undefined, error: () => undefined },
       cacheLifetime.signal,
     );
     cacheSession.clearCache();
     cacheLifetime.abort();
-    await fetchOnce(adapter, { range: secondInterval, maxDeltaTMs: 3_600_000 });
+    await fetchOnce(adapter, { range: secondInterval, sampleCount: 2 });
     assert(Number(calls) === 2, "explicit reload did not clear Yahoo's response cache");
   } finally {
     globalThis.fetch = originalFetch;
@@ -2089,12 +1951,12 @@ test("Yahoo honors Retry-After on HTTP 429", async () => {
     new Response("rate limited", { status: 429, headers: { "retry-after": "7" } })) as typeof fetch;
   try {
     const adapter = createYahooAdapter({ symbol: "CL=F", now: () => 120_000 });
-    const retry = await retryOnce(adapter, {
-      range: Interval.create(60_000, 120_000),
-      maxDeltaTMs: 60_000,
-    });
-    assert(retry.error instanceof Error, "Yahoo 429 did not surface an error");
-    assert(retry.retryAtMs === 127_000, "Retry-After was ignored");
+    const error = await failOnce(adapter, demand(Interval.create(60_000, 120_000), 60_000));
+    assert(error instanceof Error, "Yahoo 429 did not surface an error");
+    assert(
+      (error as Error & { readonly retryAfterMs?: number }).retryAfterMs === 7_000,
+      "Retry-After was ignored",
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -2115,6 +1977,7 @@ test("market symbol discovery normalizes Nobitex pairs and filters without forci
 
 test("broker exposes failures and uses the fetcher's retry policy", async () => {
   let calls = 0;
+  const errors: string[] = [];
   const fetcher: Fetcher = {
     retryDelayMs: () => 100,
     async fetchInterval() {
@@ -2122,18 +1985,17 @@ test("broker exposes failures and uses the fetcher's retry policy", async () => 
       throw new Error("upstream unavailable");
     },
   };
-  const broker = new Broker(fetcher, { onError: () => undefined });
+  const broker = new Broker(fetcher, {
+    onError: (_message, error) => errors.push(String((error as Error).message)),
+  });
   const evalTime = new Float64Array([0, 1_000]);
-  broker.query({ evalTime, maxSampleGapMs: 1_000 });
+  broker.query({ evalTime });
   await new Promise(resolve => setTimeout(resolve, 0));
-  const result = broker.query({ evalTime, maxSampleGapMs: 1_000 });
-  const retrying = result.requests.find(segment => segment.state === "retrying");
-  assert(retrying !== undefined, "failed request was still presented as pending");
-  assert(retrying.message === "upstream unavailable", "failure detail was lost");
-  broker.query({ evalTime, maxSampleGapMs: 1_000 });
+  assert(errors.includes("upstream unavailable"), "failure detail was lost");
+  broker.query({ evalTime });
   assert(Number(calls) === 1, "failure backoff did not suppress a retry");
   await new Promise(resolve => setTimeout(resolve, 120));
-  broker.query({ evalTime, maxSampleGapMs: 1_000 });
+  broker.query({ evalTime });
   assert(Number(calls) === 2, "request did not retry after adapter backoff elapsed");
   broker.close();
 });
@@ -2152,13 +2014,8 @@ test("an unexpected AbortError fails visibly instead of deadlocking acquisition"
     onError: (_message, error) => errors.push(String((error as Error).message)),
   });
   const evalTime = new Float64Array([0, 1_000]);
-  broker.query({ evalTime, maxSampleGapMs: 1_000 });
+  broker.query({ evalTime });
   await new Promise(resolve => setTimeout(resolve, 0));
-  const result = broker.query({ evalTime, maxSampleGapMs: 1_000 });
-  assert(
-    result.requests.some(segment => segment.state === "retrying"),
-    "current AbortError remained silently stuck as fetching",
-  );
   assert(errors.includes("upstream aborted"), "current AbortError was not surfaced");
   assert(calls === 1, "current AbortError bypassed retry backoff");
   broker.close();

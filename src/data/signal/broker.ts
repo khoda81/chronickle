@@ -73,7 +73,7 @@ export class Broker {
       { once: true },
     );
 
-    return { read: evalTime => this.read(query, evalTime) };
+    return { read: evalTime => this.readQuery(query, evalTime) };
   }
 
   clearCache(): void {
@@ -88,14 +88,18 @@ export class Broker {
     return this.store.findAtOrBefore(time, out);
   }
 
-  private read(query: QueryState, evalTime: Float64Array): SignalView {
+  private readQuery(query: QueryState, evalTime: Float64Array): SignalView {
     this.updateDemand(query, evalTime);
     if (query.value.length !== evalTime.length) {
       query.value = new Float64Array(evalTime.length);
       query.sampleTime = new Float64Array(evalTime.length);
     }
     this.store.findBatchAtOrBefore(evalTime, query.value, query.sampleTime);
-    return { value: query.value, sampleTime: query.sampleTime, sampleRevision: this.sampleRevision };
+    return {
+      value: query.value,
+      sampleTime: query.sampleTime,
+      sampleRevision: this.sampleRevision,
+    };
   }
 
   private updateDemand(query: QueryState, evalTime: Float64Array): void {
