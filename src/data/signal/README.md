@@ -15,9 +15,8 @@ samples before they reach the broker.
   evaluate a function synchronously, run expensive asynchronous computation,
   retain coverage metadata, retry, or do nothing when it already considers a
   demand satisfied.
-- `IntervalLoader` and `createPollingSignalSource` are optional machinery for
-  range-based APIs. Their searched ranges, native resolutions, retries, and
-  live leases are private adapter implementation details.
+- `fetcher.ts` defines the adapter contracts and stateless helpers for regular
+  grids. It retains no requests, coverage, timers, retries, or source state.
 - `NumericSeriesStore` is an ordered `timestamp -> value` map with packed
   numeric leaves. It owns no demand, coverage, resolution, or source semantics.
 
@@ -76,20 +75,25 @@ owns that bug.
    for people and diagnostics only; no broker or renderer decision may depend
    on their presence, kind, interval, or message.
 
-## Polling adapter invariants
+## Source-owned acquisition
 
-The generic polling coordinator is below the public broker/adapter boundary.
-Its `AdapterBatch.searchedInterval` means the source actually examined that
-range, even when `samples` is empty. It must overlap the required range so the
-coordinator can make progress instead of immediately scheduling the same gap.
-`sampleResolutionMs` records a returned fallback cadence when it differs from
-the attempted native resolution. Neither field reaches the broker.
+Every exchange adapter owns its resolved demands, coverage, pending request,
+cancellation, retry policy, live polling, partial-response handling, and
+recovery rules. This state is intentionally not represented by one generic
+coordinator because exchange APIs do not share reliable response semantics.
 
-The coordinator owns request expansion, per-resolution coverage, cancellation,
-retry/backoff, future scheduling, and live-lease lifetime. `setDemands` still
-replaces its full interest snapshot, so viewport movement cannot multiply work.
-Clearing or disposing a session aborts in-flight work, and stale results are
-never emitted.
+`fetcher.ts` offers only opt-in pure operations such as resolving regular query
+geometry, subtracting a caller-owned resolution map, and expanding a selected
+gap. Calling an operation does not retain evidence or decide whether the
+result is authoritative. Each adapter is responsible for making that decision.
+
+In particular, Nobitex owns its ambiguous `no_data` fallback. Returned coarser
+samples are recorded at their actual quality, while unavailable finer levels
+receive a temporary source-specific cooldown and warning. The cooldown expires,
+so a transient fallback cannot become session-long sticky fine coverage.
+
+Clearing or disposing an adapter session aborts its in-flight work. Stale
+responses from an older request generation are never emitted.
 
 ## Market boundary
 
