@@ -3,5 +3,6 @@ export * from "./store.ts";
 export * from "./broker.ts";
 export * from "./resolution.ts";
 export * from "./sample.ts";
+export * from "./reports.ts";
 export * from "./market/market.ts";
 export * from "./market/index.ts";

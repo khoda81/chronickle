@@ -29,11 +29,18 @@ snapshot of active subscriber interest. The broker forwards that snapshot when
 a subscription's query geometry changes; it never decides that a network
 request, retry, or particular source resolution is required.
 
-The adapter emits only `Sample[]`. The broker normalizes and upserts every valid
-sample, then invalidates subscribers only if the stored timestamp-to-value
-mapping changed. Empty deliveries and duplicate deliveries therefore cause no
-redraw. Acquisition errors are reported separately and do not become signal
-data or renderer status.
+The adapter emits `Sample[]` and may independently replace a snapshot of
+interval-scoped `SignalReport` messages. The broker normalizes and upserts every
+valid sample but treats reports as opaque commentary: they can trigger a redraw
+without changing `sampleRevision`, coverage, demand, or returned values. Empty
+and duplicate sample deliveries cause no redraw unless the report snapshot also
+changed. Acquisition errors are additionally sent to the application's error
+handler.
+
+Reports have `info`, `warn`, or `error` severity. Where their intervals overlap,
+the chart displays the higher severity; the later item wins at equal severity.
+This produces a deterministic non-overlapping reporting frontier without
+turning a report into evidence that an interval was searched or satisfied.
 
 This boundary deliberately cannot distinguish among an unsearched range, a
 market closure, an unavailable native resolution, pending computation, or a
@@ -64,6 +71,9 @@ owns that bug.
 8. A synchronous adapter emission is visible in the read that caused the
    demand update. It does not invalidate that same subscriber, because the
    caller is already receiving the new cache contents.
+9. Reports are replaceable adapter-owned snapshots. They describe source state
+   for people and diagnostics only; no broker or renderer decision may depend
+   on their presence, kind, interval, or message.
 
 ## Polling adapter invariants
 

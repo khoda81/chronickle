@@ -19,6 +19,7 @@ import {
 import { priceSignalSource } from "../src/data/signal/market/market.ts";
 import { filterMarketSymbols, parseNobitexMarketKey } from "../src/data/signal/market/symbols.ts";
 import { NumericSeriesStore } from "../src/data/signal/store.ts";
+import { signalReportFrontier } from "../src/data/signal/reports.ts";
 import type { Sample } from "../src/data/signal/sample.ts";
 import { Interval, IntervalSet } from "../src/core/interval.ts";
 import { deserializePersistedUiState } from "../src/app/persistence.ts";
@@ -191,6 +192,7 @@ function fetchOnce(adapter: SignalAdapter, nextDemand: SignalDemand): Promise<re
           lifetime.abort();
           resolve(samples);
         },
+        setReports: () => undefined,
         error: error => {
           lifetime.abort();
           reject(error);
@@ -208,6 +210,7 @@ function failOnce(adapter: SignalAdapter, nextDemand: SignalDemand): Promise<unk
     const session = adapter.connect(
       {
         next: () => undefined,
+        setReports: () => undefined,
         error: error => {
           lifetime.abort();
           resolve(error);
@@ -696,12 +699,12 @@ test("stack layout fills the canvas and preserves every resizable row", () => {
 test("signal row layout owns status, heatmap, hit-test, and collapse geometry", () => {
   const row = signalRowLayout(100, 130);
   assert(row.heatmapTop === 100, "bottom status strip shifted the heatmap top");
-  assert(row.heatmapHeight === 128 && row.tooltipPosition === 229, "bad heatmap geometry");
+  assert(row.heatmapHeight === 114 && row.tooltipPosition === 215, "bad heatmap geometry");
   assert(row.drawable, "normal row was not drawable");
   assert(signalRowContainsHeatmap(100, 130, 100), "heatmap top was excluded from hit testing");
-  assert(signalRowContainsHeatmap(100, 130, 227), "heatmap bottom pixel was excluded");
-  assert(!signalRowContainsHeatmap(100, 130, 228), "status strip entered heatmap hit testing");
-  assert(!signalRowLayout(100, 4).drawable, "collapsed row retained drawable heatmap space");
+  assert(signalRowContainsHeatmap(100, 130, 213), "heatmap bottom pixel was excluded");
+  assert(!signalRowContainsHeatmap(100, 130, 214), "status strip entered heatmap hit testing");
+  assert(!signalRowLayout(100, 18).drawable, "collapsed row retained drawable heatmap space");
   assert(
     signalRowCollapseProgress(1, ROW_REMOVE_THRESHOLD, 1) === 1,
     "active boundary did not fully expose the remove affordance",
@@ -1069,6 +1072,63 @@ test("broker invalidates only when delivered samples change the cache", () => {
   broker.close();
 });
 
+test("adapter reports invalidate views without changing sample revision", () => {
+  let sink: Parameters<SignalAdapter["connect"]>[0] | null = null;
+  const adapter: SignalAdapter = {
+    connect(nextSink) {
+      sink = nextSink;
+      return { setDemands: () => undefined, clearCache: () => undefined };
+    },
+  };
+  const broker = new Broker(adapter);
+  let notifications = 0;
+  const query = broker.subscribe(() => notifications++);
+  const initial = query.read(new Float64Array([0, 100]));
+  const connectedSink = sink as unknown as Parameters<SignalAdapter["connect"]>[0];
+  const reports = [
+    { range: Interval.create(20, 80), kind: "warn" as const, message: "Source is sparse" },
+  ];
+
+  connectedSink.setReports(reports);
+  const reported = query.read(new Float64Array([0, 100]));
+  assert(notifications === 1, "new adapter report did not invalidate the view");
+  assert(reported.reports[0] === reports[0], "adapter report was not exposed unchanged");
+  assert(reported.sampleRevision === initial.sampleRevision, "report changed sample revision");
+
+  connectedSink.setReports(reports);
+  assert(notifications === 1, "identical report snapshot caused another redraw");
+  broker.close();
+});
+
+test("overlapping adapter reports form a severity-ordered frontier", () => {
+  const frontier = signalReportFrontier(
+    [
+      { range: Interval.create(0, 10), kind: "info", message: "info" },
+      { range: Interval.create(2, 8), kind: "warn", message: "warn" },
+      { range: Interval.create(4, 6), kind: "error", message: "error" },
+      { range: Interval.create(7, 9), kind: "warn", message: "new warn" },
+    ],
+    Interval.create(0, 10),
+  );
+  const actual = frontier.map(fragment => [
+    fragment.range.start,
+    fragment.range.end,
+    fragment.report.message,
+  ]);
+  assert(
+    JSON.stringify(actual) ===
+      JSON.stringify([
+        [0, 2, "info"],
+        [2, 4, "warn"],
+        [4, 6, "error"],
+        [6, 7, "warn"],
+        [7, 9, "new warn"],
+        [9, 10, "info"],
+      ]),
+    `unexpected report frontier ${JSON.stringify(actual)}`,
+  );
+});
+
 test("broker can select an observation beyond wall time when the adapter delivered it", () => {
   let sink: Parameters<SignalAdapter["connect"]>[0] | null = null;
   const adapter: SignalAdapter = {
@@ -1285,7 +1345,7 @@ test("a lagging live endpoint is polled on its refresh cadence, not every redraw
   await new Promise(resolve => setTimeout(resolve, 10));
   const polled = count(requests);
   assert(polled >= 2, "adapter did not poll the lagging live endpoint");
-  assert(notifications === 1, "unchanged live samples caused another redraw");
+  assert(notifications >= 2, "live adapter reports did not redraw the status frontier");
   now = 10_020;
   subscription.read(evalTime);
   assert(count(requests) === polled, "UI redraw started a live request");
@@ -1396,7 +1456,7 @@ test("a demand ending at wall now remains historical", () => {
     },
   });
   const session = adapter.connect(
-    { next: () => undefined, error: () => undefined },
+    { next: () => undefined, setReports: () => undefined, error: () => undefined },
     lifetime.signal,
   );
 
@@ -1421,7 +1481,7 @@ test("adapter defers future-only demand until it becomes actionable", () => {
     },
   });
   const session = adapter.connect(
-    { next: () => undefined, error: () => undefined },
+    { next: () => undefined, setReports: () => undefined, error: () => undefined },
     lifetime.signal,
   );
 
@@ -1446,7 +1506,7 @@ test("adapter keeps a live lease warm for its configured grace period", async ()
     },
   });
   const session = adapter.connect(
-    { next: () => undefined, error: () => undefined },
+    { next: () => undefined, setReports: () => undefined, error: () => undefined },
     lifetime.signal,
   );
   session.setDemands([demand(Interval.create(8_000, 20_000), 1_000)]);
@@ -1927,7 +1987,7 @@ test("Yahoo adapter supports WTI and Brent futures with range-aware intervals", 
 
     const cacheLifetime = new AbortController();
     const cacheSession = adapter.connect(
-      { next: () => undefined, error: () => undefined },
+      { next: () => undefined, setReports: () => undefined, error: () => undefined },
       cacheLifetime.signal,
     );
     cacheSession.clearCache();
@@ -1992,7 +2052,13 @@ test("broker exposes failures and uses the fetcher's retry policy", async () => 
   broker.query({ evalTime });
   await new Promise(resolve => setTimeout(resolve, 0));
   assert(errors.includes("upstream unavailable"), "failure detail was lost");
-  broker.query({ evalTime });
+  const failed = broker.query({ evalTime });
+  assert(
+    failed.reports.some(
+      report => report.kind === "error" && report.message.includes("upstream unavailable"),
+    ),
+    "retry failure was not exposed as adapter commentary",
+  );
   assert(Number(calls) === 1, "failure backoff did not suppress a retry");
   await new Promise(resolve => setTimeout(resolve, 120));
   broker.query({ evalTime });

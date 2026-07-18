@@ -133,7 +133,7 @@ class SignalRowImpl implements SignalRowLayer {
         scaleInterval,
         options.palette,
       );
-    frame.statusBar().draw(density, this.top + this.height - COVERAGE_BAR_HEIGHT);
+    frame.statusBar().draw(density, view.reports, this.top + this.height - COVERAGE_BAR_HEIGHT);
     frame.fillRectPx(0, this.top + this.height - 1, frame.width, 1, "rgba(255,255,255,0.18)");
   }
 

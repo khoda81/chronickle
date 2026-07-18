@@ -2,6 +2,7 @@
 
 import { Interval } from "../../core/interval.ts";
 import type { AdapterSession, SignalAdapter, SignalDemand } from "./fetcher.ts";
+import { sameSignalReports, type SignalReport } from "./reports.ts";
 import { normalizeSamples, type MutableSample, type Sample } from "./sample.ts";
 import { NumericSeriesStore } from "./store.ts";
 
@@ -11,6 +12,8 @@ export interface SignalView {
   readonly sampleTime: Float64Array;
   /** Changes only when the stored timestamp-to-value mapping changes. */
   readonly sampleRevision: number;
+  /** Adapter commentary only; reports never affect the returned samples. */
+  readonly reports: readonly SignalReport[];
 }
 
 /** One live consumer. Reading updates its adapter demand from the query grid. */
@@ -38,6 +41,7 @@ export class Broker {
   private readonly signal: AbortSignal;
   private readonly onError: (message: string, error?: unknown) => void;
   private sampleRevision = 0;
+  private reports: readonly SignalReport[] = [];
   private syncingQuery: QueryState | null = null;
 
   constructor(adapter: SignalAdapter, opts: BrokerOptions) {
@@ -47,6 +51,7 @@ export class Broker {
     this.adapterSession = adapter.connect(
       {
         next: samples => this.ingest(samples),
+        setReports: reports => this.publishReports(reports),
         error: error => this.onError("[Broker] adapter failed", error),
       },
       this.signal,
@@ -99,6 +104,7 @@ export class Broker {
       value: query.value,
       sampleTime: query.sampleTime,
       sampleRevision: this.sampleRevision,
+      reports: this.reports,
     };
   }
 
@@ -123,6 +129,12 @@ export class Broker {
   private ingest(samples: readonly Sample[]): void {
     if (!this.store.upsertBatch(normalizeSamples(samples))) return;
     this.sampleRevision++;
+    this.notify(this.syncingQuery);
+  }
+
+  private publishReports(reports: readonly SignalReport[]): void {
+    if (sameSignalReports(reports, this.reports)) return;
+    this.reports = [...reports];
     this.notify(this.syncingQuery);
   }
 

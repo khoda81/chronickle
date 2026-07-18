@@ -1,6 +1,7 @@
 /** Demand-aware adapter scheduling for sampled real-valued time series. */
 
 import { Interval, IntervalSet } from "../../core/interval.ts";
+import { sameSignalReports, type SignalReport } from "./reports.ts";
 import type { Sample } from "./sample.ts";
 
 /** Regular query geometry. Each adapter decides how, or whether, to satisfy it. */
@@ -30,6 +31,8 @@ export interface AdapterBatch {
 
 export interface SignalSink {
   next(samples: readonly Sample[]): void;
+  /** Replace the adapter's current diagnostic report snapshot. */
+  setReports(reports: readonly SignalReport[]): void;
   error(error: unknown): void;
 }
 
@@ -88,6 +91,7 @@ interface FailedWork {
   readonly state: "failed";
   readonly work: Work;
   readonly retryAtMs: number;
+  readonly message: string;
 }
 
 type ActiveWork = RunningWork | FailedWork;
@@ -135,6 +139,7 @@ class PollingSession implements AdapterSession {
   private live: LiveLease | null = null;
   private scheduled: ScheduledReconcile | null = null;
   private sourceBackoffUntilMs: number | null = null;
+  private lastReports: readonly SignalReport[] = [];
 
   constructor(
     private readonly loader: IntervalLoader,
@@ -226,6 +231,7 @@ class PollingSession implements AdapterSession {
     } else if (futureStartMs !== null) {
       this.schedule(futureStartMs);
     }
+    this.emitReports();
   };
 
   private schedule(atMs: number): void {
@@ -385,6 +391,7 @@ class PollingSession implements AdapterSession {
   private start(work: Work): void {
     const running: RunningWork = { state: "fetching", work, controller: new AbortController() };
     this.active = running;
+    this.emitReports();
     if (this.active === running) void this.run(running);
   }
 
@@ -441,18 +448,41 @@ class PollingSession implements AdapterSession {
     const proposed = this.loader.retryDelayMs?.(error, attempt) ?? DEFAULT_RETRY(attempt);
     const delayMs = validDelay(proposed) ? Math.max(100, proposed) : DEFAULT_RETRY(attempt);
     const retryAtMs = this.now() + delayMs;
-    const failed: FailedWork = { state: "failed", work: { ...work, attempt }, retryAtMs };
+    const message = error instanceof Error ? error.message : String(error);
+    const failed: FailedWork = { state: "failed", work: { ...work, attempt }, retryAtMs, message };
     this.active = failed;
     if (this.loader.sourceWideBackoff === true) {
       this.sourceBackoffUntilMs = Math.max(this.sourceBackoffUntilMs ?? -Infinity, retryAtMs);
     }
+    this.emitReports();
     if (this.active === failed) this.schedule(retryAtMs);
     this.sink.error(error);
+  }
+
+  private emitReports(): void {
+    if (this.signal.aborted) return;
+    const reports: readonly SignalReport[] =
+      this.active === null
+        ? []
+        : [
+            {
+              range: this.active.work.plan.range,
+              kind: this.active.state === "fetching" ? "info" : "error",
+              message:
+                this.active.state === "fetching"
+                  ? `Fetching ${this.active.work.plan.resolutionMs}ms samples`
+                  : `Retrying after: ${this.active.message}`,
+            },
+          ];
+    if (sameSignalReports(reports, this.lastReports)) return;
+    this.lastReports = reports;
+    this.sink.setReports(reports);
   }
 
   private abortActive(): void {
     if (this.active?.state === "fetching") this.active.controller.abort();
     this.active = null;
+    this.emitReports();
   }
 }
 
