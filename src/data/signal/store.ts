@@ -1,6 +1,15 @@
 import { lowerBoundBy, upperBoundBy } from "../../core/binarySearch.ts";
 import { Interval } from "../../core/interval.ts";
 import type { MutableSample } from "./sample.ts";
+import {
+  allocateStoreId,
+  analyzeEvalTime,
+  classifyWrite,
+  frameClock,
+  InsertTimer,
+  StoreProfile,
+  type WriteRecord,
+} from "./storeProfile.ts";
 
 const MAX_BLOCK_LENGTH = 512;
 
@@ -55,9 +64,12 @@ const numberValue = (value: number): number => value;
  */
 export class SignalSegmentStore {
   private readonly blocks: SegmentBlock[] = [];
+  private readonly profile: StoreProfile = new StoreProfile(allocateStoreId());
+  private readonly insertTimer: InsertTimer = new InsertTimer();
 
   clear(): void {
     this.blocks.length = 0;
+    this.profile.storeSegmentCount = 0;
   }
 
   timeInterval(): Interval | null {
@@ -71,37 +83,145 @@ export class SignalSegmentStore {
   /** Write the latest selected observation at or before `time`; false leaves `out` unchanged. */
   readPointAtOrBefore(time: number, out: MutableSample): boolean {
     validateTime(time, "readPointAtOrBefore");
+    const startedAt = performance.now();
     const location = this.findSegmentStartingAtOrBefore(time);
-    if (location === null) return false;
+    const storeSegmentCount = this.profile.storeSegmentCount;
+    if (location === null) {
+      this.recordRead("readPointAtOrBefore", 1, startedAt, true, true, null, storeSegmentCount);
+      return false;
+    }
     const block = this.blocks[location.blockIndex]!;
     out.t = block.sampleTime[location.segmentIndex]!;
     out.value = block.value[location.segmentIndex]!;
+    this.recordRead("readPointAtOrBefore", 1, startedAt, true, true, 1, storeSegmentCount);
     return true;
   }
 
   /** Overlay a sorted, internally non-overlapping batch. */
   insertBatch(incoming: readonly HeldSignalSegment[]): boolean {
     if (incoming.length === 0) return false;
+
+    this.insertTimer.reset();
+    this.insertTimer.begin();
     validateIncoming(incoming);
+    this.insertTimer.end("validation");
+
+    const incomingStart = incoming[0]!.range.start;
+    const incomingEnd = incoming[incoming.length - 1]!.range.end;
+    this.profile.recordWorkload(incoming[0]!.resolutionMs, incoming);
+
+    const blockCountBefore = this.blocks.length;
+    const storeSegmentCountBefore = this.profile.storeSegmentCount;
 
     if (this.blocks.length === 0) {
-      this.blocks.push(...chunkSegments(incoming));
+      this.insertTimer.begin();
+      const replacement = chunkSegments(incoming);
+      this.insertTimer.end("rechunking");
+      this.insertTimer.begin();
+      this.blocks.push(...replacement);
+      this.insertTimer.end("splicing");
+      this.profile.storeSegmentCount = countSegments(this.blocks);
+      this.emitWrite({
+        incomingCount: incoming.length,
+        incomingStart,
+        incomingEnd,
+        storeSegmentCountBefore: 0,
+        storeSegmentCountAfter: this.profile.storeSegmentCount,
+        blockCountBefore: 0,
+        blockCountAfter: this.blocks.length,
+        directlyOverlappingBlockCount: 0,
+        rewrittenBlockCount: 0,
+        flattenedSegmentCount: 0,
+        mergedSegmentCount: incoming.length,
+        replacementBlockCount: replacement.length,
+        position: "initial",
+        changed: true,
+      });
       return true;
     }
 
     const incomingRange = Interval.hull(incoming[0]!.range, incoming[incoming.length - 1]!.range);
+
+    this.insertTimer.begin();
     const overlapping = this.overlappingBlocks(incomingRange);
+    this.insertTimer.end("locating");
 
     // Pull in one neighboring leaf on each side. This coalesces small boundary
     // fragments and keeps the leaf set dense after repeated live updates.
     const spliceStart = Math.max(0, overlapping.start - 1);
     const spliceEnd = Math.min(this.blocks.length, overlapping.end + 1);
-    const existing = flattenBlocks(this.blocks, spliceStart, spliceEnd);
-    const merged = overlay(existing, incoming);
-    if (segmentsEqual(existing, merged)) return false;
-    const replacement = chunkSegments(merged);
+    const rewrittenBlockCount = spliceEnd - spliceStart;
 
-    this.blocks.splice(spliceStart, spliceEnd - spliceStart, ...replacement);
+    this.insertTimer.begin();
+    const existing = flattenBlocks(this.blocks, spliceStart, spliceEnd);
+    this.insertTimer.end("flattening");
+
+    this.insertTimer.begin();
+    const merged = overlay(existing, incoming);
+    this.insertTimer.end("overlay");
+
+    this.insertTimer.begin();
+    const equal = segmentsEqual(existing, merged);
+    this.insertTimer.end("equality");
+
+    if (equal) {
+      this.emitWrite({
+        incomingCount: incoming.length,
+        incomingStart,
+        incomingEnd,
+        storeSegmentCountBefore,
+        storeSegmentCountAfter: storeSegmentCountBefore,
+        blockCountBefore,
+        blockCountAfter: blockCountBefore,
+        directlyOverlappingBlockCount: Interval.span(overlapping),
+        rewrittenBlockCount,
+        flattenedSegmentCount: existing.length,
+        mergedSegmentCount: existing.length,
+        replacementBlockCount: rewrittenBlockCount,
+        position: classifyWrite(
+          incomingStart,
+          incomingEnd,
+          this.blocks[0] ? blockStart(this.blocks[0]) : null,
+          this.blocks[this.blocks.length - 1]
+            ? blockEnd(this.blocks[this.blocks.length - 1]!)
+            : null,
+        ),
+        changed: false,
+      });
+      return false;
+    }
+
+    this.insertTimer.begin();
+    const replacement = chunkSegments(merged);
+    this.insertTimer.end("rechunking");
+
+    this.insertTimer.begin();
+    this.blocks.splice(spliceStart, rewrittenBlockCount, ...replacement);
+    this.insertTimer.end("splicing");
+
+    this.profile.storeSegmentCount = countSegments(this.blocks);
+
+    this.emitWrite({
+      incomingCount: incoming.length,
+      incomingStart,
+      incomingEnd,
+      storeSegmentCountBefore,
+      storeSegmentCountAfter: this.profile.storeSegmentCount,
+      blockCountBefore,
+      blockCountAfter: this.blocks.length,
+      directlyOverlappingBlockCount: Interval.span(overlapping),
+      rewrittenBlockCount,
+      flattenedSegmentCount: existing.length,
+      mergedSegmentCount: merged.length,
+      replacementBlockCount: replacement.length,
+      position: classifyWrite(
+        incomingStart,
+        incomingEnd,
+        this.blocks[0] ? blockStart(this.blocks[0]) : null,
+        this.blocks[this.blocks.length - 1] ? blockEnd(this.blocks[this.blocks.length - 1]!) : null,
+      ),
+      changed: true,
+    });
     return true;
   }
 
@@ -122,6 +242,11 @@ export class SignalSegmentStore {
     const value =
       reuseValue?.length === evalTime.length ? reuseValue : new Float64Array(evalTime.length);
 
+    const startedAt = performance.now();
+    const storeSegmentCount = this.profile.storeSegmentCount;
+    const visitedBlocks = new Set<number>();
+    let evalCount = 0;
+
     for (let index = 0; index < evalTime.length; index++) {
       const t = evalTime[index]!;
       if (!Number.isFinite(t)) {
@@ -133,11 +258,68 @@ export class SignalSegmentStore {
         if (sampleTime !== undefined) sampleTime[index] = NaN;
         continue;
       }
+      evalCount++;
+      visitedBlocks.add(location.blockIndex);
       const block = this.blocks[location.blockIndex]!;
       value[index] = block.value[location.segmentIndex]!;
       if (sampleTime !== undefined) sampleTime[index] = block.sampleTime[location.segmentIndex]!;
     }
+
+    const analysis = analyzeEvalTime(evalTime);
+    this.recordRead(
+      "sample",
+      evalCount,
+      startedAt,
+      analysis.sortedAscending,
+      analysis.regularlySpaced,
+      visitedBlocks.size,
+      storeSegmentCount,
+    );
     return value;
+  }
+
+  private recordRead(
+    operation: "sample" | "readPointAtOrBefore",
+    evalCount: number,
+    startedAt: number,
+    sortedAscending: boolean,
+    regularlySpaced: boolean,
+    distinctBlocksVisited: number | null,
+    storeSegmentCount: number,
+  ): void {
+    this.profile.recordRead({
+      storeId: this.profile.storeId,
+      operation,
+      evalCount,
+      durationMs: performance.now() - startedAt,
+      sortedAscending,
+      regularlySpaced,
+      distinctBlocksVisited,
+      storeSegmentCount,
+      frame: frameClock.frame(),
+    });
+  }
+
+  private emitWrite(
+    record: Omit<WriteRecord, "storeId" | "insertion" | "durationMs" | "phaseDurationMs">,
+  ): void {
+    const phaseDurationMs = this.insertTimer.snapshot();
+    const durationMs =
+      phaseDurationMs.validation +
+      phaseDurationMs.locating +
+      phaseDurationMs.flattening +
+      phaseDurationMs.overlay +
+      phaseDurationMs.equality +
+      phaseDurationMs.rechunking +
+      phaseDurationMs.splicing;
+    const finalized: WriteRecord = {
+      storeId: this.profile.storeId,
+      insertion: ++this.profile.insertionCount,
+      ...record,
+      durationMs,
+      phaseDurationMs,
+    };
+    this.profile.recordWrite(finalized);
   }
 
   private findContainingSegment(t: number): SegmentLocation | null {
@@ -163,6 +345,12 @@ export class SignalSegmentStore {
       lowerBoundBy(this.blocks, range.end, blockStart),
     );
   }
+}
+
+function countSegments(blocks: readonly SegmentBlock[]): number {
+  let total = 0;
+  for (let i = 0; i < blocks.length; i++) total += blockLength(blocks[i]!);
+  return total;
 }
 
 function blockLength(block: SegmentBlock): number {

@@ -21,6 +21,7 @@ import {
   type TimelineLayout,
   type TimelinePlayback,
 } from "./timelineInteractionModel.ts";
+import { frameClock } from "../data/signal/storeProfile.ts";
 
 export type { HoverInfo, TimelineLayout, TimelinePlayback } from "./timelineInteractionModel.ts";
 
@@ -338,6 +339,15 @@ export class Timeline {
   private draw = (): void => {
     if (!(this.plot.cssWidth > 0) || !(this.plot.cssHeight > 0)) return;
 
+    frameClock.tickFrame();
+    try {
+      this.drawBody();
+    } finally {
+      frameClock.endFrame();
+    }
+  };
+
+  private drawBody(): void {
     const wallNow = Date.now();
     this.advanceFollowNow(wallNow);
 
@@ -393,7 +403,7 @@ export class Timeline {
     frame.drawTimeAxis(this.state.newsHeight, this.config.minTickPx);
     this.updateNowLine(wallNow);
     this.scheduleClock(timePerDevicePx / 2, wallNow, hasVisibleRetry);
-  };
+  }
 
   private advanceFollowNow(now: number): void {
     if (this.state.playback.mode !== "following") return;
