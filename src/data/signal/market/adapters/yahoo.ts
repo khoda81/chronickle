@@ -1,7 +1,12 @@
 /** Interval-aware Yahoo Finance chart adapter for futures, equities, and indices. */
 
 import type { Sample } from "../../sample.ts";
-import { createPollingSignalSource, type AdapterBatch, type SignalAdapter } from "../../fetcher.ts";
+import {
+  createPollingSignalSource,
+  demandSampleSpacingMs,
+  type AdapterBatch,
+  type SignalAdapter,
+} from "../../fetcher.ts";
 import { logPriceSamples, type PricePoint } from "../price.ts";
 
 const YAHOO_CHART_API = "https://query2.finance.yahoo.com/v8/finance/chart";
@@ -62,8 +67,8 @@ export function createYahooAdapter(opts: YahooAdapterOptions): SignalAdapter {
       pending.clear();
     },
 
-    resolve({ range, maxDeltaTMs }) {
-      return chooseInterval(maxDeltaTMs, range.start, now()).periodMs;
+    resolve(demand) {
+      return chooseInterval(demandSampleSpacingMs(demand), demand.range.start, now()).periodMs;
     },
 
     async fetchInterval({ range, resolutionMs }, signal) {

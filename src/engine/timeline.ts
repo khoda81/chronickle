@@ -2,7 +2,7 @@
 
 import type { EventSet } from "../domain.ts";
 import type { EventQueryResult } from "../data/events/broker.ts";
-import type { Subscription, ReadRequest, SignalView } from "../data/signal/broker.ts";
+import type { Subscription, SignalView } from "../data/signal/broker.ts";
 import type { MutableSample } from "../data/signal/sample.ts";
 import { Interval } from "../core/interval.ts";
 import type { MutableCanvasSize } from "./coordinates.ts";
@@ -12,7 +12,6 @@ import type { WaveletMode } from "./wavelet.ts";
 import { DEFAULT_MIN_TICK_PX } from "./gfx/axis.ts";
 import type { Frame } from "./gfx/context.ts";
 import { fitStackLayout, signalRowCollapseProgress } from "./gfx/layout.ts";
-import { BrokerDemand } from "../data/index.ts";
 import {
   TimelineInteractionModel,
   normalizePlayback,
@@ -24,18 +23,12 @@ import {
 
 export type { HoverInfo, TimelineLayout, TimelinePlayback } from "./timelineInteractionModel.ts";
 
-export type DataReader = (request: ReadRequest) => SignalView;
 export type SampleAtReader = (time: number, out: MutableSample) => boolean;
-export type DataSubscriber = (
-  demand: BrokerDemand,
-  onChange: () => void,
-  signal: AbortSignal,
-) => Subscription;
+export type DataSubscriber = (onChange: () => void, signal: AbortSignal) => Subscription;
 export type EventSource = (range: Interval) => EventQueryResult;
 
 export interface SignalRow {
   readonly id: string;
-  readonly read: DataReader;
   readonly readSampleAt: SampleAtReader;
   readonly subscribe: DataSubscriber;
   readonly palette: PaletteName;
@@ -45,7 +38,6 @@ export interface SignalRow {
 }
 
 interface ActiveSignalSubscription {
-  demand: BrokerDemand;
   readonly subscription: Subscription;
   readonly controller: AbortController;
 }
@@ -254,8 +246,6 @@ export class Timeline {
     const runtime = this.rows.find(runtime => runtime.row.id === id);
     if (runtime === undefined || runtime.waveletMode === mode) return;
     runtime.waveletMode = mode;
-    runtime.subscription?.controller.abort();
-    runtime.subscription = null;
     this.reqDraw();
   }
 
@@ -302,30 +292,19 @@ export class Timeline {
     }
   }
 
-  private syncPriceSubscription(index: number, demand: BrokerDemand): void {
+  private readSignal(index: number, evalTime: Float64Array): SignalView {
     const runtime = this.rows[index];
-    if (runtime === undefined) return;
-    const active = runtime.subscription;
-    const previous = active?.demand;
-    if (
-      previous !== undefined &&
-      previous.range.start === demand.range.start &&
-      previous.range.end === demand.range.end &&
-      previous.maxDeltaTMs === demand.maxDeltaTMs
-    ) {
-      return;
+    if (runtime === undefined) {
+      throw new Error(`Missing signal row ${index}`);
     }
-    if (active !== null) {
-      active.demand = demand;
-      active.subscription.update(demand);
-      return;
+    if (runtime.subscription === null) {
+      const controller = new AbortController();
+      runtime.subscription = {
+        controller,
+        subscription: runtime.row.subscribe(() => this.reqDraw(), controller.signal),
+      };
     }
-    const controller = new AbortController();
-    runtime.subscription = {
-      demand,
-      controller,
-      subscription: runtime.row.subscribe(demand, () => this.reqDraw(), controller.signal),
-    };
+    return runtime.subscription.subscription.read(evalTime);
   }
 
   private disposeSignalSubscriptions(): void {
@@ -359,7 +338,6 @@ export class Timeline {
     frame.events().drawRow(this.state.events, this.feedColorOf, this.state.hovered, eventY);
 
     const signalRows = frame.signalRows(this.state.newsHeight);
-    let hasVisibleRetry = false;
     for (let index = 0; index < this.rows.length; index++) {
       const runtime = this.rows[index]!;
       const { row, height: rowHeight, waveletMode } = runtime;
@@ -371,19 +349,13 @@ export class Timeline {
         this.interaction.activeBoundary,
       );
       this.overlay?.setRowCollapseProgress(row.id, collapseProgress);
-      const rowHasRetry = signalRow.draw({
+      signalRow.draw({
         verticalOffset: runtime.verticalOffset,
         logGain: priceScale,
         waveletMode,
         palette: runtime.palette,
-        wallNow,
-        read: (demand, request) => {
-          this.syncPriceSubscription(index, demand);
-          return row.read(request);
-        },
+        read: evalTime => this.readSignal(index, evalTime),
       });
-
-      hasVisibleRetry ||= rowHasRetry;
     }
     this.updateCrosshairOverlay();
     this.drawSignalHoverTooltips(frame);
@@ -392,7 +364,7 @@ export class Timeline {
     frame.fillRectPx(0, this.state.newsHeight, width, 1, "rgba(255,255,255,0.3)");
     frame.drawTimeAxis(this.state.newsHeight, this.config.minTickPx);
     this.updateNowLine(wallNow);
-    this.scheduleClock(timePerDevicePx / 2, wallNow, hasVisibleRetry);
+    this.scheduleClock(timePerDevicePx / 2, wallNow);
   };
 
   private advanceFollowNow(now: number): void {
@@ -478,22 +450,14 @@ export class Timeline {
     );
   }
 
-  private scheduleClock(
-    timePerDevicePx: number,
-    renderedNow: number,
-    hasVisibleRetry: boolean,
-  ): void {
+  private scheduleClock(timePerDevicePx: number, renderedNow: number): void {
     if (this.nowTimer !== null) clearTimeout(this.nowTimer);
     let delayMs = this.state.timeInterval.start - renderedNow;
 
     if (this.state.playback.mode === "following") delayMs = timePerDevicePx;
     else if (renderedNow > this.state.timeInterval.end) delayMs = Number.POSITIVE_INFINITY;
 
-    // A broker status update redraws immediately when a retry starts or ends.
-    // This clock keeps the visible countdown current without a needless 60 fps
-    // loop: the human-scale label changes materially at most once per second.
     delayMs = Math.max(delayMs, timePerDevicePx);
-    if (hasVisibleRetry) delayMs = Math.min(delayMs, 1_000);
     if (!Number.isFinite(delayMs)) return;
 
     this.nowTimer = setTimeout(

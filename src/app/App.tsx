@@ -95,9 +95,8 @@ export function App() {
 
       return {
         id: key,
-        read: request => broker.read(request),
         readSampleAt: (time, out) => broker.readPointAtOrBefore(time, out),
-        subscribe: (demand, onChange, signal) => broker.subscribe(demand, onChange, signal),
+        subscribe: (onChange, signal) => broker.subscribe(onChange, signal),
         palette: chart.palette,
         waveletMode: chart.waveletMode,
         verticalOffset: chart.verticalOffset,

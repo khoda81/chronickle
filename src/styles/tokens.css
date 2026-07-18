@@ -51,18 +51,9 @@
   --color-surface-subtle: rgba(255, 255, 255, 0.03);
   --color-surface-hover: rgba(124, 196, 255, 0.08);
 
-  /* Timeline canvas status bar */
-  --timeline-status-font: 9px var(--font-data);
+  /* Timeline sample-density strip */
   --timeline-status-density-empty: rgb(8 13 23);
   --timeline-status-density-full: rgb(118 130 145);
-  --timeline-status-request-empty: rgb(11 17 27);
-  --timeline-status-pending: rgb(242, 214, 54);
-  --timeline-status-pending-text: #f3f8fc;
-  --timeline-status-pending-shadow: rgba(0, 0, 0, 0.68);
-  --timeline-status-retrying: rgb(132 48 61);
-  --timeline-status-retrying-text: #f3f8fc;
-  --timeline-status-retrying-shadow: rgba(0, 0, 0, 0.68);
-  --timeline-status-divider: rgba(255, 255, 255, 0.18);
 
   /* Floating surfaces */
   --glass-fill: rgba(9, 15, 27, 0.34);

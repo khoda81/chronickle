@@ -1,7 +1,11 @@
 /** Interval-capable Binance kline adapter. */
 
 import { Interval } from "../../../../core/interval.ts";
-import { createPollingSignalSource, type SignalAdapter } from "../../fetcher.ts";
+import {
+  createPollingSignalSource,
+  demandSampleSpacingMs,
+  type SignalAdapter,
+} from "../../fetcher.ts";
 import { pickResolution } from "../../resolution.ts";
 import { logPriceSamples, type PricePoint } from "../price.ts";
 
@@ -46,8 +50,8 @@ export function createBinanceAdapter(opts: BinanceAdapterOptions): SignalAdapter
       return Math.min(30_000, 1_000 * 2 ** (attempt - 1));
     },
 
-    resolve({ maxDeltaTMs }) {
-      return pickResolution(PERIODS, maxDeltaTMs);
+    resolve(demand) {
+      return pickResolution(PERIODS, demandSampleSpacingMs(demand));
     },
 
     async fetchInterval({ range, resolutionMs: periodMs }, signal) {

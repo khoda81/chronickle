@@ -1,5 +1,5 @@
 import { Interval } from "../../core/interval.ts";
-import type { BrokerDemand, ReadRequest, SignalView } from "../../data/index.ts";
+import type { SignalView } from "../../data/index.ts";
 import { kernelContext, type WaveletMode } from "../wavelet.ts";
 import type { PaletteName } from "../ramp.ts";
 import type { Frame } from "./context.ts";
@@ -16,13 +16,12 @@ export interface SignalRowDrawOptions {
   readonly logGain: number;
   readonly waveletMode: WaveletMode;
   readonly palette: PaletteName;
-  readonly wallNow: number;
-  readonly read: (demand: BrokerDemand, request: ReadRequest) => SignalView;
+  readonly read: (evalTime: Float64Array) => SignalView;
 }
 
 export interface SignalRowLayer extends SignalRowLayout {
-  /** Draw the heatmap, status strip, and separator. True when a retry is visible. */
-  draw(options: SignalRowDrawOptions): boolean;
+  /** Draw the heatmap, sample-density strip, and separator. */
+  draw(options: SignalRowDrawOptions): void;
   /** Draw the canvas anchor/connector and resolve the matching DOM tooltip rectangle. */
   drawTooltip(anchorX: number, cursorX: number, text: string): SignalTooltipPlacement;
 }
@@ -96,8 +95,8 @@ class SignalRowImpl implements SignalRowLayer {
     this.drawable = layout.drawable;
   }
 
-  draw(options: SignalRowDrawOptions): boolean {
-    if (!this.drawable) return false;
+  draw(options: SignalRowDrawOptions): void {
+    if (!this.drawable) return;
 
     const { frame } = this;
     const resources = signalRowResources(frame.ctx, this.rowId);
@@ -122,11 +121,7 @@ class SignalRowImpl implements SignalRowLayer {
       evalTime[sample] = visibleInterval.start + (sample - padLeft) * gridStepMs;
     }
 
-    const demand = {
-      range: Interval.create(evalTime[0]!, evalTime[edgeCount - 1]!),
-      maxDeltaTMs: gridStepMs,
-    } satisfies BrokerDemand;
-    const view = options.read(demand, { evalTime });
+    const view = options.read(evalTime);
     const density = frame
       .heatmap(this.rowId)
       .drawWaveletField(
@@ -138,11 +133,8 @@ class SignalRowImpl implements SignalRowLayer {
         scaleInterval,
         options.palette,
       );
-    const hasVisibleRetry = frame
-      .statusBar()
-      .draw(density, view.requests, this.top + this.height - COVERAGE_BAR_HEIGHT, options.wallNow);
+    frame.statusBar().draw(density, this.top + this.height - COVERAGE_BAR_HEIGHT);
     frame.fillRectPx(0, this.top + this.height - 1, frame.width, 1, "rgba(255,255,255,0.18)");
-    return hasVisibleRetry;
   }
 
   drawTooltip(anchorX: number, cursorX: number, text: string): SignalTooltipPlacement {

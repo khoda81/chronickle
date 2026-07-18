@@ -1,8 +1,17 @@
 /** Demand-aware adapter scheduling for sampled real-valued time series. */
 
 import { Interval, IntervalSet } from "../../core/interval.ts";
-import { BrokerDemand } from "./broker.ts";
 import type { Sample } from "./sample.ts";
+
+/** Regular query geometry. Each adapter decides how, or whether, to satisfy it. */
+export interface SignalDemand {
+  readonly range: Interval;
+  readonly sampleCount: number;
+}
+
+export function demandSampleSpacingMs(demand: SignalDemand): number {
+  return Interval.span(demand.range) / (demand.sampleCount - 1);
+}
 
 /** Concrete source request after native resolution selection and range expansion. */
 export interface AdapterPlan {
@@ -19,37 +28,14 @@ export interface AdapterBatch {
   readonly sampleResolutionMs?: number;
 }
 
-/** A cache delivery is self-describing and independent of a broker request. */
-export interface AdapterDelivery extends AdapterBatch {
-  readonly resolutionMs: number;
-}
-
-interface AcquisitionActivityBase {
-  readonly range: Interval;
-  readonly resolutionMs: number;
-}
-
-export type AcquisitionActivity =
-  | (AcquisitionActivityBase & { readonly state: "pending" })
-  | (AcquisitionActivityBase & {
-      readonly state: "retrying";
-      readonly attempt: number;
-      readonly message: string;
-      readonly retryAtMs: number;
-    });
-
 export interface SignalSink {
-  next(batch: AdapterDelivery): void;
-  status(activities: readonly AcquisitionActivity[]): void;
-  error(
-    error: unknown,
-    activity: Extract<AcquisitionActivity, { readonly state: "retrying" }>,
-  ): void;
+  next(samples: readonly Sample[]): void;
+  error(error: unknown): void;
 }
 
 /** One long-lived acquisition session per broker/source. */
 export interface AdapterSession {
-  setDemands(demands: readonly BrokerDemand[]): void;
+  setDemands(demands: readonly SignalDemand[]): void;
   clearCache(): void;
 }
 
@@ -72,7 +58,7 @@ export interface IntervalLoader {
   readonly sourceWideBackoff?: boolean;
   readonly now?: () => number;
 
-  resolve(demand: BrokerDemand): number;
+  resolve(demand: SignalDemand): number;
   fetchInterval(plan: AdapterPlan, signal: AbortSignal): Promise<AdapterBatch>;
   retryDelayMs?(error: unknown, attempt: number): number;
   clearCache?(): void;
@@ -102,7 +88,6 @@ interface FailedWork {
   readonly state: "failed";
   readonly work: Work;
   readonly retryAtMs: number;
-  readonly message: string;
 }
 
 type ActiveWork = RunningWork | FailedWork;
@@ -150,7 +135,6 @@ class PollingSession implements AdapterSession {
   private live: LiveLease | null = null;
   private scheduled: ScheduledReconcile | null = null;
   private sourceBackoffUntilMs: number | null = null;
-  private lastActivities: readonly AcquisitionActivity[] = [];
 
   constructor(
     private readonly loader: IntervalLoader,
@@ -162,7 +146,7 @@ class PollingSession implements AdapterSession {
     else signal.addEventListener("abort", this.close, { once: true });
   }
 
-  setDemands(demands: readonly BrokerDemand[]): void {
+  setDemands(demands: readonly SignalDemand[]): void {
     this.assertOpen();
     this.plans = resolveDemands(this.loader, demands);
     this.reconcile();
@@ -176,7 +160,6 @@ class PollingSession implements AdapterSession {
     this.sourceBackoffUntilMs = null;
     this.cancelScheduled();
     this.loader.clearCache?.();
-    this.emitStatus();
     this.reconcile();
   }
 
@@ -205,7 +188,6 @@ class PollingSession implements AdapterSession {
     if (this.active !== null) {
       if (!this.isStillWanted(this.active.work)) {
         this.abortActive();
-        this.emitStatus();
       } else if (this.active.state === "failed") {
         if (wallNow < this.active.retryAtMs) {
           this.schedule(this.active.retryAtMs);
@@ -234,7 +216,6 @@ class PollingSession implements AdapterSession {
       return;
     }
 
-    this.emitStatus();
     const futureStartMs = this.nextFutureStart(wallNow);
     if (this.live !== null) {
       const nextAtMs =
@@ -266,57 +247,6 @@ class PollingSession implements AdapterSession {
     if (this.scheduled === null) return;
     clearTimeout(this.scheduled.handle);
     this.scheduled = null;
-  }
-
-  private emitStatus(): void {
-    if (this.signal.aborted) return;
-    const activities = this.pendingActivities(this.now());
-    if (this.active !== null) {
-      const { plan } = this.active.work;
-      if (this.active.state === "fetching") {
-        activities.push({ state: "pending", range: plan.range, resolutionMs: plan.resolutionMs });
-      } else {
-        activities.push({
-          state: "retrying",
-          range: plan.range,
-          resolutionMs: plan.resolutionMs,
-          attempt: this.active.work.attempt,
-          message: this.active.message,
-          retryAtMs: this.active.retryAtMs,
-        });
-      }
-    }
-    if (sameActivities(activities, this.lastActivities)) return;
-    this.lastActivities = activities;
-    this.sink.status(activities);
-  }
-
-  /** All demanded native-resolution gaps, excluding work already in the active lane. */
-  private pendingActivities(wallNow: number): AcquisitionActivity[] {
-    const pending = new Map<number, IntervalSet>();
-    for (const plan of this.plans) {
-      let ranges = pending.get(plan.resolutionMs);
-      if (ranges === undefined) {
-        ranges = new IntervalSet();
-        pending.set(plan.resolutionMs, ranges);
-      }
-
-      const historical = Interval.clampEnd(plan.range, wallNow);
-      const blockers = this.blockers(plan.resolutionMs, historical, wallNow);
-      if (this.active !== null && this.active.work.plan.resolutionMs <= plan.resolutionMs) {
-        blockers.add(Interval.intersection(this.active.work.plan.range, historical));
-      }
-      for (const gap of blockers.gaps(historical)) ranges.add(gap);
-
-      const future = Interval.create(Math.max(plan.range.start, wallNow), plan.range.end);
-      if (!Interval.isEmpty(future)) ranges.add(future);
-    }
-
-    const out: AcquisitionActivity[] = [];
-    for (const [resolutionMs, ranges] of pending) {
-      for (const range of ranges.view()) out.push({ state: "pending", range, resolutionMs });
-    }
-    return out;
   }
 
   /** Wake a future-only demand when it first becomes actionable. */
@@ -455,7 +385,6 @@ class PollingSession implements AdapterSession {
   private start(work: Work): void {
     const running: RunningWork = { state: "fetching", work, controller: new AbortController() };
     this.active = running;
-    this.emitStatus();
     if (this.active === running) void this.run(running);
   }
 
@@ -479,7 +408,6 @@ class PollingSession implements AdapterSession {
     this.finishWork(running.work, batch);
     if (this.signal.aborted || this.active !== running) return;
     this.active = null;
-    this.emitStatus();
     this.reconcile();
   }
 
@@ -505,7 +433,7 @@ class PollingSession implements AdapterSession {
           : wallNow + (this.policy.livePollDelayMs ?? defaultPollDelay(work.plan.resolutionMs));
     }
 
-    this.sink.next({ ...batch, resolutionMs });
+    this.sink.next(batch.samples);
   }
 
   private failWork(work: Work, error: unknown): void {
@@ -513,23 +441,13 @@ class PollingSession implements AdapterSession {
     const proposed = this.loader.retryDelayMs?.(error, attempt) ?? DEFAULT_RETRY(attempt);
     const delayMs = validDelay(proposed) ? Math.max(100, proposed) : DEFAULT_RETRY(attempt);
     const retryAtMs = this.now() + delayMs;
-    const message = error instanceof Error ? error.message : String(error);
-    const failed: FailedWork = { state: "failed", work: { ...work, attempt }, retryAtMs, message };
+    const failed: FailedWork = { state: "failed", work: { ...work, attempt }, retryAtMs };
     this.active = failed;
     if (this.loader.sourceWideBackoff === true) {
       this.sourceBackoffUntilMs = Math.max(this.sourceBackoffUntilMs ?? -Infinity, retryAtMs);
     }
-    const activity: Extract<AcquisitionActivity, { readonly state: "retrying" }> = {
-      state: "retrying",
-      range: work.plan.range,
-      resolutionMs: work.plan.resolutionMs,
-      attempt,
-      message,
-      retryAtMs,
-    };
-    this.emitStatus();
     if (this.active === failed) this.schedule(retryAtMs);
-    this.sink.error(error, activity);
+    this.sink.error(error);
   }
 
   private abortActive(): void {
@@ -560,7 +478,7 @@ function createPolicy(loader: IntervalLoader): PollingPolicy {
 
 function resolveDemands(
   loader: IntervalLoader,
-  demands: readonly BrokerDemand[],
+  demands: readonly SignalDemand[],
 ): ResolvedDemand[] {
   const plans = demands.map(demand => {
     validateDemand(demand);
@@ -618,9 +536,12 @@ function liveTail(plan: ResolvedDemand, wallNow: number): Interval {
   return Interval.create(Math.max(plan.range.start, wallNow - 2 * plan.resolutionMs), wallNow);
 }
 
-function validateDemand(demand: BrokerDemand): void {
-  if (!(demand.maxDeltaTMs > 0) || !Number.isFinite(demand.maxDeltaTMs)) {
-    throw new Error(`SignalAdapter: invalid requested resolution ${demand.maxDeltaTMs}`);
+function validateDemand(demand: SignalDemand): void {
+  if (Interval.isEmpty(demand.range)) {
+    throw new Error("SignalAdapter: empty demand range");
+  }
+  if (!Number.isInteger(demand.sampleCount) || demand.sampleCount < 2) {
+    throw new Error(`SignalAdapter: invalid demand sample count ${demand.sampleCount}`);
   }
 }
 
@@ -636,30 +557,6 @@ function validateBatch(requiredInterval: Interval, batch: AdapterBatch): void {
       `SignalAdapter: invalid returned sample resolution ${batch.sampleResolutionMs}`,
     );
   }
-}
-
-function sameActivities(
-  a: readonly AcquisitionActivity[],
-  b: readonly AcquisitionActivity[],
-): boolean {
-  if (a.length !== b.length) return false;
-  return a.every((activity, index) => sameActivity(activity, b[index]!));
-}
-
-function sameActivity(a: AcquisitionActivity, b: AcquisitionActivity): boolean {
-  if (
-    a.state !== b.state ||
-    a.resolutionMs !== b.resolutionMs ||
-    !Interval.equals(a.range, b.range)
-  ) {
-    return false;
-  }
-  if (a.state === "pending") return true;
-  if (b.state === "pending" || a.attempt !== b.attempt) return false;
-  return (
-    a.state !== "retrying" ||
-    (b.state === "retrying" && a.message === b.message && a.retryAtMs === b.retryAtMs)
-  );
 }
 
 function defaultPollDelay(resolutionMs: number): number {

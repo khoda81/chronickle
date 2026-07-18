@@ -4,8 +4,8 @@ export const DEFAULT_NEWS_HEIGHT = 110;
 export const MIN_NEWS_HEIGHT = 64;
 export const DEFAULT_SIGNAL_ROW_HEIGHT = 130;
 
-/** Sample density and request diagnostics above every signal heatmap. */
-export const COVERAGE_BAR_HEIGHT = 16;
+/** Sample-density strip below every signal heatmap. */
+export const COVERAGE_BAR_HEIGHT = 2;
 /** A heatmap needs at least two CSS pixels below its status strip. */
 const MIN_HEATMAP_HEIGHT = 2;
 /** Height over which a boundary drag transitions into the remove affordance. */
@@ -18,10 +18,6 @@ const HEATMAP_FIELD_HEIGHT = 640;
 export const RESIZE_HANDLE_RADIUS = 6;
 
 export const QUALITY_STEPS = 256;
-/** Vertical height in CSS pixels; density bins themselves are one device pixel wide. */
-export const DATA_HEIGHT = 2;
-export const REQUEST_HEIGHT = COVERAGE_BAR_HEIGHT - DATA_HEIGHT;
-export const REQUEST_UNDERLINE_DEVICE_PX = 2;
 
 export interface SignalRowLayout {
   readonly top: number;
@@ -41,7 +37,7 @@ export function signalRowLayout(top: number, height: number): SignalRowLayout {
     height,
     heatmapTop,
     heatmapHeight,
-    tooltipPosition: heatmapTop + heatmapHeight + DATA_HEIGHT / 2,
+    tooltipPosition: heatmapTop + heatmapHeight + COVERAGE_BAR_HEIGHT / 2,
     drawable: heatmapHeight > MIN_HEATMAP_HEIGHT,
   };
 }

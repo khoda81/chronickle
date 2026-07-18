@@ -1,8 +1,8 @@
 /**
  * Nobitex adapter for the subscription contract.
  *
- * Wraps the existing `fetchOhlc` and maps the broker's `maxDeltaTMs` to the
- * coarsest Nobitex TradingView resolution whose period is `<= maxDeltaTMs`.
+ * Wraps the existing `fetchOhlc` and maps the requested query grid to the
+ * coarsest retained Nobitex TradingView resolution that can represent it.
  * Nobitex OHLC returns timestamps in epoch **seconds**; this adapter
  * converts to milliseconds at the boundary so the rest of the data layer
  * only ever sees ms.
@@ -14,7 +14,11 @@
  */
 
 import { Interval } from "../../../../core/interval.ts";
-import { createPollingSignalSource, type SignalAdapter } from "../../fetcher.ts";
+import {
+  createPollingSignalSource,
+  demandSampleSpacingMs,
+  type SignalAdapter,
+} from "../../fetcher.ts";
 import { pickResolution } from "../../resolution.ts";
 import { fetchOhlc, ohlcToLogPriceSamples } from "./nobitex.ts";
 
@@ -60,7 +64,7 @@ export function createNobitexAdapter(opts: NobitexAdapterOptions = {}): SignalAd
     },
 
     resolve(req) {
-      return pickResolution(NOBITEX_PERIODS_MS, req.maxDeltaTMs);
+      return pickResolution(NOBITEX_PERIODS_MS, demandSampleSpacingMs(req));
     },
 
     async fetchInterval(req, signal) {
